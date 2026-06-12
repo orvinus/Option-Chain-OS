@@ -44,7 +44,9 @@ class InstrumentToken:
 
     @property
     def exchange_type(self) -> int:
-        return {"NSE": 1, "NFO": 2, "BSE": 3, "BFO": 4, "MCX": 5, "CDS": 13}[self.exchange]
+        # XTS ExchangeSegments enum (NOT the legacy Angel codes): NSECM=1, NSEFO=2,
+        # NSECD=3, BSECM=11, BSEFO=12. SENSEX options live on BSEFO(12).
+        return {"NSE": 1, "NFO": 2, "CDS": 3, "BSE": 11, "BFO": 12}[self.exchange]
 
 
 @dataclass
@@ -75,8 +77,8 @@ def _get_lock(symbol: str) -> asyncio.Lock:
 # ---------------------------------------------------------------- source: XTS master
 
 # Known index underlyings — used to tag instrumenttype correctly when normalising.
-# Kept in sync with the "Indices" sector in data/symbols.json.
-_INDEX_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+# Kept in sync with the "Indices" sector in data/symbols.json. Includes BSE indices.
+_INDEX_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX"}
 
 # Column indices in an NSEFO "Options" master line (see XTS master Terminology):
 # ExchangeSegment|ExchangeInstrumentID|InstrumentType|Name|Description|Series|
@@ -117,12 +119,15 @@ def _parse_iso_expiry(s: str) -> date | None:
 
 
 def _master_line_to_row(line: str) -> dict | None:
-    """Convert one NSEFO master 'Options' line into a normalised scripmaster row."""
+    """Convert one FO master 'Options' line (NSEFO or BSEFO) into a normalised row."""
     parts = line.split("|")
     if len(parts) <= _COL_OPTION_TYPE:
         return None
     if parts[_COL_INSTRUMENT_TYPE].strip() != _INSTRUMENT_TYPE_OPTIONS:
         return None
+    # parts[0] is the ExchangeSegment ("NSEFO" | "BSEFO") — tag the exchange so
+    # downstream subscription picks the correct XTS segment (NFO=2 / BFO=12).
+    exch_seg = "BFO" if parts[0].strip().upper() == "BSEFO" else "NFO"
     token = parts[_COL_INSTRUMENT_ID].strip()
     name = parts[_COL_NAME].strip().upper()
     if not token or not name:
@@ -149,14 +154,19 @@ def _master_line_to_row(line: str) -> dict | None:
         "expiry": expiry.strftime("%d%b%Y").upper(),
         "strike": strike,
         "instrumenttype": instrumenttype,
-        "exch_seg": "NFO",
+        "exch_seg": exch_seg,
         "lotsize": (parts[_COL_LOTSIZE].strip() or "0"),
         "option_type": opt_type,
     }
 
 
 async def _load_nsefo_master_rows(force_refresh: bool = False) -> list[dict]:
-    """Fetch + parse the full NSEFO options master once, cached for ``CACHE_TTL``."""
+    """Fetch + parse the full options master (NSEFO + BSEFO) once, cached for ``CACHE_TTL``.
+
+    Both segments are pulled in one ``/instruments/master`` call so NSE (NIFTY) and
+    BSE (SENSEX) options share a single cache. BSEFO may be empty/absent if the
+    appKey is not entitled to BSE market data — that's tolerated (NSE still works).
+    """
     global _master_rows, _master_fetched_at
     async with _master_lock:
         fresh = (
@@ -174,18 +184,24 @@ async def _load_nsefo_master_rows(force_refresh: bool = False) -> list[dict]:
             raise RuntimeError("Cannot fetch scrip data: session not authenticated.")
 
         log.info("scripmaster.master.start")
-        dump = await xts_client.get_master(sess.token, ["NSEFO"])
+        dump = await xts_client.get_master(sess.token, ["NSEFO", "BSEFO"])
         rows: list[dict] = []
+        nsefo = bsefo = 0
         for line in dump.splitlines():
             line = line.strip()
-            if not line or not line.upper().startswith("NSEFO"):
+            seg = line[:5].upper()
+            if seg not in ("NSEFO", "BSEFO"):
                 continue
             row = _master_line_to_row(line)
             if row:
                 rows.append(row)
+                if seg == "BSEFO":
+                    bsefo += 1
+                else:
+                    nsefo += 1
         _master_rows = rows
         _master_fetched_at = datetime.utcnow()
-        log.info("scripmaster.master.success", parsed=len(rows))
+        log.info("scripmaster.master.success", parsed=len(rows), nsefo=nsefo, bsefo=bsefo)
         return rows
 
 
@@ -279,7 +295,7 @@ def _is_symbol_option(row: dict, symbol: str) -> bool:
         return False
     if (row.get("instrumenttype") or "").upper() not in ("OPTIDX", "OPTSTK"):
         return False
-    if (row.get("exch_seg") or "").upper() != "NFO":
+    if (row.get("exch_seg") or "").upper() not in ("NFO", "BFO"):
         return False
     return True
 

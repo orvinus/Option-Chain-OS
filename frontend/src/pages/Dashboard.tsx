@@ -4,15 +4,13 @@ import { api } from "../api/rest";
 import { ConnectBanner } from "../components/ConnectBanner";
 import { ExpirySelect } from "../components/ExpirySelect";
 import { KPIBar } from "../components/KPIBar";
-import { NetOICalculator } from "../components/NetOICalculator";
-import { OIChangeChart, type OIMode } from "../components/OIChangeChart";
+import { OIChangeChart } from "../components/OIChangeChart";
 import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
 import { TimeframeBar } from "../components/TimeframeBar";
 import { TimeRangeSlider } from "../components/TimeRangeSlider";
 import { useOIChange } from "../hooks/useOIChange";
 import { useOIChangeRange } from "../hooks/useOIChangeRange";
-import { useOptionChainFull } from "../hooks/useOptionChainFull";
 import { useOIStream } from "../hooks/useOIStream";
 import type {
   HealthResponse,
@@ -54,14 +52,6 @@ function isoForSessionMinute(dateStr: string, min: number): string {
   return `${dateStr}T${p(hh)}:${p(mm)}:00+05:30`;
 }
 
-export type DashTab = "oi_change" | "oi_absolute" | "net_oi";
-
-const DASH_TABS: { id: DashTab; label: string }[] = [
-  { id: "oi_change", label: "OI Change" },
-  { id: "oi_absolute", label: "OI Absolute" },
-  { id: "net_oi", label: "Net OI Calculator" },
-];
-
 function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry> {
   const out: Record<string, SymbolEntry> = {};
   for (const g of groups) {
@@ -83,9 +73,7 @@ export function Dashboard() {
   const [switching, setSwitching] = useState(false);
   const [symbolError, setSymbolError] = useState<string | null>(null);
 
-  const [dashTab, setDashTab] = useState<DashTab>("oi_change");
-  const oiMode: OIMode = dashTab === "oi_absolute" ? "absolute" : "change";
-
+  // This build (Ayush Bhai branch) ships only the OI Change view.
   // Custom time-range selection (minutes from 09:15). `rangeMode` switches the
   // chart from preset timeframes to an explicit [from, to] window; `toAtLive`
   // keeps the right handle pinned to "now" so the window stays live until the
@@ -207,7 +195,6 @@ export function Dashboard() {
   // Drive the streaming hooks only when we have a valid F&O context.
   const activeTimeframe: Timeframe | null = authenticated && expiry && fnoEligible ? timeframe : null;
   const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null);
-  const initialOc = useOptionChainFull(activeTimeframe, expiry, fnoEligible ? symbol : null);
   const live = useOIStream(activeTimeframe, expiry, fnoEligible ? symbol : null);
 
   // ── Custom time-range mode ───────────────────────────────────────────────
@@ -280,20 +267,6 @@ export function Dashboard() {
   // the preset-timeframe live/REST data.
   const data = rangeMode ? range.data : presetData;
 
-  const optionChainMerged = useMemo(() => {
-    const liveOk =
-      live.optionChainData != null &&
-      activeTimeframe != null &&
-      live.optionChainData.timeframe === activeTimeframe &&
-      live.optionChainData.expiry === expiry;
-    const initialOk =
-      initialOc.data != null &&
-      activeTimeframe != null &&
-      initialOc.data.timeframe === activeTimeframe &&
-      initialOc.data.expiry === expiry;
-    return (liveOk ? live.optionChainData : null) ?? (initialOk ? initialOc.data : null);
-  }, [live.optionChainData, initialOc.data, activeTimeframe, expiry]);
-
   const hasMatchingSnapshot = useMemo(() => {
     if (activeTimeframe == null || expiry == null) return false;
     const ok = (d: typeof live.data) =>
@@ -301,30 +274,20 @@ export function Dashboard() {
     return ok(live.data) || ok(initial.data);
   }, [live.data, initial.data, activeTimeframe, expiry]);
 
-  const hasMatchingOptionChain = useMemo(() => {
-    if (activeTimeframe == null || expiry == null) return false;
-    const ok = (d: typeof live.optionChainData) =>
-      d != null && d.timeframe === activeTimeframe && d.expiry === expiry;
-    return ok(live.optionChainData) || ok(initialOc.data);
-  }, [live.optionChainData, initialOc.data, activeTimeframe, expiry]);
-
   const isLoading = rangeMode
     ? range.loading && !range.data
     : initial.loading && !hasMatchingSnapshot;
-  const isLoadingOc = initialOc.loading && !hasMatchingOptionChain;
 
   const liveSpot =
     health?.feed_connected && health.latest_spot != null && health.active_symbol === symbol
       ? health.latest_spot
       : null;
 
-  const showChart = dashTab === "oi_change" || dashTab === "oi_absolute";
-
   const noOiChangeInAtmWindow = useMemo(() => {
-    if (!showChart || !data || oiMode !== "change") return false;
+    if (!data) return false;
     const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow);
     return wr.length > 0 && wr.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, oiMode, atmWindow, liveSpot, showChart]);
+  }, [data, atmWindow, liveSpot]);
 
   const handleAuthenticated = useCallback(() => {
     setAuthenticated(true);
@@ -392,23 +355,7 @@ export function Dashboard() {
 
               {fnoEligible && (
                 <div className="flex flex-wrap items-center gap-4 pt-1 border-t border-border">
-                  <div className="flex flex-wrap items-center gap-1 bg-surface/50 rounded-lg p-0.5">
-                    {DASH_TABS.map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => setDashTab(t.id)}
-                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
-                          dashTab === t.id
-                            ? "bg-accent text-black shadow"
-                            : "text-muted hover:text-foreground"
-                        }`}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-
+                  <span className="text-xs font-medium text-accent">OI Change</span>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted">Strikes ATM ±</span>
                     <AtmWindowSelect value={atmWindow} max={ATM_MAX_WINDOW} onChange={setAtmWindow} />
@@ -445,14 +392,14 @@ export function Dashboard() {
               </div>
             )}
 
-            {fnoEligible && dashTab === "oi_change" && (
-              <KPIBar data={data} mode={oiMode} atmWindow={atmWindow} liveSpot={liveSpot} />
+            {fnoEligible && (
+              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} />
             )}
 
-            {fnoEligible && showChart && (
+            {fnoEligible && (
               <OIChangeChart
                 data={data}
-                mode={oiMode}
+                mode="change"
                 atmWindow={atmWindow}
                 isLoading={isLoading}
                 underlyingLabel={symbolDisplay}
@@ -461,23 +408,9 @@ export function Dashboard() {
               />
             )}
 
-            {fnoEligible && dashTab === "net_oi" && (
-              <NetOICalculator
-                data={optionChainMerged}
-                liveSpot={liveSpot}
-                atmWindow={atmWindow}
-                isLoading={isLoadingOc}
-              />
-            )}
-
             {fnoEligible && initial.error && !data && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Failed to load: {initial.error}
-              </div>
-            )}
-            {fnoEligible && initialOc.error && !optionChainMerged && dashTab === "net_oi" && (
-              <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
-                Failed to load option chain: {initialOc.error}
               </div>
             )}
             {fnoEligible && expiryError && expiries.length === 0 && (
@@ -485,7 +418,7 @@ export function Dashboard() {
                 Error loading expiries: {expiryError}
               </div>
             )}
-            {fnoEligible && showChart &&
+            {fnoEligible &&
               data &&
               data.rows.length > 0 &&
               noOiChangeInAtmWindow && (
@@ -499,25 +432,15 @@ export function Dashboard() {
                     <>
                       NSE session is <b>open</b> (server clock), so this usually means the feed is quiet, OI has not moved
                       versus the comparison snapshot, or DB flushes are stale — check <b>XTS feed</b>, <b>Last DB flush</b>,
-                      and <b>WS LIVE</b> in the header. Try another timeframe or wait for the next minute bucket.
-                      Switch to <b>OI Absolute</b> tab to confirm snapshots are updating.
+                      and <b>WS LIVE</b> in the header. Try a longer timeframe (OI refreshes from the exchange ~once/min).
                     </>
                   ) : (
                     <>
                       Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
-                      static end-of-day style OI, so intraday deltas stay flat. Switch to <b>OI Absolute</b> tab for the
-                      distribution.
+                      static end-of-day style OI, so intraday deltas stay flat.
                     </>
                   )}
                 </span>
-              </div>
-            )}
-            {fnoEligible && showChart && data && oiMode === "absolute" && (
-              <div className="panel p-2 text-xs text-slate-400/70 border border-slate-700/30 flex items-center gap-2">
-                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01" />
-                </svg>
-                Absolute OI shows the <b>latest snapshot</b> — values are identical across timeframes. Timeframe only affects <b>OI Change</b> calculations.
               </div>
             )}
           </>
@@ -525,7 +448,7 @@ export function Dashboard() {
       </main>
 
       <footer className="text-center text-xs text-muted py-6 mt-2">
-        Multi-symbol option-chain intelligence • Powered by Shrilakshmi/Symphony XTS WebSocket
+        NIFTY 50 &amp; SENSEX OI-change intelligence • Powered by Shrilakshmi/Symphony XTS WebSocket
       </footer>
     </div>
   );

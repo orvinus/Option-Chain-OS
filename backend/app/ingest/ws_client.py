@@ -81,10 +81,14 @@ class OptionFeedClient:
         tokens_provider: TokensProvider,
         index_token: str | None = None,
         active_symbol: str | None = None,
+        index_segment: int | None = None,
     ) -> None:
         self._queue = out_queue
         self._tokens_provider = tokens_provider
         self._index_token = index_token or settings.nifty_index_token
+        # Cash-market segment the index spot is subscribed on (NSECM for NIFTY,
+        # BSECM for SENSEX). Driven by the active symbol's exchange.
+        self._index_segment = index_segment or SEG_NSECM
         self._active_symbol = (active_symbol or settings.underlying_symbol or "NIFTY").upper()
 
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -144,6 +148,7 @@ class OptionFeedClient:
         new_tokens: list[InstrumentToken],
         new_index_token: str,
         new_symbol: str,
+        new_index_segment: int | None = None,
     ) -> None:
         """Atomically swap the live subscription set to a different underlying.
 
@@ -155,6 +160,7 @@ class OptionFeedClient:
         if not self._connected.is_set() or self._sio is None:
             self._token_meta = {t.token: t for t in new_tokens}
             self._index_token = new_index_token
+            self._index_segment = new_index_segment or SEG_NSECM
             self._active_symbol = new_symbol
             self._latest_underlying = None
             self._state.clear()
@@ -166,6 +172,7 @@ class OptionFeedClient:
 
         self._token_meta = {t.token: t for t in new_tokens}
         self._index_token = new_index_token
+        self._index_segment = new_index_segment or SEG_NSECM
         self._active_symbol = new_symbol
         self._latest_underlying = None
         self._state.clear()
@@ -324,7 +331,7 @@ class OptionFeedClient:
         if self._index_token:
             try:
                 touchline.append(
-                    {"exchangeSegment": SEG_NSECM, "exchangeInstrumentID": int(self._index_token)}
+                    {"exchangeSegment": self._index_segment, "exchangeInstrumentID": int(self._index_token)}
                 )
             except (TypeError, ValueError):
                 pass

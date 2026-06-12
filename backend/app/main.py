@@ -145,11 +145,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
             reg_entry = get_registry().get(rt.active_symbol)
             index_token = (reg_entry.spot_token if reg_entry else None) or settings.nifty_index_token
+            index_segment = (
+                xts_client.SEG_BSECM
+                if reg_entry and (reg_entry.exchange or "").upper() == "BSE"
+                else xts_client.SEG_NSECM
+            )
             feed = OptionFeedClient(
                 rt.tick_queue,
                 _resubscribe_provider,
                 index_token=index_token,
                 active_symbol=rt.active_symbol,
+                index_segment=index_segment,
             )
             await feed.start()
             rt.feed_client = feed

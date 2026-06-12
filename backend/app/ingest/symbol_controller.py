@@ -32,8 +32,17 @@ class SwitchResult:
     expiries: list[str]
 
 
+def _spot_segment(entry: SymbolEntry) -> int:
+    """XTS cash-market segment for the index/equity spot: BSECM(11) for BSE, else NSECM(1)."""
+    return xts_client.SEG_BSECM if (entry.exchange or "").upper() == "BSE" else xts_client.SEG_NSECM
+
+
 async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
-    """Return the XTS NSECM spot instrument id for ``entry``, caching it on the registry."""
+    """Return the XTS spot instrument id for ``entry``, caching it on the registry.
+
+    Uses the entry's exchange to pick the cash-market segment (NSECM for NIFTY,
+    BSECM for SENSEX) so the index/spot lookup hits the right exchange.
+    """
     if entry.spot_token:
         return entry.spot_token
     sess = get_session_manager()
@@ -41,10 +50,12 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
         log.warning("symbol_controller.no_session_for_spot_lookup", symbol=entry.symbol)
         return None
 
+    spot_seg = _spot_segment(entry)
+
     # Indices: resolve from the XTS index list by display/symbol name.
     if entry.kind == "index":
         try:
-            index_map = await xts_client.get_index_list(sess.token, xts_client.SEG_NSECM)
+            index_map = await xts_client.get_index_list(sess.token, spot_seg)
         except Exception as e:
             log.warning("symbol_controller.indexlist.error", symbol=entry.symbol, error=str(e))
             index_map = {}
@@ -64,7 +75,7 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
         return None
     sym = entry.symbol.upper().strip()
     for item in items:
-        if int(item.get("ExchangeSegment") or 0) != xts_client.SEG_NSECM:
+        if int(item.get("ExchangeSegment") or 0) != spot_seg:
             continue
         name = (item.get("Name") or "").upper().strip()
         series = (item.get("Series") or "").upper().strip()
@@ -74,7 +85,7 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
             return iid
     # Fallback: first NSECM equity match by name.
     for item in items:
-        if int(item.get("ExchangeSegment") or 0) != xts_client.SEG_NSECM:
+        if int(item.get("ExchangeSegment") or 0) != spot_seg:
             continue
         if (item.get("Name") or "").upper().strip() == sym:
             iid = str(item.get("ExchangeInstrumentID") or "").strip()
@@ -85,12 +96,12 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
     return None
 
 
-async def _fetch_spot_ltp(spot_token: str) -> float | None:
+async def _fetch_spot_ltp(spot_token: str, spot_seg: int = xts_client.SEG_NSECM) -> float | None:
     sess = get_session_manager()
     if not sess.authenticated:
         return None
     try:
-        return await xts_client.quote_ltp(sess.token, xts_client.SEG_NSECM, spot_token)
+        return await xts_client.quote_ltp(sess.token, spot_seg, spot_token)
     except Exception as e:
         log.warning("symbol_controller.spot_fetch.error", token=spot_token, error=str(e))
         return None
@@ -108,8 +119,9 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
 
     log.info("symbol_controller.switch.start", symbol=sym, fno=entry.fno_eligible)
 
+    spot_seg = _spot_segment(entry)
     spot_token = await _resolve_spot_token(entry)
-    spot = await _fetch_spot_ltp(spot_token) if spot_token else None
+    spot = await _fetch_spot_ltp(spot_token, spot_seg) if spot_token else None
 
     feed = rt.feed_client  # OptionFeedClient | None
     tokens: list[InstrumentToken] = []
@@ -132,7 +144,7 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
             rt.expiries = []
 
     if feed is not None and spot_token is not None:
-        await feed.swap_subscription(tokens, spot_token, sym)
+        await feed.swap_subscription(tokens, spot_token, sym, spot_seg)
 
     rt.tokens = tokens
     if spot is not None:
