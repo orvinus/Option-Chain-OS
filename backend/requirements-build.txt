@@ -1,0 +1,2 @@
+# Optional: Windows .exe packaging (see scripts/build-windows-exe.ps1)
+pyinstaller>=6.3.0

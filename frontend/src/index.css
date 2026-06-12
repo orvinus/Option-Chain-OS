@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: linear-gradient(
+      180deg,
+      #07090f 0%,
+      #0b0f17 60%,
+      #0a0d14 100%
+    );
+  }
+  ::selection {
+    background: #3b82f680;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-panel/80 border border-border rounded-2xl shadow-lg backdrop-blur;
+  }
+  .pill {
+    @apply px-3 py-1.5 rounded-full text-sm font-medium border border-border
+           text-gray-300 hover:text-white hover:border-accent/60 transition;
+  }
+  .pill-active {
+    @apply bg-accent/15 border-accent text-white;
+  }
+  .kpi {
+    @apply flex flex-col gap-1 px-4 py-3 rounded-xl border border-border bg-panel/60;
+  }
+}
+
+/* Dual-handle range slider (TimeRangeSlider). Two transparent <input type=range>
+   are stacked; only their thumbs receive pointer events so both handles work. */
+.range-input {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  pointer-events: none;
+}
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #3b82f6;
+  border: 2px solid #0b0f17;
+  box-shadow: 0 0 0 1px #3b82f6, 0 1px 4px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+.range-input::-moz-range-thumb {
+  pointer-events: auto;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: #3b82f6;
+  border: 2px solid #0b0f17;
+  box-shadow: 0 0 0 1px #3b82f6;
+  cursor: pointer;
+}
+.range-input::-moz-range-track {
+  background: transparent;
+}

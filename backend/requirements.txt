@@ -1,0 +1,31 @@
+# --- Web framework / ASGI ---
+fastapi>=0.115.4
+uvicorn[standard]>=0.32.0
+starlette>=0.41.2
+
+# --- Settings & validation ---
+pydantic>=2.11.0
+pydantic-settings>=2.6.1
+
+# --- Async DB ---
+SQLAlchemy>=2.0.36
+psycopg[binary]>=3.2.13
+alembic>=1.13.3
+greenlet>=3.1.1
+
+# --- Shrilakshmi Fintech / Symphony XTS market data (Socket.IO streaming) ---
+python-socketio[asyncio_client]>=5.11.0
+aiohttp>=3.10.0
+websocket-client>=1.8.0
+
+# --- HTTP / utilities ---
+httpx>=0.27.2
+python-dotenv>=1.0.1
+orjson>=3.10.10
+cachetools>=5.5.0
+tenacity>=9.0.0
+python-dateutil>=2.9.0.post0
+pytz>=2024.2
+
+# --- Observability ---
+structlog>=24.4.0
