@@ -160,6 +160,19 @@ class ReplayResponseOut(BaseModel):
     frames: list[ReplayFrameOut]
 
 
+class OITimeseriesPointOut(BaseModel):
+    ts: str
+    total_call_oi: int
+    total_put_oi: int
+
+
+class OITimeseriesResponseOut(BaseModel):
+    symbol: str
+    expiry: str
+    bucket: str
+    points: list[OITimeseriesPointOut]
+
+
 class InterpretationRowOut(BaseModel):
     strike: int
     call: str

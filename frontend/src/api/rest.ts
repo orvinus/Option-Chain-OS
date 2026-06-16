@@ -6,6 +6,7 @@ import type {
   LoginResponse,
   NiftyCrossCheckResponse,
   OIChangeResponse,
+  OITimeseriesResponse,
   OptionChainFullResponse,
   SpotResponse,
   SymbolsResponse,
@@ -97,6 +98,29 @@ export const api = {
    */
   oiChangeRange: (fromTs: string, toTs: string | undefined, expiry?: string, symbol?: string) =>
     getJSON<OIChangeResponse>("/api/oi-change", { from_ts: fromTs, to_ts: toTs, expiry, symbol }),
+  /**
+   * Total Call/Put OI per time bucket across a strike range, for the Charts page.
+   * `strikeMin`/`strikeMax` bound the ATM ± N window; `bucket` defaults to "1m"
+   * (higher intervals are aggregated into candles on the client).
+   */
+  oiTimeseries: (
+    symbol: string,
+    expiry: string,
+    strikeMin: number,
+    strikeMax: number,
+    bucket = "1m",
+    fromTs?: string,
+    toTs?: string,
+  ) =>
+    getJSON<OITimeseriesResponse>("/api/oi-timeseries", {
+      symbol,
+      expiry,
+      strike_min: String(strikeMin),
+      strike_max: String(strikeMax),
+      bucket,
+      from_ts: fromTs,
+      to_ts: toTs,
+    }),
   optionChainFull: (timeframe: Timeframe, expiry?: string, symbol?: string) =>
     getJSON<OptionChainFullResponse>("/api/option-chain-full", { timeframe, expiry, symbol }),
   symbols: () => getJSON<SymbolsResponse>("/api/symbols"),

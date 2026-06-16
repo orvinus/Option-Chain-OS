@@ -6,6 +6,7 @@ from . import (
     health,
     interpretation,
     oi_change,
+    oi_timeseries,
     option_chain,
     replay,
     spot,
@@ -20,6 +21,7 @@ api_router.include_router(health.router)
 api_router.include_router(spot.router)
 api_router.include_router(expiries.router)
 api_router.include_router(oi_change.router)
+api_router.include_router(oi_timeseries.router)
 api_router.include_router(option_chain.router)
 api_router.include_router(replay.router)
 api_router.include_router(interpretation.router)

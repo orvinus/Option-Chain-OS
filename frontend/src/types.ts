@@ -44,6 +44,21 @@ export interface ExpiriesResponse {
   expiries: string[];
 }
 
+/** One time bucket of total Call/Put OI for the Charts page — from `/api/oi-timeseries`. */
+export interface OITimeseriesPoint {
+  /** ISO-8601 IST bucket-start timestamp. */
+  ts: string;
+  total_call_oi: number;
+  total_put_oi: number;
+}
+
+export interface OITimeseriesResponse {
+  symbol: string;
+  expiry: string;
+  bucket: string;
+  points: OITimeseriesPoint[];
+}
+
 export interface SpotResponse {
   symbol: string;
   spot: number | null;
