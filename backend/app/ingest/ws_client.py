@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlencode
@@ -52,6 +53,14 @@ HEARTBEAT_TIMEOUT_SECONDS = 30
 BACKOFF_INITIAL = 2.0
 BACKOFF_MAX = 60.0
 CONNECT_TIMEOUT_SECONDS = 15
+
+# Self-heal: when EVERY subscription is rejected with an auth error ('Invalid
+# Token'), the feed auto re-logins (minting a fresh XTS token) and reconnects —
+# recovering from the daily token expiry / single-session invalidation with no
+# human action. Cooldown + attempt cap prevent a login storm if something else
+# (a 2nd backend, revoked creds) keeps invalidating the session.
+AUTO_RELOGIN_COOLDOWN_S = 120.0
+AUTO_RELOGIN_MAX_ATTEMPTS = 5
 
 
 TokensProvider = Callable[[], Awaitable[tuple[list[InstrumentToken], float]]]
@@ -110,6 +119,11 @@ class OptionFeedClient:
         self._sub_groups: dict[int, list[dict]] = {}
         self._last_tick_at: float = 0.0
         self._latest_underlying: float | None = None
+        # Self-heal state: set when an auth-failure re-login asks _connect_once to
+        # drop the socket and reconnect with the fresh token.
+        self._reconnect_requested: bool = False
+        self._last_auto_relogin: float = 0.0
+        self._auto_relogin_attempts: int = 0
 
     # ------------------------------------------------ public
 
@@ -293,6 +307,16 @@ class OptionFeedClient:
         # returns 400 "already subscribed" (tolerated below); if not, this restores
         # the stream. Either way data flows without tearing the connection down.
         await self._subscribe_all()
+
+        # Self-heal: if the subscribe found an auth failure and re-logged in, the
+        # socket we just opened is bound to the now-dead token. Drop it and return
+        # so the supervisor reconnects via _connect_once() with the fresh token.
+        if self._reconnect_requested:
+            self._reconnect_requested = False
+            log.info("ws.reconnect_after_self_heal")
+            await self._teardown()
+            return
+
         self._connected.set()
 
         self._last_tick_at = time.time()
@@ -350,9 +374,18 @@ class OptionFeedClient:
         # Strategy: try the batch first; if 400, fall back to one-at-a-time so that
         # new instruments (outside the previous range) actually get subscribed even
         # when stale ones are mixed in.
-        ok = 0
-        skipped = 0
-        errors = 0
+        #
+        # IMPORTANT: a per-instrument 400 is NOT always benign. XTS returns 400 for
+        # both "already subscribed" (data flows anyway) *and* genuine rejections
+        # (expired/invalid market-data token, unknown instrument). We must read the
+        # response body to tell them apart — otherwise a totally dead feed (every
+        # instrument rejected) gets logged as ``subscribe.success`` and the UI shows
+        # "connected" while no ticks ever arrive.
+        ok = 0  # newly subscribed
+        already = 0  # genuine "already subscribed" 400 — data flows anyway
+        rejected = 0  # real 400 rejection — NO data flows for these
+        errors = 0  # non-400 transport errors
+        reasons: Counter[str] = Counter()  # distinct XTS error descriptions seen
         try:
             for code, insts in groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
@@ -368,7 +401,19 @@ class OptionFeedClient:
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
-                                        skipped += 1  # already subscribed — data flows anyway
+                                        is_already, detail = _classify_400(he2.response)
+                                        if detail:
+                                            reasons[detail] += 1
+                                        if is_already:
+                                            already += 1  # data flows anyway
+                                        else:
+                                            rejected += 1
+                                            log.warning(
+                                                "ws.subscribe.rejected",
+                                                inst=inst,
+                                                code=code,
+                                                detail=detail,
+                                            )
                                     else:
                                         errors += 1
                                         log.warning("ws.subscribe.inst_error", inst=inst, code=code)
@@ -377,17 +422,87 @@ class OptionFeedClient:
                         else:
                             raise
             self._sub_groups = groups
-            log.info(
-                "ws.subscribe.success",
-                instruments=total,
-                newly_subscribed=ok,
-                already_present=skipped,
-                errors=errors,
-            )
+            # The feed is only live if at least one instrument is newly subscribed
+            # OR genuinely already-subscribed. If every instrument was *rejected*
+            # (real 400) or errored, no ticks will ever arrive — surface it loudly
+            # with the XTS reason instead of masking it as success.
+            live = ok + already
+            if live == 0 and (rejected or errors):
+                log.error(
+                    "ws.subscribe.all_failed",
+                    instruments=total,
+                    rejected=rejected,
+                    errors=errors,
+                    reasons=dict(reasons),
+                    hint="every instrument was rejected — likely an expired XTS "
+                    "market-data token (re-login) or a stale scripmaster. No ticks "
+                    "will arrive until this is resolved.",
+                )
+                # Auth failure (every instrument 'Invalid Token') → self-heal by
+                # re-logging in and reconnecting under a fresh token. The same
+                # recovery clears 'Exceeded Instrument Subscription Limit' — a
+                # fresh session starts with 0/50 slots, releasing stale
+                # subscriptions a swap failed to free on the gateway.
+                if rejected and any(
+                    "token" in r.lower() or ("limit" in r.lower() and "exceed" in r.lower())
+                    for r in reasons
+                ):
+                    await self._self_heal_auth()
+            else:
+                # Healthy subscribe — clear the self-heal attempt counter.
+                self._auto_relogin_attempts = 0
+                log.info(
+                    "ws.subscribe.success",
+                    instruments=total,
+                    newly_subscribed=ok,
+                    already_present=already,
+                    rejected=rejected,
+                    errors=errors,
+                    reasons=dict(reasons) or None,
+                )
         except Exception as e:
             # Don't drop the connection on a subscribe hiccup; if no data flows the
             # heartbeat will recover. Avoids a reconnect storm on transient errors.
             log.error("ws.subscribe.error", error=str(e))
+
+    async def _self_heal_auth(self) -> None:
+        """Auto-recover from an all-instruments 'Invalid Token' rejection.
+
+        Mints a fresh XTS token (single-flight + debounced in the session manager)
+        and requests a socket reconnect so the new token is used for both the
+        handshake and the resubscribe. Cooldown + attempt cap stop a login storm
+        when something keeps invalidating the session (e.g. a 2nd backend competing
+        for the single XTS market-data session, or revoked credentials).
+        """
+        now = time.time()
+        since = now - self._last_auto_relogin
+        if since < AUTO_RELOGIN_COOLDOWN_S:
+            log.info("ws.self_heal.cooldown", since_s=round(since, 1))
+            return
+        if self._auto_relogin_attempts >= AUTO_RELOGIN_MAX_ATTEMPTS:
+            log.error(
+                "ws.self_heal.gave_up",
+                attempts=self._auto_relogin_attempts,
+                hint="auth still failing after repeated auto re-logins — likely a "
+                "2nd backend competing for the single XTS session, or revoked "
+                "credentials. Manual intervention required.",
+            )
+            return
+        self._last_auto_relogin = now
+        self._auto_relogin_attempts += 1
+        log.warning(
+            "ws.self_heal.relogin",
+            attempt=self._auto_relogin_attempts,
+            max=AUTO_RELOGIN_MAX_ATTEMPTS,
+        )
+        try:
+            await get_session_manager().login()
+            # Force the supervisor to reconnect so the socket re-handshakes with
+            # the fresh token (the live socket is still bound to the dead one).
+            self._reconnect_requested = True
+            log.info("ws.self_heal.relogin_ok")
+        except Exception as e:
+            log.error("ws.self_heal.relogin_failed", error=str(e))
 
     # ------------------------------------------------ socket handlers
 
@@ -517,6 +632,43 @@ class OptionFeedClient:
 
 def _chunks(items: list[dict], size: int) -> list[list[dict]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _classify_400(resp: httpx.Response) -> tuple[bool, str]:
+    """Classify an XTS subscription 400 response.
+
+    Returns ``(is_already_subscribed, detail)`` where ``is_already_subscribed``
+    is True only when the body indicates the instrument is already on the feed
+    (benign — data still flows). Any other 400 is a genuine rejection (expired
+    token, unknown instrument, malformed request) that means no ticks will flow.
+    ``detail`` is the trimmed XTS error description for logging.
+    """
+    detail = ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = str(
+                body.get("description")
+                or body.get("result")
+                or body.get("message")
+                or body
+            )
+        else:
+            detail = str(body)
+    except Exception:
+        try:
+            detail = resp.text or ""
+        except Exception:
+            detail = ""
+    detail = detail.strip()[:300]
+    low = detail.lower()
+    # "Exceeded Instrument Subscription Limit of 50. You have already subscribed
+    # 50/50 ..." also contains "already ... subscrib" but is a REAL rejection
+    # (server-side slots full, e.g. a symbol swap that never freed the old
+    # universe) — no ticks flow for the refused instrument.
+    is_limit = "limit" in low and ("exceed" in low or "50/50" in low)
+    is_already = "already" in low and "subscrib" in low and not is_limit
+    return is_already, detail
 
 
 def _instrument_id(obj: dict) -> str:

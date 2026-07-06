@@ -21,11 +21,13 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from starlette.staticfiles import StaticFiles
 
 from .api import api_router
 from .auth import get_session_manager
 from .core.config import settings
+from .core.db import AsyncSessionLocal
 from .core.logging import configure_logging, get_logger
 from .ingest.aggregator import MinuteAggregator
 from .ingest.atm_drift_watch import run_atm_drift_watch
@@ -36,6 +38,7 @@ from .market.symbols import get_registry
 from .market_data import xts_client
 from .runtime import get_runtime
 from .services import get_oi_engine
+from .services.spot_fallback import db_last_underlying
 from .ws import get_hub, ws_router
 
 log = get_logger("main")
@@ -46,26 +49,40 @@ STARTUP_SMARTAPI_LOGIN_TIMEOUT_S = 30.0
 
 
 async def _initial_spot() -> float:
-    """Fetch a starting spot for the active symbol via SmartAPI REST quote.
+    """Fetch a starting spot for the active symbol via an XTS REST quote.
 
     Required because we need the spot to resolve the strike window *before* the
-    websocket has produced any ticks.
+    websocket has produced any ticks. If the quote fails (throttled boot, no
+    session yet), fall back to the last stored underlying for the symbol; the
+    hardcoded constant is a last resort only. A wrong value here mis-centers
+    the subscribed strike window AND is served as ``latest_spot`` until the
+    live index tick arrives.
     """
     rt = get_runtime()
     reg_entry = get_registry().get(rt.active_symbol)
-    spot_token = (reg_entry.spot_token if reg_entry else None) or settings.nifty_index_token
+    spot_token = (reg_entry.spot_token if reg_entry else None) or (
+        settings.nifty_index_token if rt.active_symbol == "NIFTY" else None
+    )
+    # Index spot lives on the cash segment of the symbol's own exchange.
+    segment = (
+        xts_client.SEG_BSECM
+        if reg_entry is not None and (reg_entry.exchange or "").upper() == "BSE"
+        else xts_client.SEG_NSECM
+    )
     sess = get_session_manager()
-    if not sess.authenticated:
-        # No dashboard / env login yet — use fallback so WS resubscribe can still run.
+    if sess.authenticated and spot_token:
+        try:
+            ltp = await xts_client.quote_ltp(sess.token, segment, spot_token)
+            if ltp:
+                return float(ltp)
+        except Exception as e:
+            log.warning("initial_spot.fallback", symbol=rt.active_symbol, error=str(e))
+    else:
         log.warning("initial_spot.no_session", symbol=rt.active_symbol)
-        return 24000.0
-    try:
-        ltp = await xts_client.quote_ltp(sess.token, xts_client.SEG_NSECM, spot_token)
-        if ltp:
-            return float(ltp)
-    except Exception as e:
-        log.warning("initial_spot.fallback", symbol=rt.active_symbol, error=str(e))
-    # Fallback: a sane value so the universe resolver can still iterate.
+    db_spot = await db_last_underlying(rt.active_symbol)
+    if db_spot:
+        log.info("initial_spot.db_fallback", symbol=rt.active_symbol, spot=db_spot)
+        return db_spot
     return 24000.0
 
 
@@ -74,6 +91,19 @@ async def _resubscribe_provider() -> tuple[list, float]:
     rt = get_runtime()
     spot = rt.latest_spot or await _initial_spot()
     tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
+    if not tokens:
+        # rt.latest_spot can belong to the PREVIOUS symbol after a failed
+        # switch (e.g. SENSEX window centred on NIFTY's spot -> zero
+        # contracts, endless resubscribe loop). Re-resolve with a spot
+        # fetched for the active symbol itself before giving up.
+        fresh = await _initial_spot()
+        if fresh and fresh != spot:
+            log.warning(
+                "resubscribe.empty_universe_respot",
+                symbol=rt.active_symbol, stale_spot=spot, fresh_spot=fresh,
+            )
+            spot = fresh
+            tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
     rt.tokens = tokens
     rt.expiries = expiries
     rt.latest_spot = spot
@@ -106,13 +136,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if restored:
             await sess.start_refresh_loop()
             log.info("app.startup.session_restored_from_db")
-        elif settings.xts_login_at_startup and (settings.xts_md_secret_key or "").strip():
+            # A TTL-valid restored token can still be dead (XTS daily expiry /
+            # single-session invalidation). If so, the feed's self-heal will
+            # auto re-login on the first 'Invalid Token' — no manual click needed.
+        elif (settings.xts_md_secret_key or "").strip() and (settings.xts_md_app_key or "").strip():
+            # No usable session restored — auto-login at startup so the feed comes
+            # up live without a human clicking the dashboard button. force=True
+            # guarantees a fresh token.
             try:
                 await asyncio.wait_for(
-                    sess.login(),
+                    sess.login(force=True),
                     timeout=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
                 )
                 await sess.start_refresh_loop()
+                log.info("app.startup.auto_login_ok")
             except asyncio.TimeoutError:
                 log.warning(
                     "app.startup.login_timeout",

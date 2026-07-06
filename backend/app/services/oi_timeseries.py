@@ -61,14 +61,20 @@ _MAX_TS_SQL = text(
     """
 )
 
+# Carry-forward (locf) matters: a strike contributes its last-known OI to every
+# bucket, not just buckets it happened to tick in. Without it, buckets missing a
+# strike's tick (the in-progress minute, or any quiet minute on less-liquid
+# chains like SENSEX) sum only the strikes that ticked — the "total" dipped by
+# whatever fraction of the chain stayed silent. Leading buckets before a
+# strike's first tick stay NULL and are excluded from the sums.
 _TIMESERIES_SQL = text(
     """
     WITH per_strike AS (
         SELECT
-            time_bucket((:bucket_iv)::interval, ts) AS bucket,
+            time_bucket_gapfill((:bucket_iv)::interval, ts, :from_ts, :to_ts) AS bucket,
             strike,
             option_type,
-            last(oi, ts) AS oi
+            locf(last(oi, ts)) AS oi
         FROM option_oi_snapshots
         WHERE symbol = :symbol
           AND expiry = :expiry
@@ -82,6 +88,7 @@ _TIMESERIES_SQL = text(
         COALESCE(SUM(oi) FILTER (WHERE option_type = 'CE'), 0) AS total_call_oi,
         COALESCE(SUM(oi) FILTER (WHERE option_type = 'PE'), 0) AS total_put_oi
     FROM per_strike
+    WHERE oi IS NOT NULL
     GROUP BY bucket
     ORDER BY bucket
     """

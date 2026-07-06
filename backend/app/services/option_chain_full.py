@@ -82,12 +82,14 @@ class OptionChainFullResponse:
     rows: list[OptionChainFullRow]
 
 
+# Now-side floored at the anchor day's session open — previous-session frozen
+# strikes must not surface in the "current" chain (mirrors OIChangeEngine).
 _LATEST_SNAPSHOT_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
@@ -215,12 +217,13 @@ class OptionChainFullEngine:
                     cutoff = earliest
                     then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
 
+        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             now_rows = (
                 (
                     await s.execute(
                         _LATEST_SNAPSHOT_SQL,
-                        {"symbol": symbol, "expiry": expiry},
+                        {"symbol": symbol, "expiry": expiry, "floor": session_floor},
                     )
                 )
                 .mappings()

@@ -4,7 +4,7 @@
   "source": "Ayush Bhai branch — focused two-symbol build (NIFTY 50 + SENSEX)",
   "notes": "spot_token holds the XTS instrument id for the index spot. NIFTY (NSE) = 26000 on NSECM. SENSEX (BSE) is resolved at runtime from /instruments/indexlist on BSECM (segment 11). exchange drives the NSE-vs-BSE segment selection across scripmaster/symbol_controller/ws_client. lot_size and strike_step are hints — actual values come from the instrument master at subscription time.",
   "symbols": [
-    {"symbol": "NIFTY",  "display": "NIFTY 50", "kind": "index", "sector": "Indices", "exchange": "NSE", "spot_token": "26000", "fno_eligible": true, "lot_size": 75, "strike_step": 50},
+    {"symbol": "NIFTY",  "display": "NIFTY 50", "kind": "index", "sector": "Indices", "exchange": "NSE", "spot_token": "26000", "fno_eligible": true, "lot_size": 65, "strike_step": 50},
     {"symbol": "SENSEX", "display": "SENSEX",   "kind": "index", "sector": "Indices", "exchange": "BSE", "spot_token": null,    "fno_eligible": true, "lot_size": 20, "strike_step": 100}
   ]
 }

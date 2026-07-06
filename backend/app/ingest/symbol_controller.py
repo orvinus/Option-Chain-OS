@@ -19,6 +19,7 @@ from ..market.scripmaster import InstrumentToken, resolve_option_universe
 from ..market.symbols import SymbolEntry, get_registry
 from ..market_data import xts_client
 from ..runtime import get_runtime
+from ..services.spot_fallback import db_last_underlying
 
 log = get_logger("symbol_controller")
 
@@ -128,10 +129,14 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
     expiries_iso: list[str] = []
 
     if entry.fno_eligible:
-        # Without a spot value we cannot pick the strike window — fall back to
-        # whatever runtime had (or a 1.0 placeholder so the resolver still
-        # iterates the scripmaster).
-        spot_for_window = spot or rt.latest_spot or 1.0
+        # Without a spot value we cannot pick the strike window. Fall back to
+        # the last stored underlying FOR THIS SYMBOL; runtime's latest_spot is
+        # only trustworthy when it already belongs to this symbol (using the
+        # previous symbol's spot centred a SENSEX window on NIFTY's price ->
+        # zero contracts). 1.0 placeholder keeps the resolver iterating.
+        db_spot = await db_last_underlying(sym) if spot is None else None
+        same_symbol_spot = rt.latest_spot if rt.active_symbol == sym else None
+        spot_for_window = spot or db_spot or same_symbol_spot or 1.0
         try:
             tokens, expiries = await resolve_option_universe(
                 spot=spot_for_window, symbol=sym
@@ -149,6 +154,10 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
     rt.tokens = tokens
     if spot is not None:
         rt.latest_spot = spot
+    elif entry.fno_eligible and spot_for_window > 1.0:
+        # Never leave the previous symbol's spot in runtime — /api/spot and the
+        # resubscribe loop would keep serving/centring on the wrong index.
+        rt.latest_spot = spot_for_window
     rt.active_symbol = sym
 
     log.info(

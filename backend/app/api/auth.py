@@ -37,7 +37,17 @@ async def _bootstrap_live_ingestion_if_needed() -> None:
 
         rt = get_runtime()
         if rt.feed_client is not None:
-            log.info("auth.login.ingestion_already_running")
+            # A feed is already running, but its live Socket.IO connection was
+            # opened with the PREVIOUS token. XTS market-data allows only ONE
+            # valid token per appKey — every fresh login invalidates the prior
+            # one — so the existing socket (and its subscriptions) are now bound
+            # to a dead token and every subscribe returns 'Invalid Token' with no
+            # ticks flowing. Drop the socket so the supervisor reconnects via
+            # _connect_once(), which re-reads the FRESH token from the session
+            # manager and re-subscribes under it. Without this nudge, a "successful"
+            # login leaves the feed silently dead.
+            log.info("auth.login.reconnecting_feed_with_fresh_token")
+            rt.feed_client.nudge_reconnect()
             return
 
         engine = get_oi_engine()
@@ -80,7 +90,9 @@ async def login(body: LoginRequest) -> LoginResponse:
 
     try:
         try:
-            await asyncio.wait_for(sess.login(), timeout=settings.smartapi_login_timeout_s)
+            # force=True: an explicit dashboard login always mints a fresh token,
+            # bypassing the debounce (the user clicked because they want a new session).
+            await asyncio.wait_for(sess.login(force=True), timeout=settings.smartapi_login_timeout_s)
         except asyncio.TimeoutError:
             raise HTTPException(
                 504,

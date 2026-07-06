@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -43,6 +44,13 @@ log = get_logger("auth")
 # XTS market-data tokens are valid ~24h. Renew (re-login) every 12h for margin.
 REFRESH_EVERY = timedelta(hours=12)
 TOKEN_TTL = timedelta(hours=24)
+
+# Debounce window for non-forced logins. XTS is single-session per appKey — every
+# login invalidates the prior token — so a manual login + post-login feed bootstrap
+# + a self-heal firing within a few seconds of each other must NOT each mint a new
+# token (they would invalidate one another). Within this window a non-forced login
+# reuses the just-minted token instead. The manual endpoint passes force=True.
+LOGIN_DEBOUNCE_S = 20.0
 
 
 @dataclass
@@ -75,6 +83,10 @@ class MarketDataSession:
         self._tokens: Optional[SessionTokens] = None
         self._refresh_task: Optional[asyncio.Task] = None
         self._stopping = asyncio.Event()
+        # Serialises concurrent login() calls (manual + bootstrap + self-heal +
+        # refresh) so only one /auth/login round-trip runs at a time.
+        self._login_lock = asyncio.Lock()
+        self._last_login_mono: float = 0.0
 
     # ---------------------------------------------------------- properties
 
@@ -101,21 +113,36 @@ class MarketDataSession:
 
     # ---------------------------------------------------------- public API
 
-    async def login(self) -> SessionTokens:
-        """Perform an XTS market-data login using env appKey/secretKey."""
-        result = await xts_client.login()
-        tokens = SessionTokens(
-            jwt_token=result["token"],
-            refresh_token=result["token"],
-            feed_token=result["token"],
-            issued_at=datetime.now(timezone.utc),
-            client_code=result.get("userID") or settings.xts_md_app_key,
-        )
-        await self._persist(tokens)
-        with self._lock:
-            self._tokens = tokens
-        log.info("xts.login.success", user_id=tokens.client_code)
-        return tokens
+    async def login(self, force: bool = False) -> SessionTokens:
+        """Perform an XTS market-data login using env appKey/secretKey.
+
+        Single-flight + debounced. ``force=True`` (used by the manual dashboard
+        login) always mints a fresh token; ``force=False`` (self-heal / refresh /
+        bootstrap) reuses a token minted within ``LOGIN_DEBOUNCE_S`` to avoid the
+        single-session token thrash described on ``LOGIN_DEBOUNCE_S``.
+        """
+        async with self._login_lock:
+            if not force:
+                with self._lock:
+                    have = self._tokens
+                age = time.monotonic() - self._last_login_mono
+                if have is not None and age < LOGIN_DEBOUNCE_S:
+                    log.info("xts.login.debounced", age_s=round(age, 1))
+                    return have
+            result = await xts_client.login()
+            tokens = SessionTokens(
+                jwt_token=result["token"],
+                refresh_token=result["token"],
+                feed_token=result["token"],
+                issued_at=datetime.now(timezone.utc),
+                client_code=result.get("userID") or settings.xts_md_app_key,
+            )
+            await self._persist(tokens)
+            with self._lock:
+                self._tokens = tokens
+            self._last_login_mono = time.monotonic()
+            log.info("xts.login.success", user_id=tokens.client_code, forced=force)
+            return tokens
 
     async def set_tokens(
         self,
@@ -236,8 +263,27 @@ class MarketDataSession:
                 ):
                     with attempt:
                         await self.login()
+                # The new token invalidated the feed socket's previous token (XTS
+                # allows one valid token per appKey), so the live socket is now
+                # bound to a dead token. Drop it so the feed reconnects + re-subscribes
+                # under the fresh token — otherwise the 12h refresh silently stops
+                # all ticks until the next manual login.
+                self._nudge_feed_reconnect()
             except Exception as e:
                 log.error("xts.refresh.exhausted", error=str(e))
+
+    def _nudge_feed_reconnect(self) -> None:
+        """Ask the live feed (if any) to reconnect so it re-handshakes with the
+        current token. Lazy import avoids an auth -> ingest import cycle."""
+        try:
+            from ..runtime import get_runtime
+
+            feed = get_runtime().feed_client
+            if feed is not None:
+                feed.nudge_reconnect()
+                log.info("xts.refresh.feed_reconnect_nudged")
+        except Exception as e:
+            log.warning("xts.refresh.feed_nudge_failed", error=str(e))
 
     async def _persist(self, tokens: SessionTokens) -> None:
         async with session_scope() as s:

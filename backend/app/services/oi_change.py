@@ -79,12 +79,27 @@ class OIChangeResponse:
     rows: list[OIChangeRow]
 
 
+# The ``now`` side is floored at the session open of the anchor's trading day:
+# strikes whose data froze in a PREVIOUS session (window drift, weekend
+# artifacts) must not appear in the "current" chain with days-old OI. The
+# ``then``/baseline side is intentionally NOT floored — output strikes come
+# exclusively from the now-map.
 _LATEST_SNAPSHOT_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
+    ORDER BY strike, option_type, ts DESC
+    """
+)
+
+_SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL = text(
+    """
+    SELECT DISTINCT ON (strike, option_type)
+        strike, option_type, oi, ltp, underlying, ts
+    FROM option_oi_snapshots
+    WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
@@ -305,7 +320,7 @@ class OIChangeEngine:
                     from dataclasses import replace as dc_replace
                     return dc_replace(cached, spot=live_spot)
                 return cached
-            result = await self._compute_range(from_utc, to_utc, expiry, symbol, live_spot)
+            result = await self._compute_range(from_utc, to_utc, expiry, symbol, live_spot, anchor)
             self._cache[cache_key] = result
             return result
 
@@ -316,19 +331,48 @@ class OIChangeEngine:
         expiry: date,
         symbol: str,
         live_spot: float | None = None,
+        anchor: datetime | None = None,
     ) -> OIChangeResponse:
         now_utc = datetime.now(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
+        # Floor the now-side at the session open of the window's effective upper
+        # bound so previous-session frozen strikes don't leak into the output.
+        upper = to_utc or anchor or now_utc
+        floor = market_open_today(upper.astimezone(IST)).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             if to_utc is None:
-                now_rows = (await s.execute(_LATEST_SNAPSHOT_SQL, params)).mappings().all()
+                now_rows = (
+                    await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": floor})
+                ).mappings().all()
             else:
                 now_rows = (
-                    await s.execute(_SNAPSHOT_AT_OR_BEFORE_SQL, {**params, "cutoff": to_utc})
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                        {**params, "cutoff": to_utc, "floor": floor},
+                    )
                 ).mappings().all()
             then_rows = (
                 await s.execute(_SNAPSHOT_AT_OR_BEFORE_SQL, {**params, "cutoff": from_utc})
             ).mappings().all()
+            # Baseline clamp (mirrors the timeframe path): a strike whose first
+            # row lands AFTER from_ts (it entered the subscription window
+            # mid-range) has no true baseline — without a clamp its change is
+            # reported as ``now - 0``, i.e. its full OI. Use its earliest stored
+            # snapshot as the baseline so the change is "since data start".
+            then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+            missing = [
+                (r["strike"], r["option_type"]) for r in now_rows
+                if (r["strike"], r["option_type"]) not in then_keys
+            ]
+            if missing:
+                earliest_rows = (
+                    await s.execute(_SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": from_utc})
+                ).mappings().all()
+                missing_set = set(missing)
+                then_rows = list(then_rows) + [
+                    r for r in earliest_rows
+                    if (r["strike"], r["option_type"]) in missing_set
+                ]
         # Report the upper bound (or now) as the window's asof.
         asof_override = to_utc if to_utc is not None else None
         return _assemble("range", expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
@@ -371,12 +415,13 @@ class OIChangeEngine:
                     cutoff = earliest
                     then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
 
+        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             now_rows = (
                 (
                     await s.execute(
                         _LATEST_SNAPSHOT_SQL,
-                        {"symbol": symbol, "expiry": expiry},
+                        {"symbol": symbol, "expiry": expiry, "floor": session_floor},
                     )
                 )
                 .mappings()

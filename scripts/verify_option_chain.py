@@ -13,8 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+
+# psycopg async cannot run on Windows' default ProactorEventLoop (same setup
+# as backend/run.py and the validation harness).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -23,7 +29,18 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 from app.core.config import settings  # noqa: E402  (loads .env)
+from app.market.symbols import get_registry  # noqa: E402
 from app.services.nse_option_chain import fetch_nse_option_chain  # noqa: E402
+
+
+def _lot_size(symbol: str) -> int:
+    try:
+        entry = get_registry().get(symbol.upper())
+        if entry is not None and getattr(entry, "lot_size", 0):
+            return int(entry.lot_size)
+    except Exception:
+        pass
+    return int(settings.nifty_lot_size or 1)
 
 LTP_TOL_PTS = 5.0
 LTP_TOL_PCT = 10.0
@@ -60,7 +77,7 @@ def _fmt(v: float | None, decimals: int = 1) -> str:
 
 
 async def run(symbol: str, expiry_date: date) -> None:
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.db_url, echo=False)
 
     async with AsyncSession(engine) as sess:
         db_rows = (
@@ -80,7 +97,17 @@ async def run(symbol: str, expiry_date: date) -> None:
 
     print(f"\nFetching NSE option chain for {symbol.upper()} expiry {expiry_date} …")
     nse_rows, nse_source = await fetch_nse_option_chain(symbol, expiry_filter=expiry_date)
-    nse_book = {r.strike: r for r in nse_rows}
+    # NSE reports OI in CONTRACTS (lots); ours is units (contracts x lot size).
+    lot = _lot_size(symbol)
+    nse_book = {
+        r.strike: replace(
+            r,
+            ce_oi=r.ce_oi * lot if r.ce_oi is not None else None,
+            pe_oi=r.pe_oi * lot if r.pe_oi is not None else None,
+        )
+        for r in nse_rows
+    }
+    print(f"NSE OI scaled to units with lot size {lot}.")
 
     all_strikes = sorted(our_book.keys() | nse_book.keys())
     if not all_strikes:
@@ -170,7 +197,7 @@ def _parse_args() -> argparse.Namespace:
 
 async def _resolve_expiry_from_db(symbol: str) -> date | None:
     """Return earliest expiry in DB for the symbol."""
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.db_url, echo=False)
     try:
         async with AsyncSession(engine) as sess:
             row = await sess.execute(
