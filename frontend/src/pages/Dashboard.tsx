@@ -51,10 +51,12 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
-    fnoEligible, symbolDisplay, liveSpot,
+    activeEntry, fnoEligible, symbolDisplay, liveSpot,
   } = mc;
 
   const [timeframe, setTimeframe] = useState<Timeframe>("5m");
+  // Registry strike step (NIFTY 50, SENSEX 100) — drives ATM math and windowing.
+  const strikeStep = activeEntry?.strike_step ?? 50;
 
   // This build (Ayush Bhai branch) ships only the OI Change view.
   // Custom time-range selection (minutes from 09:15). `rangeMode` switches the
@@ -154,9 +156,9 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
 
   const noOiChangeInAtmWindow = useMemo(() => {
     if (!data) return false;
-    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow);
+    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow, strikeStep);
     return wr.length > 0 && wr.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, atmWindow, liveSpot]);
+  }, [data, atmWindow, liveSpot, strikeStep]);
 
   if (!authChecked) {
     return (
@@ -258,7 +260,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
             )}
 
             {fnoEligible && (
-              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} />
+              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} strikeStep={strikeStep} />
             )}
 
             {fnoEligible && (
@@ -270,6 +272,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                 underlyingLabel={symbolDisplay}
                 liveSpot={liveSpot}
                 nseSessionOpen={health?.nse_session_open}
+                strikeStep={strikeStep}
               />
             )}
 

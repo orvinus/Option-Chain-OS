@@ -10,7 +10,6 @@ import { useOITimeseries } from "../hooks/useOITimeseries";
 import { useOIStream } from "../hooks/useOIStream";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import type { ChartInterval } from "../utils/oiCandles";
-import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 
 const ATM_MAX_WINDOW = 50;
 
@@ -52,10 +51,15 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
 
   // Real-time total Call/Put OI for the selected ATM ± N window. Prefer the live
   // WS frame (updates on every push); fall back to the latest polled time-series
-  // point. Both sum the same strike window, so the badge stays consistent.
+  // point. Both sum the SAME [strikeMin, strikeMax] bounds the backend uses for
+  // the time-series SQL, so the badge cannot disagree with the chart about which
+  // strikes are included (previously the WS path re-derived its own ATM anchor).
   const liveOn = live.status === "open";
   const { callTotal, putTotal } = useMemo(() => {
-    const rows = live.data ? filterOiRowsByAtmWindow(live.data.rows, spot, atmWindow) : [];
+    const rows =
+      live.data && strikeMin != null && strikeMax != null
+        ? live.data.rows.filter((r) => r.strike >= strikeMin && r.strike <= strikeMax)
+        : [];
     if (rows.length > 0) {
       return {
         callTotal: rows.reduce((s, r) => s + r.call_oi, 0),
@@ -67,7 +71,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
       callTotal: last ? last.total_call_oi : null,
       putTotal: last ? last.total_put_oi : null,
     };
-  }, [live.data, spot, atmWindow, points]);
+  }, [live.data, strikeMin, strikeMax, points]);
 
   if (!authChecked) {
     return (

@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef } from "react";
 import { ChartDrawingOverlay } from "./ChartDrawingOverlay";
 import type { OITimeseriesPoint } from "../types";
 import {
+  baselineLabel,
   bucketToCandles,
   toChangeSinceOpen,
   toLineSeries,
@@ -47,6 +48,9 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
   const totalLabel = side === "call" ? "Total Call OI" : "Total Put OI";
 
   const series = useMemo(() => toChangeSinceOpen(points ?? [], side), [points, side]);
+  // "open" when data starts at 09:15; the actual first-bucket time otherwise
+  // (e.g. backend booted mid-session) so the axis never misstates the baseline.
+  const sinceLabel = useMemo(() => baselineLabel(points), [points]);
 
   // X-axis labels (HH:MM) for mapping a pointer's category index back to a time.
   const xLabels = useMemo(
@@ -88,7 +92,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
     const baseAxis = {
       yAxis: {
         type: "value" as const,
-        name: "OI Δ since open",
+        name: `OI Δ since ${sinceLabel}`,
         nameTextStyle: { color: "#6b7280", fontSize: 10 },
         // Force 0 into the visible range regardless of data sign.
         min: (v: { min: number }) => Math.min(0, v.min),
@@ -185,7 +189,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
         },
       ],
     } satisfies EChartsOption;
-  }, [series, interval, isLine, title, theme]);
+  }, [series, interval, isLine, title, theme, sinceLabel]);
 
   const hasData = (points?.length ?? 0) > 0;
 
@@ -195,6 +199,14 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
         <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: theme.line }} />
         <h3 className="text-sm font-semibold text-foreground">{title}</h3>
         <span className="text-[11px] text-muted">{isLine ? "1m line" : `${interval}m candles`}</span>
+        {sinceLabel !== "open" && (
+          <span
+            className="text-[10px] text-amber-300/90"
+            title="No stored data between 09:15 and this time — the 0-baseline is the first stored bucket, not the session open."
+          >
+            Δ from {sinceLabel} (data start)
+          </span>
+        )}
       </div>
 
       {isLoading && (

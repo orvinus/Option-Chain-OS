@@ -8,6 +8,8 @@ interface Props {
   atmWindow: number;
   /** Live spot from /api/health when the Angel feed is connected — aligns ATM with the active index/stock. */
   liveSpot?: number | null;
+  /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
+  strikeStep?: number | null;
 }
 
 /** Indian compact notation matching Sensibull's display */
@@ -20,10 +22,11 @@ function compact(n: number, showSign = false): string {
   return `${sign}${abs === 0 ? "0" : abs.toLocaleString()}`;
 }
 
-export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
+export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   const rows = data?.rows ?? [];
   const spot = liveSpot ?? data?.spot ?? null;
-  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow);
+  const step = strikeStep ?? 50;
+  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow, strikeStep);
 
   // Absolute OI totals (in contracts, same unit Sensibull uses)
   const totalCeOI = windowRows.reduce((s, r) => s + r.call_oi, 0);
@@ -124,7 +127,7 @@ export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
         </span>
         {spot != null && (
           <span className="text-[10px] text-muted/60">
-            ATM: {Math.round(spot / 50) * 50}
+            ATM: {Math.round(spot / step) * step}
           </span>
         )}
       </div>

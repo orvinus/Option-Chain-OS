@@ -28,6 +28,9 @@ function pick(p: OITimeseriesPoint, side: OISide): number {
   return side === "call" ? p.total_call_oi : p.total_put_oi;
 }
 
+/** NSE/BSE regular session open (09:15 IST) in minutes-from-midnight. */
+const SESSION_OPEN_MIN = 9 * 60 + 15;
+
 /** Minutes-from-midnight from an "HH:MM" label. */
 function labelToMin(label: string): number {
   const [hh, mm] = label.split(":").map(Number);
@@ -61,9 +64,23 @@ export function toChangeSinceOpen(
 }
 
 /**
+ * What the "Δ since …" baseline actually is. When the first stored bucket is
+ * the session open (±1 min) this is "open"; when data starts later (backend
+ * booted mid-session) the change series is baselined at that first bucket, and
+ * labelling it "since open" would misstate the numbers.
+ */
+export function baselineLabel(points: OITimeseriesPoint[] | null): string {
+  const first = points?.[0]?.ts.slice(11, 16);
+  if (!first) return "open";
+  return labelToMin(first) <= SESSION_OPEN_MIN + 1 ? "open" : first;
+}
+
+/**
  * Bucket a 1-minute change series into OHLC candles of `intervalMin` minutes,
- * aligned to wall-clock boundaries (e.g. 5m → 09:15, 09:20, ...). Within each
- * bucket: open = first minute, close = last minute, low/high = min/max.
+ * anchored to the session open (09:15 → 09:15, 09:25, ... for 10m). Anchoring
+ * at midnight instead put 09:15–09:29 into a candle labelled "09:00" for any
+ * interval that does not divide 555 evenly (10m, 30m). Within each bucket:
+ * open = first minute, close = last minute, low/high = min/max.
  */
 export function bucketToCandles(
   series: ChangePoint[],
@@ -74,7 +91,7 @@ export function bucketToCandles(
   }
   const buckets = new Map<number, ChangePoint[]>();
   for (const pt of series) {
-    const key = Math.floor(labelToMin(pt.label) / intervalMin);
+    const key = Math.floor((labelToMin(pt.label) - SESSION_OPEN_MIN) / intervalMin);
     const arr = buckets.get(key);
     if (arr) arr.push(pt);
     else buckets.set(key, [pt]);
@@ -87,7 +104,10 @@ export function bucketToCandles(
       const close = vals[vals.length - 1];
       const low = Math.min(...vals);
       const high = Math.max(...vals);
-      return { label: minToLabel(key * intervalMin), ohlc: [open, close, low, high] as [number, number, number, number] };
+      return {
+        label: minToLabel(SESSION_OPEN_MIN + key * intervalMin),
+        ohlc: [open, close, low, high] as [number, number, number, number],
+      };
     });
 }
 
