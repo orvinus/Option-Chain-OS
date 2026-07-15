@@ -74,6 +74,24 @@ class Settings(BaseSettings):
         description="DB flush bucket. Use 1s or 5s if you rely on sub-minute OI timeframes (1s/15s/30s/45s); 1min often yields flat deltas for those windows.",
     )
 
+    # ---------------- Universe poller (all-symbol REST-quote snapshotter) ----------------
+    # The live WS feed can only carry ~50 instruments for the ONE viewed symbol.
+    # This background poller REST-quotes every other F&O symbol's chain on a tiered
+    # cadence into the same DB (option_oi_snapshots), so all symbols accrue OI in
+    # parallel. It NEVER logs in (single-session-per-appKey) — it reuses the live
+    # session's token and, on a 401, waits for the feed's own self-heal to refresh it.
+    poller_enabled: bool = Field(default=False, validation_alias="POLLER_ENABLED")
+    poller_strike_window: int = Field(default=7, validation_alias="POLLER_STRIKE_WINDOW")
+    poller_expiries: str = Field(default="current_weekly", validation_alias="POLLER_EXPIRIES")
+    poller_quote_chunk: int = Field(default=25, validation_alias="POLLER_QUOTE_CHUNK")
+    poller_max_concurrency: int = Field(default=6, validation_alias="POLLER_MAX_CONCURRENCY")
+    poller_pace_ms: int = Field(default=50, validation_alias="POLLER_PACE_MS")
+    poller_max_429_retries: int = Field(default=5, validation_alias="POLLER_MAX_429_RETRIES")
+    poller_skip_active_symbol: bool = Field(default=True, validation_alias="POLLER_SKIP_ACTIVE_SYMBOL")
+    poller_tier_fast_interval_s: float = Field(default=20.0, validation_alias="POLLER_TIER_FAST_S")
+    poller_tier_mid_interval_s: float = Field(default=60.0, validation_alias="POLLER_TIER_MID_S")
+    poller_tier_slow_interval_s: float = Field(default=180.0, validation_alias="POLLER_TIER_SLOW_S")
+
     # ---------------- API server ----------------
     api_host: str = Field(default="0.0.0.0", validation_alias="API_HOST")
     api_port: int = Field(default=8000, validation_alias="API_PORT")
@@ -95,11 +113,21 @@ class Settings(BaseSettings):
     smartapi_login_timeout_s: float = Field(default=45.0, validation_alias="SMARTAPI_LOGIN_TIMEOUT_S")
     db_persist_timeout_s: float = Field(default=20.0, validation_alias="DB_PERSIST_TIMEOUT_S")
 
+    # ---------------- Hidden dashboard gate ----------------
+    # Fixed username + password protecting the /hidden dashboard (verified server-side,
+    # never shipped to the browser). Blank => the /hidden-login endpoint returns 500 until set.
+    hidden_user: str = Field(default="", validation_alias="HIDDEN_USER")
+    hidden_password: str = Field(default="", validation_alias="HIDDEN_PASSWORD")
+
     # -------- Derived helpers --------
 
     @property
     def expiry_policies(self) -> list[str]:
         return [s.strip() for s in self.expiries.split(",") if s.strip()]
+
+    @property
+    def poller_expiry_policies(self) -> list[str]:
+        return [s.strip() for s in self.poller_expiries.split(",") if s.strip()]
 
     @property
     def cors_origins_list(self) -> list[str]:

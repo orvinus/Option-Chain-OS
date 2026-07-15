@@ -11,6 +11,7 @@ its fields are ignored.
 from __future__ import annotations
 
 import asyncio
+import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -19,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..auth import get_session_manager
 from ..core.config import settings
 from ..core.logging import get_logger
-from .schemas import LoginRequest, LoginResponse
+from .schemas import HiddenLoginRequest, LoginRequest, LoginResponse
 
 log = get_logger("auth.api")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -123,3 +124,38 @@ async def login(body: LoginRequest) -> LoginResponse:
         message="Logged in. Live ingestion is starting in the background.",
         authenticated=True,
     )
+
+
+@router.post("/hidden-login", response_model=LoginResponse)
+async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
+    """Fixed-credential gate for the /hidden dashboard.
+
+    Verifies a single username+password from .env (never shipped to the browser),
+    then — since the hidden dashboard only loads data once the broker session is
+    live — establishes the XTS market-data session by reusing the same login flow.
+    """
+    # (a) Reject misconfiguration FIRST: blank env would make compare_digest("","")
+    #     return True and let empty credentials through.
+    if not settings.hidden_user or not settings.hidden_password:
+        raise HTTPException(
+            500,
+            "Hidden dashboard login is not configured. Set HIDDEN_USER and "
+            "HIDDEN_PASSWORD in your .env file and restart the backend.",
+        )
+
+    # (b) Constant-time compare on bytes (str raises TypeError on non-ASCII).
+    #     Use `&` (not `and`) so both comparisons always run — no per-field timing leak.
+    ok = secrets.compare_digest(
+        body.username.encode(), settings.hidden_user.encode()
+    ) & secrets.compare_digest(body.password.encode(), settings.hidden_password.encode())
+    if not ok:
+        raise HTTPException(401, "Invalid username or password.")
+
+    # (c) Start / confirm the broker feed. If a session already exists (e.g. admin
+    #     logged in on the primary dashboard, or auto-login at startup), reuse it —
+    #     a fresh force=True login would invalidate the single-session token and
+    #     needlessly reconnect the running feed.
+    sess = get_session_manager()
+    if sess.authenticated:
+        return LoginResponse(status="ok", message="Already connected.", authenticated=True)
+    return await login(LoginRequest())

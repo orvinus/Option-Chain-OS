@@ -8,8 +8,6 @@ interface Props {
   atmWindow: number;
   /** Live spot from /api/health when the Angel feed is connected — aligns ATM with the active index/stock. */
   liveSpot?: number | null;
-  /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
-  strikeStep?: number | null;
 }
 
 /** Indian compact notation matching Sensibull's display */
@@ -22,11 +20,10 @@ function compact(n: number, showSign = false): string {
   return `${sign}${abs === 0 ? "0" : abs.toLocaleString()}`;
 }
 
-export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
+export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
   const rows = data?.rows ?? [];
   const spot = liveSpot ?? data?.spot ?? null;
-  const step = strikeStep ?? 50;
-  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow, strikeStep);
+  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow);
 
   // Absolute OI totals (in contracts, same unit Sensibull uses)
   const totalCeOI = windowRows.reduce((s, r) => s + r.call_oi, 0);
@@ -43,39 +40,19 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   const peVal = isChange ? peChg : totalPeOI;
   const pcrVal = isChange ? pcrChg : pcr;
 
-  // OI-Change Ratio — highlight the WEAKER (lower-buildup) side, which better
-  // reflects current sentiment. Ratio = higher ÷ lower (always ≥ 1), shown as
-  // "1 : X.XX" tagged with the weaker side. Only meaningful in change mode when
-  // BOTH sides are building OI; otherwise show "—".
-  const bothBuild = isChange && ceChg > 0 && peChg > 0;
-  const higher = bothBuild ? Math.max(ceChg, peChg) : null;
-  const lower = bothBuild ? Math.min(ceChg, peChg) : null;
-  const weakerRatio =
-    higher !== null && lower !== null && lower > 0 && Number.isFinite(higher / lower)
-      ? higher / lower // ≥ 1 by construction
-      : null;
-  const weakerSide: "Call" | "Put" | null =
-    weakerRatio === null ? null : ceChg < peChg ? "Call" : peChg < ceChg ? "Put" : null;
-
-  // Absolute-OI mode keeps the legacy CE ÷ PE OI ratio (the primary dashboard
-  // only ever renders change mode, but this preserves the absolute-mode caller).
-  const absRatio = !isChange && totalPeOI > 0 ? totalCeOI / totalPeOI : null;
-
-  const hasRatio = isChange
-    ? weakerRatio !== null
-    : absRatio !== null && Number.isFinite(absRatio);
-  const ratioMain = isChange
-    ? weakerRatio !== null
-      ? `1 : ${weakerRatio.toFixed(2)}`
-      : "—"
-    : absRatio !== null && Number.isFinite(absRatio)
-      ? absRatio.toFixed(3)
+  const callPutRatio =
+    isChange
+      ? peChg !== 0
+        ? ceChg / peChg
+        : null
+      : totalPeOI > 0
+        ? totalCeOI / totalPeOI
+        : null;
+  const ratioMain =
+    callPutRatio !== null && Number.isFinite(callPutRatio)
+      ? callPutRatio.toFixed(3)
       : "—";
-  const ratioHint = weakerSide
-    ? `${weakerSide} weaker`
-    : isChange
-      ? "Call ÷ Put chg"
-      : "CE ÷ PE OI";
+  const ratioHint = isChange ? "Call ÷ Put chg" : "CE ÷ PE OI";
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -109,12 +86,14 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
         <span className="text-[10px] text-muted/60">contracts</span>
       </div>
 
-      {/* OI-change ratio (windowed) — "1 : X.XX" on the weaker/lower-buildup side */}
+      {/* Call ÷ Put (windowed; same timeframe as chart) */}
       <div className="kpi">
         <span className="text-xs text-muted uppercase tracking-wider">Ratio</span>
         <span
           className={`text-xl font-mono font-bold tabular-nums ${
-            hasRatio ? "text-yellow-400" : "text-muted"
+            callPutRatio !== null && Number.isFinite(callPutRatio)
+              ? "text-yellow-400"
+              : "text-muted"
           }`}
         >
           {ratioMain}
@@ -145,7 +124,7 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
         </span>
         {spot != null && (
           <span className="text-[10px] text-muted/60">
-            ATM: {Math.round(spot / step) * step}
+            ATM: {Math.round(spot / 50) * 50}
           </span>
         )}
       </div>

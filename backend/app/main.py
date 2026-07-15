@@ -22,7 +22,9 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from .api import api_router
 from .auth import get_session_manager
@@ -32,6 +34,8 @@ from .core.logging import configure_logging, get_logger
 from .ingest.aggregator import MinuteAggregator
 from .ingest.atm_drift_watch import run_atm_drift_watch
 from .ingest.market_session_watch import run_nse_session_open_watch
+from .ingest.symbol_controller import _resolve_spot_token, _spot_segment
+from .ingest.universe_poller import UniversePoller
 from .ingest.ws_client import OptionFeedClient
 from .market.scripmaster import resolve_option_universe
 from .market.symbols import get_registry
@@ -63,13 +67,17 @@ async def _initial_spot() -> float:
     spot_token = (reg_entry.spot_token if reg_entry else None) or (
         settings.nifty_index_token if rt.active_symbol == "NIFTY" else None
     )
-    # Index spot lives on the cash segment of the symbol's own exchange.
-    segment = (
-        xts_client.SEG_BSECM
-        if reg_entry is not None and (reg_entry.exchange or "").upper() == "BSE"
-        else xts_client.SEG_NSECM
-    )
+    # Reference-price segment: NSECM/BSECM for index/equity, MCXFO for a commodity
+    # (its "spot" is the near-month future). Centralised in symbol_controller.
+    segment = _spot_segment(reg_entry) if reg_entry is not None else xts_client.SEG_NSECM
     sess = get_session_manager()
+    # Resolve a missing spot token (BSE index, MCX near-future, or a stock) so the
+    # boot symbol centres correctly instead of falling through to the constant.
+    if sess.authenticated and not spot_token and reg_entry is not None:
+        try:
+            spot_token = await _resolve_spot_token(reg_entry)
+        except Exception as e:
+            log.warning("initial_spot.resolve_error", symbol=rt.active_symbol, error=str(e))
     if sess.authenticated and spot_token:
         try:
             ltp = await xts_client.quote_ltp(sess.token, segment, spot_token)
@@ -164,6 +172,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     aggregator: MinuteAggregator | None = None
     session_watch: asyncio.Task[None] | None = None
     atm_watch: asyncio.Task[None] | None = None
+    poller: UniversePoller | None = None
 
     try:
         if settings.run_mode == "live":
@@ -180,13 +189,23 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await aggregator.start()
             rt.aggregator = aggregator
 
+            # Resolve the reference-price token BEFORE building the feed so token and
+            # segment stay consistent. Falling back to the NIFTY constant paired with
+            # a non-NSE segment (e.g. a commodity/BSE-index boot symbol → 26000 on
+            # MCXFO/BSECM) is an invalid instrument and yields no spot tick.
             reg_entry = get_registry().get(rt.active_symbol)
-            index_token = (reg_entry.spot_token if reg_entry else None) or settings.nifty_index_token
-            index_segment = (
-                xts_client.SEG_BSECM
-                if reg_entry and (reg_entry.exchange or "").upper() == "BSE"
-                else xts_client.SEG_NSECM
-            )
+            index_token = reg_entry.spot_token if reg_entry else None
+            if not index_token and reg_entry is not None and sess.authenticated:
+                try:
+                    index_token = await _resolve_spot_token(reg_entry)
+                except Exception as e:
+                    log.warning("feed.spot_resolve_error", symbol=rt.active_symbol, error=str(e))
+            if index_token and reg_entry is not None:
+                index_segment = _spot_segment(reg_entry)
+            else:
+                # Consistent valid fallback: NIFTY index token on its own cash segment.
+                index_token = settings.nifty_index_token
+                index_segment = xts_client.SEG_NSECM
             feed = OptionFeedClient(
                 rt.tick_queue,
                 _resubscribe_provider,
@@ -208,6 +227,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 name="atm-drift-watch",
             )
 
+            # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
+            # aggregator → option_oi_snapshots path as the live feed.
+            if settings.poller_enabled:
+                poller = UniversePoller(rt.tick_queue)
+                await poller.start()
+                rt.universe_poller = poller
+
         yield
 
     finally:
@@ -219,6 +245,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+        # Stop producers (feed + poller) before the aggregator so no producer
+        # outlives the consumer draining the queue.
+        if poller is not None:
+            await poller.stop()
         if feed is not None:
             await feed.stop()
         if aggregator is not None:
@@ -241,6 +271,22 @@ def _frontend_dist_dir() -> Path | None:
         if p.is_dir() and (p / "index.html").is_file():
             return p
     return None
+
+
+class _SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to ``index.html`` on 404 so client-side routes
+    (e.g. ``/hidden``) resolve on hard refresh when FastAPI serves the built SPA
+    directly (frozen-exe / local ``frontend/dist``). Inert under nginx/Vite, which
+    already do history fallback. The ``/api`` and ``/ws`` routers are registered
+    before the greedy ``/`` mount, so they always match first — this fallback only
+    ever sees non-API paths, and turns their 404s into the SPA shell.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code == 404:
+            return await super().get_response("index.html", scope)
+        return response
 
 
 async def _spot_refresher(feed: OptionFeedClient) -> None:
@@ -278,7 +324,7 @@ def create_app() -> FastAPI:
 
     dist = _frontend_dist_dir()
     if dist is not None:
-        app.mount("/", StaticFiles(directory=str(dist), html=True), name="frontend")
+        app.mount("/", _SPAStaticFiles(directory=str(dist), html=True), name="frontend")
     else:
 
         @app.get("/")

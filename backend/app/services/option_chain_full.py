@@ -253,7 +253,12 @@ class OptionChainFullEngine:
                 break
 
         T_year = _years_to_expiry(expiry, now_utc)
-        r_rate = 0.065
+        # Commodity options are options-on-FUTURES: approximate Black-76 by using a
+        # zero cost-of-carry (r=0) on the forward, since iv_spot is the near-future
+        # price. Equity/index options keep the spot risk-free rate. This removes the
+        # systematic carry bias a spot-BS r-drift would add to commodity IVs.
+        _iv_reg = get_registry().get(symbol)
+        r_rate = 0.0 if (_iv_reg is not None and _iv_reg.kind == "commodity") else 0.065
         # Prefer the live WebSocket spot for IV accuracy; fall back to tick underlying
         iv_spot_global: Optional[float] = live_spot or spot
 

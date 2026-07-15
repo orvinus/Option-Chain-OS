@@ -28,6 +28,8 @@ export interface MarketContextValue {
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
   handleAuthenticated: () => void;
+  /** Last error from the automatic broker connect (null while connecting/connected). */
+  connectError: string | null;
 
   symbol: string;
   symbolGroups: SymbolSectorGroup[];
@@ -64,6 +66,7 @@ export function useMarketContext(): MarketContextValue {
   const [authenticated, setAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   const symbolIndex = useMemo(() => flattenSymbols(symbolGroups), [symbolGroups]);
   const activeEntry: SymbolEntry | undefined = symbolIndex[symbol];
@@ -95,6 +98,33 @@ export function useMarketContext(): MarketContextValue {
     // symbol intentionally excluded from deps — we only want to sync once on initial mount/poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-connect the broker using the appKey/secretKey in .env. The XTS market-data
+  // API authenticates with the API key alone (no MPIN/TOTP/per-user login), so there
+  // is no manual "Connect to Broker" page — establish the session automatically and
+  // retry until it succeeds.
+  useEffect(() => {
+    if (!authChecked || authenticated) return;
+    let cancelled = false;
+    let inFlight = false;
+    const connect = async () => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
+      try {
+        await api.login({ mpin: "" });
+        if (!cancelled) setConnectError(null);
+      } catch (e) {
+        if (!cancelled) setConnectError(String(e));
+      } finally {
+        inFlight = false;
+      }
+    };
+    void connect();
+    // Gentle retry while disconnected — XTS market-data login is rate-limited and
+    // every login restarts the feed, so don't hammer it. Stops once authenticated.
+    const id = setInterval(() => void connect(), 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [authChecked, authenticated]);
 
   // Load the symbol registry once authenticated; retry every 3s on transient failure
   // or when groups is empty (e.g. backend came up after frontend).
@@ -178,7 +208,7 @@ export function useMarketContext(): MarketContextValue {
       : null;
 
   return {
-    authenticated, authChecked, health, setAuthenticated, handleAuthenticated,
+    authenticated, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,

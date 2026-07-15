@@ -27,6 +27,16 @@ class HealthResponse(BaseModel):
         default="NIFTY",
         description="Underlying currently subscribed on the live feed; controlled via /api/active-symbol",
     )
+    poller_enabled: bool = Field(
+        default=False,
+        description="Universe poller (all-symbol REST snapshotter) is running",
+    )
+    poller_last_sweep_at: str | None = Field(
+        default=None, description="ISO-8601 time of the last completed poller sweep",
+    )
+    poller_last_ticks: int = Field(
+        default=0, description="Ticks enqueued by the most recent poller sweep",
+    )
 
 
 class SpotResponse(BaseModel):
@@ -210,6 +220,12 @@ class LoginResponse(BaseModel):
     status: str
     message: str
     authenticated: bool
+
+
+class HiddenLoginRequest(BaseModel):
+    """Fixed username+password gate for the /hidden dashboard (verified against .env)."""
+    username: str
+    password: str
 
 
 class SymbolEntryOut(BaseModel):

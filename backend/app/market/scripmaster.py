@@ -45,8 +45,9 @@ class InstrumentToken:
     @property
     def exchange_type(self) -> int:
         # XTS ExchangeSegments enum (NOT the legacy Angel codes): NSECM=1, NSEFO=2,
-        # NSECD=3, BSECM=11, BSEFO=12. SENSEX options live on BSEFO(12).
-        return {"NSE": 1, "NFO": 2, "CDS": 3, "BSE": 11, "BFO": 12}[self.exchange]
+        # NSECD=3, BSECM=11, BSEFO=12, MCXFO=51. SENSEX options live on BSEFO(12);
+        # MCX commodity options on MCXFO(51). "MFO" is our internal short tag.
+        return {"NSE": 1, "NFO": 2, "CDS": 3, "BSE": 11, "BFO": 12, "MFO": 51}[self.exchange]
 
 
 @dataclass
@@ -90,6 +91,8 @@ _COL_INSTRUMENT_TYPE = 2
 _COL_NAME = 3
 _COL_SERIES = 5
 _COL_LOTSIZE = 12
+_COL_MULTIPLIER = 13  # units per lot. MCX carries the real contract size here (LotSize=1)
+_COL_UNDERLYING_ID = 14  # UnderlyingInstrumentId — used for MCX near-future ATM resolution
 _COL_CONTRACT_EXPIRATION = 16
 _COL_STRIKE = 17
 _COL_OPTION_TYPE = 18
@@ -118,16 +121,34 @@ def _parse_iso_expiry(s: str) -> date | None:
         return None
 
 
+# XTS segment prefix (first pipe field) → our internal short exchange tag.
+_SEG_PREFIX_TO_TAG = {"NSEFO": "NFO", "BSEFO": "BFO", "MCXFO": "MFO"}
+
+
 def _master_line_to_row(line: str) -> dict | None:
-    """Convert one FO master 'Options' line (NSEFO or BSEFO) into a normalised row."""
+    """Convert one FO master 'Options' line (NSEFO/BSEFO/MCXFO) into a normalised row.
+
+    Returns ``None`` for non-option / malformed lines. For an MCXFO line that
+    fails to parse we emit a debug log — commodity master columns may differ from
+    NSEFO, and a silent ``None`` would otherwise produce an empty universe with
+    no error (MUST VERIFY the MCX column layout in the Phase-0 probe).
+    """
+    row = _parse_master_line(line)
+    if row is None and line[:5].upper() == "MCXFO":
+        log.debug("scripmaster.mcx_line_unparsed", line=line[:160])
+    return row
+
+
+def _parse_master_line(line: str) -> dict | None:
     parts = line.split("|")
     if len(parts) <= _COL_OPTION_TYPE:
         return None
     if parts[_COL_INSTRUMENT_TYPE].strip() != _INSTRUMENT_TYPE_OPTIONS:
         return None
-    # parts[0] is the ExchangeSegment ("NSEFO" | "BSEFO") — tag the exchange so
-    # downstream subscription picks the correct XTS segment (NFO=2 / BFO=12).
-    exch_seg = "BFO" if parts[0].strip().upper() == "BSEFO" else "NFO"
+    # parts[0] is the ExchangeSegment ("NSEFO" | "BSEFO" | "MCXFO") — tag the
+    # exchange so downstream subscription picks the right XTS segment
+    # (NFO=2 / BFO=12 / MCXFO=51). Unknown prefixes default to NFO.
+    exch_seg = _SEG_PREFIX_TO_TAG.get(parts[0].strip().upper(), "NFO")
     token = parts[_COL_INSTRUMENT_ID].strip()
     name = parts[_COL_NAME].strip().upper()
     if not token or not name:
@@ -143,10 +164,22 @@ def _master_line_to_row(line: str) -> dict | None:
     except (TypeError, ValueError):
         return None
     series = parts[_COL_SERIES].strip().upper()
-    instrumenttype = series if series in ("OPTIDX", "OPTSTK") else (
-        "OPTIDX" if name in _INDEX_NAMES else "OPTSTK"
-    )
+    # Commodities (MCX) are neither OPTIDX nor OPTSTK — classify as OPTCOM so the
+    # option filter recognises them. Equity/index classification is unchanged.
+    if exch_seg == "MFO":
+        instrumenttype = "OPTCOM"
+    elif series in ("OPTIDX", "OPTSTK", "OPTCOM"):
+        instrumenttype = series
+    elif name in _INDEX_NAMES:
+        instrumenttype = "OPTIDX"
+    else:
+        instrumenttype = "OPTSTK"
     display = parts[_COL_DISPLAY_NAME].strip() if len(parts) > _COL_DISPLAY_NAME else ""
+    underlying_id = parts[_COL_UNDERLYING_ID].strip() if len(parts) > _COL_UNDERLYING_ID else ""
+    # MCX carries the tradable contract size in the Multiplier column (col 13);
+    # its LotSize (col 12) is 1 (number of lots). NSE/BSE use LotSize directly.
+    lot_col = _COL_MULTIPLIER if exch_seg == "MFO" else _COL_LOTSIZE
+    lotsize = parts[lot_col].strip() if len(parts) > lot_col else "0"
     return {
         "token": token,
         "symbol": (display or f"{name}{int(strike)}{opt_type}").upper(),
@@ -155,17 +188,21 @@ def _master_line_to_row(line: str) -> dict | None:
         "strike": strike,
         "instrumenttype": instrumenttype,
         "exch_seg": exch_seg,
-        "lotsize": (parts[_COL_LOTSIZE].strip() or "0"),
+        "lotsize": (lotsize or "0"),
         "option_type": opt_type,
+        "underlying_id": underlying_id,
     }
 
 
-async def _load_nsefo_master_rows(force_refresh: bool = False) -> list[dict]:
-    """Fetch + parse the full options master (NSEFO + BSEFO) once, cached for ``CACHE_TTL``.
+_FO_SEGMENTS = ("NSEFO", "BSEFO", "MCXFO")
 
-    Both segments are pulled in one ``/instruments/master`` call so NSE (NIFTY) and
-    BSE (SENSEX) options share a single cache. BSEFO may be empty/absent if the
-    appKey is not entitled to BSE market data — that's tolerated (NSE still works).
+
+async def _load_fo_master_rows(force_refresh: bool = False) -> list[dict]:
+    """Fetch + parse the full options master (NSEFO + BSEFO + MCXFO) once, cached for ``CACHE_TTL``.
+
+    All three segments are pulled in one ``/instruments/master`` call so NSE, BSE
+    and MCX options share a single cache. BSEFO/MCXFO may be empty/absent if the
+    appKey is not entitled to that market — that's tolerated (NSE still works).
     """
     global _master_rows, _master_fetched_at
     async with _master_lock:
@@ -184,30 +221,30 @@ async def _load_nsefo_master_rows(force_refresh: bool = False) -> list[dict]:
             raise RuntimeError("Cannot fetch scrip data: session not authenticated.")
 
         log.info("scripmaster.master.start")
-        dump = await xts_client.get_master(sess.token, ["NSEFO", "BSEFO"])
+        dump = await xts_client.get_master(sess.token, list(_FO_SEGMENTS))
         rows: list[dict] = []
-        nsefo = bsefo = 0
+        counts = {"NSEFO": 0, "BSEFO": 0, "MCXFO": 0}
         for line in dump.splitlines():
             line = line.strip()
             seg = line[:5].upper()
-            if seg not in ("NSEFO", "BSEFO"):
+            if seg not in _FO_SEGMENTS:
                 continue
             row = _master_line_to_row(line)
             if row:
                 rows.append(row)
-                if seg == "BSEFO":
-                    bsefo += 1
-                else:
-                    nsefo += 1
+                counts[seg] += 1
         _master_rows = rows
         _master_fetched_at = datetime.utcnow()
-        log.info("scripmaster.master.success", parsed=len(rows), nsefo=nsefo, bsefo=bsefo)
+        log.info(
+            "scripmaster.master.success",
+            parsed=len(rows), nsefo=counts["NSEFO"], bsefo=counts["BSEFO"], mcxfo=counts["MCXFO"],
+        )
         return rows
 
 
 async def _fetch_via_master(symbol: str) -> list[dict]:
-    """Return the option rows for ``symbol`` from the cached NSEFO master."""
-    rows = await _load_nsefo_master_rows()
+    """Return the option rows for ``symbol`` from the cached FO master."""
+    rows = await _load_fo_master_rows()
     sym = symbol.upper()
     out = [r for r in rows if r.get("name") == sym]
     if not out:
@@ -293,9 +330,11 @@ def _parse_expiry(s: str) -> date | None:
 def _is_symbol_option(row: dict, symbol: str) -> bool:
     if (row.get("name") or "").upper() != symbol.upper():
         return False
-    if (row.get("instrumenttype") or "").upper() not in ("OPTIDX", "OPTSTK"):
+    # OPTCOM = MCX commodity option; MFO = MCX F&O segment tag. Both gates must
+    # include the commodity variants or every MCX row is silently dropped.
+    if (row.get("instrumenttype") or "").upper() not in ("OPTIDX", "OPTSTK", "OPTCOM"):
         return False
-    if (row.get("exch_seg") or "").upper() not in ("NFO", "BFO"):
+    if (row.get("exch_seg") or "").upper() not in ("NFO", "BFO", "MFO"):
         return False
     return True
 
@@ -311,11 +350,11 @@ def _row_to_token(row: dict) -> InstrumentToken | None:
     if not opt_type:
         return None
     try:
-        raw_strike = row.get("strike")
-        strike_val = float(raw_strike)
-        if strike_val > 100000:  # paise-scaled (old scrip master format)
-            strike_val = strike_val / 100.0
-        strike = int(round(strike_val))
+        # XTS master strikes are in rupees (verified 2026-07-13 across NSE/BSE/MCX):
+        # no rescaling. A former ">100000 -> /100" paise-guard was removed — it
+        # corrupted legitimate high strikes (SENSEX far-OTM as the index rises,
+        # SILVER/GOLD on MCX, high-priced stocks like MRF).
+        strike = int(round(float(row.get("strike"))))
     except (TypeError, ValueError):
         return None
     try:
@@ -372,19 +411,62 @@ def _atm_strike(spot: float, step: int) -> int:
     return int(round(spot / step) * step)
 
 
+def _infer_strike_step(strikes: Iterable[int]) -> int:
+    """Modal gap between consecutive sorted unique strikes (0 if indeterminate).
+
+    Used when the registry has no per-symbol strike_step (e.g. auto-added stocks
+    and MCX commodities, whose steps vary — CRUDEOIL 50, GOLD 100, NATURALGAS 1).
+    """
+    uniq = sorted({int(s) for s in strikes})
+    if len(uniq) < 2:
+        return 0
+    gaps: dict[int, int] = {}
+    for a, b in zip(uniq, uniq[1:]):
+        g = b - a
+        if g > 0:
+            gaps[g] = gaps.get(g, 0) + 1
+    if not gaps:
+        return 0
+    # Most frequent gap; tie-break on the smaller gap (true grid spacing).
+    return sorted(gaps.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def _atm_from_chain(strike_ltps: dict[int, tuple[float | None, float | None]]) -> int | None:
+    """Put–call-parity ATM: the strike minimising ``|call_ltp - put_ltp|``.
+
+    Fallback reference for commodities when the near-future quote is unavailable.
+    ``strike_ltps`` maps strike -> (call_ltp, put_ltp); strikes missing either leg
+    are ignored.
+    """
+    best: tuple[float, int] | None = None
+    for strike, (call_ltp, put_ltp) in strike_ltps.items():
+        if call_ltp is None or put_ltp is None:
+            continue
+        diff = abs(float(call_ltp) - float(put_ltp))
+        if best is None or diff < best[0]:
+            best = (diff, int(strike))
+    return best[1] if best else None
+
+
 async def resolve_option_universe(
     spot: float,
     symbol: str | None = None,
     today: date | None = None,
     force_refresh: bool = False,
+    window: int | None = None,
+    policies: list[str] | None = None,
 ) -> tuple[list[InstrumentToken], list[date]]:
-    """Resolve option tokens for ``symbol`` within the configured strike window and expiries.
+    """Resolve option tokens for ``symbol`` within the strike window and expiries.
 
-    Returns ``(tokens, chosen_expiries)``.
+    ``window`` / ``policies`` default to the global ``settings`` values (unchanged
+    live-feed behaviour); the universe poller passes a narrower window and its own
+    expiry policy to bound REST-quote volume. Returns ``(tokens, chosen_expiries)``.
     """
     sym = (symbol or settings.underlying_symbol).upper()
     raw = await get_scripmaster(sym, force_refresh=force_refresh)
     today = today or datetime.utcnow().date()
+    win = window if window is not None else settings.strike_window
+    pols = policies if policies is not None else settings.expiry_policies
 
     all_options: list[InstrumentToken] = []
     for row in raw:
@@ -398,20 +480,26 @@ async def resolve_option_universe(
         log.warning("scripmaster.no_options_found", symbol=sym)
         return [], []
 
-    expiries = _select_expiries([o.expiry for o in all_options], today, settings.expiry_policies)
+    expiries = _select_expiries([o.expiry for o in all_options], today, pols)
     if not expiries:
-        log.warning("scripmaster.no_expiries_resolved", symbol=sym, policies=settings.expiry_policies)
+        log.warning("scripmaster.no_expiries_resolved", symbol=sym, policies=pols)
         return [], []
 
-    # Per-symbol strike step from the registry; falls back to settings (50).
+    # Per-symbol strike step from the registry; else infer from the chain's own
+    # strike spacing (stocks/commodities), else fall back to settings (50).
     from .symbols import get_registry
 
     reg_entry = get_registry().get(sym)
-    step = reg_entry.strike_step if reg_entry and reg_entry.strike_step > 0 else settings.strike_step
+    if reg_entry and reg_entry.strike_step > 0:
+        step = reg_entry.strike_step
+    else:
+        step = _infer_strike_step(
+            o.strike for o in all_options if o.expiry in expiries
+        ) or settings.strike_step
 
     atm = _atm_strike(spot, step)
-    lo = atm - settings.strike_window * step
-    hi = atm + settings.strike_window * step
+    lo = atm - win * step
+    hi = atm + win * step
 
     chosen: list[InstrumentToken] = [
         o for o in all_options if o.expiry in expiries and lo <= o.strike <= hi
