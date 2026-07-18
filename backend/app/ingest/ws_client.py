@@ -460,6 +460,27 @@ class OptionFeedClient:
                     errors=errors,
                     reasons=dict(reasons) or None,
                 )
+                # A PARTIAL failure (feed stays live because some instruments
+                # succeeded, but others were rejected) silently drops those
+                # strikes: they never emit ticks, so their rows never reach
+                # option_oi_snapshots and /api/oi-change + /api/option-chain
+                # totals come out truncated. This used to hide under
+                # subscribe.success — surface it loudly so a competing session
+                # (a 2nd backend on the same XTS appKey) or a partial breach of
+                # the broker's 50-instrument cap is visible instead of quiet.
+                if rejected or errors:
+                    log.warning(
+                        "ws.subscribe.partial_truncation",
+                        instruments=total,
+                        subscribed=live,
+                        rejected=rejected,
+                        errors=errors,
+                        reasons=dict(reasons) or None,
+                        hint="some instruments were NOT subscribed — their strikes "
+                        "will be missing from OI totals. Usual cause: a 2nd backend "
+                        "on the same XTS appKey stealing the session, or STRIKE_WINDOW "
+                        "exceeding the broker's 50-instrument cap.",
+                    )
         except Exception as e:
             # Don't drop the connection on a subscribe hiccup; if no data flows the
             # heartbeat will recover. Avoids a reconnect storm on transient errors.
