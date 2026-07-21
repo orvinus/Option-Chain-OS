@@ -47,6 +47,21 @@ _THEN_BEFORE_SQL = text(
     """
 )
 
+# Floored baseline: latest row per strike WITHIN [floor, cutoff] (mirrors the
+# engine's _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL — must be done in SQL, not by
+# post-filtering _THEN_BEFORE_SQL, which would drop strikes whose only <=cutoff
+# row is pre-session instead of picking their latest in-session row).
+_THEN_BEFORE_FLOOR_SQL = text(
+    """
+    SELECT strike, option_type, oi, ltp, ts FROM (
+        SELECT strike, option_type, oi, ltp, ts,
+               ROW_NUMBER() OVER (PARTITION BY strike, option_type ORDER BY ts DESC) rn
+        FROM option_oi_snapshots
+        WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
+    ) t WHERE rn = 1
+    """
+)
+
 _THEN_AFTER_SQL = text(
     """
     SELECT strike, option_type, oi, ltp, ts FROM (
@@ -126,29 +141,48 @@ async def _recompute_oi_change(conn, symbol: str, expiry: str, timeframe: str):
     anchor = _tzaware(bounds["max_ts"])
     earliest = _tzaware(bounds["min_ts"])
 
+    session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+    params = {"symbol": symbol, "expiry": expiry}
     delta = parse_timeframe(timeframe)
+
+    # Now-side floored to today's session (mirror the engine).
+    now_rows = [
+        r for r in (await conn.execute(_NOW_SQL, params)).mappings().all()
+        if _tzaware(r["ts"]) >= session_floor
+    ]
+
     if delta == "full_day":
-        cutoff = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
-        then_sql = _THEN_AFTER_SQL
+        cutoff = session_floor
+        then_rows = list(
+            (await conn.execute(_THEN_AFTER_SQL, {**params, "cutoff": session_floor}))
+            .mappings().all()
+        )
+        floored_then = False
     else:
         cutoff = anchor - delta
-        then_sql = _THEN_BEFORE_SQL
-        if cutoff < earliest:  # baseline clamp (oi_change.py:356-372)
-            cutoff = earliest
-            then_sql = _THEN_AFTER_SQL
-
-    params = {"symbol": symbol, "expiry": expiry}
-    now_rows = (await conn.execute(_NOW_SQL, params)).mappings().all()
-    then_rows = (await conn.execute(then_sql, {**params, "cutoff": cutoff})).mappings().all()
-
-    # Mirror the engine's session floor (oi_change.py): the now-side only keeps
-    # strikes with data in the anchor day's session — applied in Python here to
-    # stay an independent mechanism.
-    session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
-    now_rows = [r for r in now_rows if _tzaware(r["ts"]) >= session_floor]
+        # Floored baseline (latest per strike within [floor, cutoff]).
+        then_rows = list(
+            (await conn.execute(_THEN_BEFORE_FLOOR_SQL, {**params, "cutoff": cutoff, "floor": session_floor}))
+            .mappings().all()
+        )
+        floored_then = True
 
     now_map = {(int(r["strike"]), r["option_type"]): r for r in now_rows}
     then_map = {(int(r["strike"]), r["option_type"]): r for r in then_rows}
+
+    # Per-strike baseline backfill: a now-strike with no floored ``then`` row is
+    # backfilled with its earliest today snapshot (mirror the engine).
+    if floored_then:
+        missing = [k for k in now_map if k not in then_map]
+        if missing:
+            after_map = {
+                (int(r["strike"]), r["option_type"]): r
+                for r in (await conn.execute(_THEN_AFTER_SQL, {**params, "cutoff": session_floor})).mappings().all()
+            }
+            for k in missing:
+                if k in after_map:
+                    then_map[k] = after_map[k]
+
     strikes = sorted({k[0] for k in now_map})
 
     rows = {}
@@ -169,7 +203,7 @@ async def _recompute_oi_change(conn, symbol: str, expiry: str, timeframe: str):
             "put_ltp": float(pe_n["ltp"]) if pe_n and pe_n["ltp"] is not None else None,
         }
     return {"anchor": anchor, "rows": rows, "total_ce": total_ce, "total_pe": total_pe,
-            "cutoff": cutoff, "clamped": then_sql is _THEN_AFTER_SQL and timeframe != "full_day"}
+            "cutoff": cutoff, "clamped": False}
 
 
 async def run(symbol: str) -> list[Finding]:

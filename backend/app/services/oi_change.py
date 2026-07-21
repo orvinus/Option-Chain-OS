@@ -388,55 +388,53 @@ class OIChangeEngine:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
         anchor = anchor_from_db or now_utc
+        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
-            cutoff = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
-            then_sql = _SNAPSHOT_AT_OR_AFTER_SQL  # earliest snapshot at/after market open
+            # Baseline = earliest snapshot at/after today's open (already today-
+            # anchored — no floor/backfill needed).
+            then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            then_params = {**params, "cutoff": session_floor}
+            floored_then = False
         else:
             assert isinstance(delta_or_marker, timedelta)
             cutoff = anchor - delta_or_marker
-            then_sql = _SNAPSHOT_AT_OR_BEFORE_SQL
-            # If the requested window reaches back before the first stored snapshot
-            # (e.g. a 1h timeframe early in the session with only 40m of history),
-            # there is no true baseline: ``AT_OR_BEFORE`` returns nothing and every
-            # strike's change would be reported as ``now - 0`` — wildly inflated.
-            # Clamp the baseline to the earliest available snapshot so the change is
-            # bounded to "since data start" instead of exploding.
-            async with AsyncSessionLocal() as s0:
-                min_row = (
-                    await s0.execute(_MIN_TS_SQL, {"symbol": symbol, "expiry": expiry})
-                ).mappings().first()
-            earliest = min_row["min_ts"] if min_row else None
-            if earliest is not None:
-                if getattr(earliest, "tzinfo", None) is None:
-                    earliest = earliest.replace(tzinfo=timezone.utc)
-                else:
-                    earliest = earliest.astimezone(timezone.utc)
-                if cutoff < earliest:
-                    cutoff = earliest
-                    then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            # FLOOR the baseline to today's session open. The now-side is already
+            # floored; if the then-side were not, a strike lacking a today row
+            # at/before ``cutoff`` — e.g. one just re-added by ATM-drift
+            # resubscription, or the first row after an ~83s reconnect gap —
+            # would silently borrow a PREVIOUS session's much-larger OI as its
+            # baseline, making ``now - then`` a huge, wrong-sign NEGATIVE that
+            # sums to −Cr on short timeframes (the "1 Min shows −2Cr" bug).
+            then_sql = _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL
+            then_params = {**params, "cutoff": cutoff, "floor": session_floor}
+            floored_then = True
 
-        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             now_rows = (
-                (
-                    await s.execute(
-                        _LATEST_SNAPSHOT_SQL,
-                        {"symbol": symbol, "expiry": expiry, "floor": session_floor},
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            then_rows = (
-                (
-                    await s.execute(
-                        then_sql,
-                        {"symbol": symbol, "expiry": expiry, "cutoff": cutoff},
-                    )
-                )
-                .mappings()
-                .all()
-            )
+                await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+            ).mappings().all()
+            then_rows = list((await s.execute(then_sql, then_params)).mappings().all())
+            # Per-strike baseline clamp (mirrors ``_compute_range``): a now-strike
+            # with no floored ``then`` row (it entered the window mid-session) is
+            # backfilled with its EARLIEST today snapshot, so its change reads as
+            # "since its first row today" (small) rather than ``now - 0`` (a full
+            # phantom add) or a leak to a prior session (huge negative).
+            if floored_then:
+                then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+                missing = {
+                    (r["strike"], r["option_type"]) for r in now_rows
+                } - then_keys
+                if missing:
+                    earliest_rows = (
+                        await s.execute(
+                            _SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": session_floor}
+                        )
+                    ).mappings().all()
+                    then_rows += [
+                        r for r in earliest_rows
+                        if (r["strike"], r["option_type"]) in missing
+                    ]
 
         # Sub-minute timeframes: hold the last OI move where the exact window is flat.
         if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None:
