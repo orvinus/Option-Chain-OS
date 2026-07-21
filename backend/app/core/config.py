@@ -62,7 +62,12 @@ class Settings(BaseSettings):
     # ---------------- Ingestion scope ----------------
     underlying_symbol: str = Field(default="NIFTY", validation_alias="UNDERLYING_SYMBOL")
     nifty_index_token: str = Field(default="26000", validation_alias="NIFTY_INDEX_TOKEN")
-    strike_window: int = Field(default=50, validation_alias="STRIKE_WINDOW")
+    # Default 11 = ATM±11 = 23 strikes × 2 + spot = 47 live subscriptions, safely
+    # under the broker's ~50-instrument-per-session cap. Do NOT raise the default
+    # to 50 — that resolves to ~202 instruments, exceeds the cap, and silently
+    # truncates the option chain. A larger window needs a broker plan with a
+    # higher cap (and/or the REST universe poller for the non-active strikes).
+    strike_window: int = Field(default=11, validation_alias="STRIKE_WINDOW")
     strike_step: int = Field(default=50, validation_alias="STRIKE_STEP")
     expiries: str = Field(default="current_weekly", validation_alias="EXPIRIES")
     nifty_lot_size: int = Field(default=75, validation_alias="NIFTY_LOT_SIZE")
