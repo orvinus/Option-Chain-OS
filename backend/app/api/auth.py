@@ -28,6 +28,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 async def _bootstrap_live_ingestion_if_needed() -> None:
     """Start aggregator + feed if startup did not already (non-blocking)."""
+    # Replay instances NEVER contact the broker (single-session-per-appKey safety):
+    # a live feed here would compete with the one production session on the same key.
+    if settings.run_mode != "live":
+        log.info("auth.login.ingestion_skipped_replay")
+        return
     try:
         from ..main import _resubscribe_provider, _spot_refresher
         from ..runtime import get_runtime
@@ -80,6 +85,20 @@ async def login(body: LoginRequest) -> LoginResponse:
     Responds as soon as login + DB persist succeed; live ingestion starts in the
     background so the browser does not hang on network latency.
     """
+    # Hard gate: a replay instance must NEVER log into the broker. The broker allows
+    # ONE market-data session per appKey, so a login here would steal the single
+    # production session (the recurring "data goes wrong every few days" bug). The
+    # frontend also skips auto-connect in replay, but this is the authoritative
+    # backstop — no caller can coax a replay backend into a broker session.
+    if settings.run_mode != "live":
+        raise HTTPException(
+            409,
+            "Broker login is disabled in replay mode (RUN_MODE=replay). This instance "
+            "serves historical data only and never contacts the broker. To run a live "
+            "feed locally, set RUN_MODE=live with a DEDICATED appKey — never the "
+            "production key (they cannot share one broker session).",
+        )
+
     sess = get_session_manager()
 
     if not (settings.xts_md_app_key or "").strip() or not (settings.xts_md_secret_key or "").strip():
@@ -150,6 +169,16 @@ async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
     ) & secrets.compare_digest(body.password.encode(), settings.hidden_password.encode())
     if not ok:
         raise HTTPException(401, "Invalid username or password.")
+
+    # (c0) Replay: credentials are valid but there is NO broker session to start —
+    #      never contact the broker on a replay instance (single-session safety).
+    #      Unlock the gated UI for historical/replay data without a broker login.
+    if settings.run_mode != "live":
+        return LoginResponse(
+            status="ok",
+            message="Replay mode — historical data only (broker feed disabled).",
+            authenticated=False,
+        )
 
     # (c) Start / confirm the broker feed. If a session already exists (e.g. admin
     #     logged in on the primary dashboard, or auto-login at startup), reuse it —

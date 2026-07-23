@@ -105,6 +105,10 @@ export function useMarketContext(): MarketContextValue {
   // retry until it succeeds.
   useEffect(() => {
     if (!authChecked || authenticated) return;
+    // Replay instances never contact the broker (single-session-per-appKey safety):
+    // don't auto-connect — the backend would 409 anyway, and hammering it every 60s
+    // just shows a perpetual "connect error" on this dev/replay dashboard.
+    if (health?.run_mode === "replay") return;
     let cancelled = false;
     let inFlight = false;
     const connect = async () => {
@@ -124,7 +128,7 @@ export function useMarketContext(): MarketContextValue {
     // every login restarts the feed, so don't hammer it. Stops once authenticated.
     const id = setInterval(() => void connect(), 60_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [authChecked, authenticated]);
+  }, [authChecked, authenticated, health?.run_mode]);
 
   // Load the symbol registry once authenticated; retry every 3s on transient failure
   // or when groups is empty (e.g. backend came up after frontend).
