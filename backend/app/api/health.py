@@ -33,4 +33,7 @@ async def health() -> HealthResponse:
         nse_session_open=is_nse_regular_session_open(),
         feed_connected=feed_connected,
         active_symbol=rt.active_symbol,
+        poller_enabled=rt.universe_poller is not None,
+        poller_last_sweep_at=rt.poller_last_sweep_at.isoformat() if rt.poller_last_sweep_at else None,
+        poller_last_ticks=rt.poller_last_ticks,
     )

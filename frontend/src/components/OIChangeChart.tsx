@@ -149,7 +149,7 @@ export function OIChangeChart({
       },
       tooltip: {
         trigger: "axis",
-        axisPointer: { type: "shadow" },
+        axisPointer: { type: "cross", label: { backgroundColor: "#1f2937" } },
         backgroundColor: "rgba(10,15,30,0.97)",
         borderColor: "#1e3a5f",
         borderWidth: 1,
@@ -198,6 +198,8 @@ export function OIChangeChart({
           formatter: (v: number) => compactNum(v),
         },
       },
+      // Mouse-wheel zoom + drag-pan across the strike axis (no extra UI chrome).
+      dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none" }],
       series: [
         {
           name: seriesLabel.pe,

@@ -38,7 +38,15 @@ async def run_atm_drift_watch() -> None:
                 await asyncio.sleep(CHECK_INTERVAL_S)
                 continue
 
-            step = settings.strike_step
+            # Per-symbol strike step (registry), NOT the global settings.strike_step.
+            # With the global 50, SENSEX (step 100) over-triggered and small-step
+            # symbols (stocks 5, NATURALGAS 1) never re-centred — the window drifted
+            # off and the chart emptied. Recomputed each iteration since the active
+            # symbol can change between checks.
+            from ..market.symbols import get_registry
+
+            reg_entry = get_registry().get(rt.active_symbol)
+            step = reg_entry.strike_step if reg_entry and reg_entry.strike_step > 0 else settings.strike_step
             window = settings.strike_window
             # Half-window in points: how far ATM can move before we resubscribe.
             threshold_pts = window * step * DRIFT_THRESHOLD_FRACTION

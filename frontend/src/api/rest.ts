@@ -2,12 +2,16 @@ import type {
   ActiveSymbolResponse,
   ExpiriesResponse,
   HealthResponse,
+  HistoryDatesResponse,
   LoginRequest,
   LoginResponse,
+  MultiTimeframeResponse,
   NiftyCrossCheckResponse,
   OIChangeResponse,
   OITimeseriesResponse,
   OptionChainFullResponse,
+  RatioTimeseriesResponse,
+  ReplayFramesResponse,
   SpotResponse,
   SymbolsResponse,
   Timeframe,
@@ -123,6 +127,64 @@ export const api = {
     }),
   optionChainFull: (timeframe: Timeframe, expiry?: string, symbol?: string) =>
     getJSON<OptionChainFullResponse>("/api/option-chain-full", { timeframe, expiry, symbol }),
+  /** IST trading days that have stored data — powers the historical date picker. */
+  historyDates: (symbol?: string, expiry?: string) =>
+    getJSON<HistoryDatesResponse>("/api/history-dates", { symbol, expiry }),
+  /**
+   * Call/Put ratio + PCR per bucket over the (optional) window, for the Ratio chart.
+   * `strikeMin`/`strikeMax` bound the ATM ± N window (omit for the full stored chain).
+   */
+  ratioTimeseries: (
+    symbol: string,
+    expiry: string,
+    bucket = "1m",
+    fromTs?: string,
+    toTs?: string,
+    strikeMin?: number,
+    strikeMax?: number,
+  ) =>
+    getJSON<RatioTimeseriesResponse>("/api/ratio-timeseries", {
+      symbol,
+      expiry,
+      bucket,
+      from_ts: fromTs,
+      to_ts: toTs,
+      strike_min: strikeMin != null ? String(strikeMin) : undefined,
+      strike_max: strikeMax != null ? String(strikeMax) : undefined,
+    }),
+  /**
+   * One OI-change row per timeframe + shared level ratio/pcr/spot/atm. `asOf` =>
+   * historical instant; `atmWindow` (>=0) restricts every sum to strikes within ATM ± N.
+   */
+  multiTimeframe: (symbol?: string, expiry?: string, asOf?: string, atmWindow?: number) =>
+    getJSON<MultiTimeframeResponse>("/api/multi-timeframe", {
+      symbol,
+      expiry,
+      as_of: asOf,
+      atm_window: atmWindow != null ? String(atmWindow) : undefined,
+    }),
+  /**
+   * Enriched historical replay frames from `start` to `end` at `step` resolution.
+   * `summary` drops per-strike rows for a lean scrubber payload.
+   */
+  replayFrames: (
+    symbol: string,
+    expiry: string,
+    start: string,
+    end: string,
+    step = "1m",
+    summary = false,
+    withGreeks = false,
+  ) =>
+    getJSON<ReplayFramesResponse>("/api/replay", {
+      symbol,
+      expiry,
+      start,
+      end,
+      step,
+      summary: summary ? "true" : undefined,
+      with_greeks: withGreeks ? "true" : undefined,
+    }),
   symbols: () => getJSON<SymbolsResponse>("/api/symbols"),
   /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — Angel resubscribe can be slow. */
   setActiveSymbol: (symbol: string) =>

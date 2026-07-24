@@ -39,12 +39,12 @@ just make image builds and on-server validation runs snappier.
 
 ## 1. Can I access the terminal? — Yes, three ways
 
-**A) Browser terminal (easiest, nothing to install).**
+**(A) Browser terminal (easiest, nothing to install).**
 hPanel → **VPS** → **Manage** → on the VPS Overview page click **Terminal**
 (top-right). A new browser tab opens **already logged in as `root`**. This is the
 recommended way if you're new — no keys, no SSH client.
 
-**B) SSH from your own PC.** Windows PowerShell already ships OpenSSH:
+**(B) SSH from your own PC.** Windows PowerShell already ships OpenSSH:
 ```powershell
 ssh root@YOUR_IP
 ```
@@ -52,7 +52,7 @@ Find `YOUR_IP` and the SSH username (`root`) in hPanel on the VPS Overview page
 ("VPS details" card). First connect: type `yes` to accept the fingerprint, then
 the root password you set. (Later you can switch to SSH-key login — see §12.)
 
-**C) Kodee AI terminal (optional).** hPanel's Browser Terminal includes *Kodee*,
+**(C) Kodee AI terminal (optional).** hPanel's Browser Terminal includes *Kodee*,
 an AI assistant that turns plain-English requests into shell commands. Handy, but
 everything in this guide is copy-paste, so you won't need it.
 
@@ -188,8 +188,11 @@ Set these (copy the secret values from the working `.env` on your PC):
 | `API_CORS_ORIGINS` | `http://YOUR_IP` | So the browser origin is accepted by the API |
 | `UNDERLYING_SYMBOL` | `NIFTY` | Symbol the feed starts on |
 | `NIFTY_LOT_SIZE` | `65` | Current NIFTY lot |
-| `STRIKE_WINDOW` | `11` | Strikes each side of ATM (fits the 50-instrument cap) |
+| `STRIKE_WINDOW` | `11` | Strikes each side of ATM for the LIVE feed (fits the 50-instrument cap) |
 | `EXPIRIES` | `current_weekly` | Which expiry to subscribe |
+| `POLLER_ENABLED` | `false` → `true` after §11a | All-symbol background OI snapshotter (start OFF) |
+| `POLLER_STRIKE_WINDOW` | `7` | Strikes each side of ATM the poller quotes per symbol |
+| `POLLER_TIER_FAST_S` / `_MID_S` / `_SLOW_S` | `20` / `60` / `180` | Per-tier refresh cadence (indices / commodities / stocks) |
 
 **Leave these alone:**
 - `DB_URL` / `DB_URL_SYNC` — `docker-compose.yml` overrides them to the internal
@@ -251,6 +254,54 @@ and a recent `last_flush_at`. Then from your PC's browser:
 Off-hours, `feed_connected` may be `false` and charts static — that's normal.
 
 **Now take a snapshot in hPanel** (a "known-good" restore point).
+
+---
+
+## 11a. All-symbol universe poller — tier-by-tier rollout
+
+The dashboard dropdown now lists ~230 F&O symbols (indices + NSE/BSE stocks + MCX
+commodities) from `data/symbols.json`. The **live feed** still streams sub-second
+data for the ONE symbol you're viewing (via the ~50-instrument subscription). The
+**universe poller** fills in every *other* symbol by REST-quoting their chains on a
+tiered cadence into the same DB — so switching to any symbol shows fresh data and
+all symbols accrue OI history in parallel. It reuses the live session token and
+**never logs in**, so it cannot disturb the feed.
+
+Roll it out in stages (it defaults OFF):
+
+1. **Regenerate the symbol list** (once, after a fresh dashboard login so the token
+   is valid). From the repo dir, inside the backend container:
+   ```bash
+   docker compose -f docker/docker-compose.yml exec backend \
+     python /app/../scripts/build_symbols_from_master.py --dry-run   # preview
+   # then drop --dry-run to write data/symbols.json, and rebuild:
+   docker compose --env-file .env -f docker/docker-compose.yml up -d --build
+   ```
+   Confirm the dropdown shows all sectors and that switching symbols works on the
+   live feed alone (poller still OFF).
+
+2. **Enable the poller, watch for rate limits.** Set `POLLER_ENABLED=true` in `.env`,
+   `docker compose ... up -d`, then:
+   ```bash
+   docker compose -f docker/docker-compose.yml logs -f backend | grep poller
+   ```
+   Healthy: `poller.started` then periodic `poller.sweep.done`. **Watch for
+   `poller.rate_limited`** (HTTP 429) or `poller.token_stale`. `curl .../api/health`
+   now shows `poller_enabled`, `poller_last_sweep_at`, `poller_last_ticks`.
+
+3. **Tune if throttled.** If you see sustained `poller.rate_limited`, raise the tier
+   intervals (`POLLER_TIER_*_S`), lower `POLLER_MAX_CONCURRENCY`, raise
+   `POLLER_PACE_MS`, or shrink `POLLER_STRIKE_WINDOW`. To prioritise latency for the
+   most-traded names, set their `poll_tier` to `fast`/`mid` in `data/symbols.json`
+   (the generator defaults indices→fast, commodities→mid, stocks→slow).
+
+4. **Storage.** The poller multiplies row volume; migration `0002` enables Timescale
+   compression (>7 days) + 180-day retention on `option_oi_snapshots` automatically
+   (`alembic upgrade head` runs on boot). Adjust in SQL if you want a different window.
+
+> The poller only produces data with a live, active session token. Off-hours (feed
+> disconnected) it logs `poller.token_stale` and no-ops safely until the feed
+> reconnects at the next session open — this is expected, not an error.
 
 ---
 

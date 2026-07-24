@@ -18,6 +18,10 @@ class Runtime:
         self.tick_queue: "asyncio.Queue[Tick]" = asyncio.Queue(maxsize=100_000)
         self.feed_client: Optional[object] = None  # OptionFeedClient
         self.aggregator: Optional[object] = None  # MinuteAggregator
+        self.universe_poller: Optional[object] = None  # UniversePoller (all-symbol REST snapshotter)
+        # Poller observability (surfaced on /api/health).
+        self.poller_last_sweep_at: Optional[datetime] = None
+        self.poller_last_ticks: int = 0
         self.tokens: list[InstrumentToken] = []
         self.expiries: list[date] = []
         self.latest_spot: Optional[float] = None

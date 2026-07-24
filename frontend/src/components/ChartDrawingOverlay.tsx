@@ -12,15 +12,50 @@ import { useEffect, useRef, useState } from "react";
  * click-through, so the chart's own tooltip / hover still works.
  */
 
-type Tool = "cursor" | "hline" | "vline" | "free" | "eraser";
+type Tool = "cursor" | "hline" | "vline" | "trend" | "ray" | "rect" | "free" | "eraser";
+
+/** Two-point tools store both anchors; single-axis tools store one coordinate. */
+type TwoPoint = { x1: number; y1: number; x2: number; y2: number };
 
 type Shape =
   | { id: string; kind: "hline"; y: number }
   | { id: string; kind: "vline"; x: number }
+  | ({ id: string; kind: "trend" } & TwoPoint)
+  | ({ id: string; kind: "ray" } & TwoPoint)
+  | ({ id: string; kind: "rect" } & TwoPoint)
   | { id: string; kind: "free"; pts: { x: number; y: number }[] };
 
 let _idSeq = 0;
 const nextId = () => `s${++_idSeq}`;
+
+const PERSIST_PREFIX = "oi.drawings.v1.";
+
+/** Load persisted shapes (normalized coords) and advance the id sequence past them. */
+function loadShapes(key: string | undefined): Shape[] {
+  if (!key || typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(PERSIST_PREFIX + key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    for (const s of parsed as Shape[]) {
+      const n = Number(String(s.id).replace(/^s/, ""));
+      if (Number.isFinite(n) && n > _idSeq) _idSeq = n;
+    }
+    return parsed as Shape[];
+  } catch {
+    return [];
+  }
+}
+
+function saveShapes(key: string | undefined, shapes: Shape[]): void {
+  if (!key || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(PERSIST_PREFIX + key, JSON.stringify(shapes));
+  } catch {
+    /* quota / private mode — persistence is best-effort */
+  }
+}
 
 const STROKE = "#fbbf24"; // amber-400 — visible on the dark theme
 const STROKE_PREVIEW = "rgba(251,191,36,0.55)";
@@ -46,6 +81,19 @@ function drawShape(
     const x = s.x * w;
     ctx.moveTo(x, 0);
     ctx.lineTo(x, h);
+  } else if (s.kind === "trend") {
+    ctx.moveTo(s.x1 * w, s.y1 * h);
+    ctx.lineTo(s.x2 * w, s.y2 * h);
+  } else if (s.kind === "ray") {
+    const X1 = s.x1 * w, Y1 = s.y1 * h;
+    // Extend the segment well past the second point so it reads as a ray.
+    const ex = X1 + (s.x2 - s.x1) * w * 100;
+    const ey = Y1 + (s.y2 - s.y1) * h * 100;
+    ctx.moveTo(X1, Y1);
+    ctx.lineTo(ex, ey);
+  } else if (s.kind === "rect") {
+    const x = Math.min(s.x1, s.x2) * w, y = Math.min(s.y1, s.y2) * h;
+    ctx.rect(x, y, Math.abs(s.x2 - s.x1) * w, Math.abs(s.y2 - s.y1) * h);
   } else {
     s.pts.forEach((p, i) => {
       const X = p.x * w;
@@ -55,6 +103,16 @@ function drawShape(
     });
   }
   ctx.stroke();
+}
+
+/** Distance (px) from point P to segment AB, in canvas pixel space. */
+function segDistPx(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
 interface ToolBtnProps {
@@ -93,9 +151,11 @@ const svg = (d: string) => (
 interface Props {
   /** Maps a pointer pixel (relative to the chart) to a readable value/level + time. */
   describeAt?: (px: number, py: number) => { value: string; time: string | null } | null;
+  /** When set, committed drawings are persisted to localStorage under this key. */
+  persistKey?: string;
 }
 
-export function ChartDrawingOverlay({ describeAt }: Props) {
+export function ChartDrawingOverlay({ describeAt, persistKey }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorTagRef = useRef<HTMLDivElement>(null);
@@ -105,11 +165,28 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
   const toolRef = useRef(tool);
   toolRef.current = tool;
 
-  // Undo/redo history: an immutable stack of shape-arrays + a cursor.
-  const [hist, setHist] = useState<{ stack: Shape[][]; index: number }>({ stack: [[]], index: 0 });
+  // Undo/redo history: an immutable stack of shape-arrays + a cursor. Seeded from
+  // any persisted drawings for this key.
+  const [hist, setHist] = useState<{ stack: Shape[][]; index: number }>(() => ({
+    stack: [loadShapes(persistKey)],
+    index: 0,
+  }));
   const shapes = hist.stack[hist.index];
   const shapesRef = useRef<Shape[]>(shapes);
   shapesRef.current = shapes;
+
+  // Reload persisted drawings when the persist key changes (e.g. symbol/expiry swap).
+  const persistKeyRef = useRef(persistKey);
+  useEffect(() => {
+    if (persistKeyRef.current === persistKey) return;
+    persistKeyRef.current = persistKey;
+    setHist({ stack: [loadShapes(persistKey)], index: 0 });
+  }, [persistKey]);
+
+  // Persist the current committed drawing set whenever it changes.
+  useEffect(() => {
+    saveShapes(persistKey, shapes);
+  }, [shapes, persistKey]);
 
   const commit = (next: Shape[]) =>
     setHist((h) => {
@@ -188,12 +265,28 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
     const removed = eraseRemovedRef.current;
     if (!removed) return;
     const { w, h } = size;
+    const PX = p.x * w, PY = p.y * h;
     for (const s of shapesRef.current) {
       if (removed.has(s.id)) continue;
       let hit = false;
-      if (s.kind === "hline") hit = Math.abs(s.y * h - p.y * h) <= HIT_TOL_PX;
-      else if (s.kind === "vline") hit = Math.abs(s.x * w - p.x * w) <= HIT_TOL_PX;
-      else hit = s.pts.some((q) => Math.hypot((q.x - p.x) * w, (q.y - p.y) * h) <= HIT_TOL_PX);
+      if (s.kind === "hline") hit = Math.abs(s.y * h - PY) <= HIT_TOL_PX;
+      else if (s.kind === "vline") hit = Math.abs(s.x * w - PX) <= HIT_TOL_PX;
+      else if (s.kind === "trend") hit = segDistPx(PX, PY, s.x1 * w, s.y1 * h, s.x2 * w, s.y2 * h) <= HIT_TOL_PX;
+      else if (s.kind === "ray") {
+        const ex = s.x1 * w + (s.x2 - s.x1) * w * 100;
+        const ey = s.y1 * h + (s.y2 - s.y1) * h * 100;
+        hit = segDistPx(PX, PY, s.x1 * w, s.y1 * h, ex, ey) <= HIT_TOL_PX;
+      } else if (s.kind === "rect") {
+        const x1 = s.x1 * w, y1 = s.y1 * h, x2 = s.x2 * w, y2 = s.y2 * h;
+        hit = Math.min(
+          segDistPx(PX, PY, x1, y1, x2, y1),
+          segDistPx(PX, PY, x2, y1, x2, y2),
+          segDistPx(PX, PY, x2, y2, x1, y2),
+          segDistPx(PX, PY, x1, y2, x1, y1),
+        ) <= HIT_TOL_PX;
+      } else {
+        hit = s.pts.some((q) => Math.hypot((q.x - p.x) * w, (q.y - p.y) * h) <= HIT_TOL_PX);
+      }
       if (hit) removed.add(s.id);
     }
   };
@@ -226,6 +319,8 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
     if (t === "free") draftPtsRef.current = [p];
     else if (t === "hline") previewRef.current = { id: "_p", kind: "hline", y: p.y };
     else if (t === "vline") previewRef.current = { id: "_p", kind: "vline", x: p.x };
+    else if (t === "trend" || t === "ray" || t === "rect")
+      previewRef.current = { id: "_p", kind: t, x1: p.x, y1: p.y, x2: p.x, y2: p.y } as Shape;
     else if (t === "eraser") { eraseRemovedRef.current = new Set(); eraseAt(p); }
     redrawRef.current();
   };
@@ -238,6 +333,10 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
     if (t === "free") draftPtsRef.current?.push(p);
     else if (t === "hline") { const pv = previewRef.current; if (pv && pv.kind === "hline") pv.y = p.y; }
     else if (t === "vline") { const pv = previewRef.current; if (pv && pv.kind === "vline") pv.x = p.x; }
+    else if (t === "trend" || t === "ray" || t === "rect") {
+      const pv = previewRef.current;
+      if (pv && (pv.kind === "trend" || pv.kind === "ray" || pv.kind === "rect")) { pv.x2 = p.x; pv.y2 = p.y; }
+    }
     else if (t === "eraser") eraseAt(p);
     redrawRef.current();
   };
@@ -260,6 +359,18 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
       const pv = previewRef.current;
       previewRef.current = null;
       if (pv && pv.kind === "vline") commit([...shapesRef.current, { id: nextId(), kind: "vline", x: pv.x }]);
+    } else if (t === "trend" || t === "ray" || t === "rect") {
+      const pv = previewRef.current;
+      previewRef.current = null;
+      if (pv && (pv.kind === "trend" || pv.kind === "ray" || pv.kind === "rect")) {
+        // Ignore a click with no drag (zero-size shape).
+        if (Math.hypot((pv.x2 - pv.x1) * size.w, (pv.y2 - pv.y1) * size.h) > 3) {
+          commit([
+            ...shapesRef.current,
+            { id: nextId(), kind: pv.kind, x1: pv.x1, y1: pv.y1, x2: pv.x2, y2: pv.y2 } as Shape,
+          ]);
+        } else redrawRef.current();
+      }
     } else if (t === "eraser") {
       const removed = eraseRemovedRef.current;
       eraseRemovedRef.current = null;
@@ -306,6 +417,15 @@ export function ChartDrawingOverlay({ describeAt }: Props) {
         </ToolBtn>
         <ToolBtn active={tool === "vline"} title="Vertical line" onClick={() => setTool("vline")}>
           {svg("M12 3v18")}
+        </ToolBtn>
+        <ToolBtn active={tool === "trend"} title="Trend line (2 points)" onClick={() => setTool("trend")}>
+          {svg("M4 20L20 4")}
+        </ToolBtn>
+        <ToolBtn active={tool === "ray"} title="Ray (extends from the first point)" onClick={() => setTool("ray")}>
+          {svg("M4 20L20 4|M20 4h-5|M20 4v5")}
+        </ToolBtn>
+        <ToolBtn active={tool === "rect"} title="Rectangle" onClick={() => setTool("rect")}>
+          {svg("M4 6h16v12H4z")}
         </ToolBtn>
         <ToolBtn active={tool === "free"} title="Freehand pen" onClick={() => setTool("free")}>
           {svg("M4 20l3.5-1L18 8.5 15.5 6 5 16.5z|M14 7l3 3")}

@@ -41,6 +41,11 @@ SEG_NSEFO = 2
 SEG_NSECD = 3
 SEG_BSECM = 11
 SEG_BSEFO = 12
+# MCX commodity F&O. 51 is the standard Symphony XTS value, but there are ZERO
+# MCX references elsewhere in this repo — VERIFY empirically (Phase-0 probe) by
+# POST /instruments/master with ["MCXFO"] and inspecting the returned segment tag
+# before relying on it. "MFO" is our internal short tag (parallel to NFO/BFO).
+SEG_MCXFO = 51
 
 SEGMENT_NAME_TO_CODE = {
     "NSECM": SEG_NSECM, "NSE": SEG_NSECM,
@@ -48,6 +53,7 @@ SEGMENT_NAME_TO_CODE = {
     "NSECD": SEG_NSECD, "CDS": SEG_NSECD,
     "BSECM": SEG_BSECM, "BSE": SEG_BSECM,
     "BSEFO": SEG_BSEFO, "BFO": SEG_BSEFO,
+    "MCXFO": SEG_MCXFO, "MCX": SEG_MCXFO, "MFO": SEG_MCXFO,
 }
 
 
@@ -155,6 +161,57 @@ def _parse_quote_ltp(result: Any) -> float | None:
         if ltp is not None:
             try:
                 return float(ltp)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def parse_quote_entries(payload: Any) -> list[dict]:
+    """Normalise a ``/instruments/quotes`` response into a flat list of quote dicts.
+
+    XTS returns each quote either as a nested dict or a JSON-encoded string under
+    ``result.listQuotes`` (older gateways use ``quoteList``). Mirrors the parser
+    proven in the validation harness so the poller and harness agree byte-for-byte.
+    """
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        return []
+    quotes = result.get("listQuotes") or result.get("quoteList") or []
+    out: list[dict] = []
+    for q in quotes:
+        obj = q
+        if isinstance(q, str):
+            try:
+                obj = json.loads(q)
+            except (ValueError, TypeError):
+                continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def quote_ltp_volume(q: dict) -> tuple[float | None, int | None]:
+    """(LastTradedPrice, TotalTradedQuantity) from a 1501 touchline quote (tolerant of nesting)."""
+    tl = q.get("Touchline") if isinstance(q.get("Touchline"), dict) else q
+    ltp = tl.get("LastTradedPrice", q.get("LastTradedPrice"))
+    vol = tl.get("TotalTradedQuantity", q.get("TotalTradedQuantity"))
+    try:
+        ltp_f = float(ltp) if ltp is not None else None
+    except (TypeError, ValueError):
+        ltp_f = None
+    try:
+        vol_i = int(vol) if vol is not None else None
+    except (TypeError, ValueError):
+        vol_i = None
+    return ltp_f, vol_i
+
+
+def quote_oi(q: dict) -> int | None:
+    """OpenInterest from a 1510 quote (accepts a few key spellings)."""
+    for key in ("OpenInterest", "OI", "openInterest"):
+        if key in q:
+            try:
+                return int(q[key])
             except (TypeError, ValueError):
                 return None
     return None

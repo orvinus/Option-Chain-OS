@@ -12,8 +12,10 @@
   "dependencies": {
     "echarts": "^5.5.1",
     "echarts-for-react": "^3.0.2",
+    "lightweight-charts": "^4.2.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

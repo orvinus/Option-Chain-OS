@@ -38,11 +38,22 @@ BUCKET_TO_INTERVAL: dict[str, str] = {
 }
 
 
+def _safe_ratio(num: float, den: float) -> float | None:
+    """Divide, returning ``None`` on a zero denominator (so charts gap the line)."""
+    if den == 0:
+        return None
+    return num / den
+
+
 @dataclass
 class OITimeseriesPoint:
     ts: str  # ISO-8601 IST (bucket start)
     total_call_oi: int
     total_put_oi: int
+    # Call/Put ratio and PCR of the bucketed totals. ``ratio`` is None when there
+    # is no put OI; ``pcr`` is None when there is no call OI.
+    ratio: float | None = None
+    pcr: float | None = None
 
 
 @dataclass
@@ -60,6 +71,25 @@ _MAX_TS_SQL = text(
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )
+
+_STRIKE_BOUNDS_SQL = text(
+    """
+    SELECT MIN(strike) AS lo, MAX(strike) AS hi
+    FROM option_oi_snapshots
+    WHERE symbol = :symbol AND expiry = :expiry
+    """
+)
+
+
+async def fetch_strike_bounds(symbol: str, expiry: date) -> tuple[int, int] | None:
+    """Return the (min, max) stored strike for a symbol+expiry, or None if empty."""
+    async with AsyncSessionLocal() as s:
+        row = (
+            await s.execute(_STRIKE_BOUNDS_SQL, {"symbol": symbol, "expiry": expiry})
+        ).mappings().first()
+    if not row or row["lo"] is None or row["hi"] is None:
+        return None
+    return int(row["lo"]), int(row["hi"])
 
 # Carry-forward (locf) matters: a strike contributes its last-known OI to every
 # bucket, not just buckets it happened to tick in. Without it, buckets missing a
@@ -144,14 +174,19 @@ async def fetch_oi_timeseries(
             )
         ).mappings().all()
 
-    points = [
-        OITimeseriesPoint(
-            ts=r["bucket"].astimezone(IST).isoformat(),
-            total_call_oi=int(r["total_call_oi"]),
-            total_put_oi=int(r["total_put_oi"]),
+    points = []
+    for r in rows:
+        ce = int(r["total_call_oi"])
+        pe = int(r["total_put_oi"])
+        points.append(
+            OITimeseriesPoint(
+                ts=r["bucket"].astimezone(IST).isoformat(),
+                total_call_oi=ce,
+                total_put_oi=pe,
+                ratio=_safe_ratio(ce, pe),
+                pcr=_safe_ratio(pe, ce),
+            )
         )
-        for r in rows
-    ]
     return OITimeseriesResponse(
         symbol=symbol,
         expiry=expiry.isoformat(),

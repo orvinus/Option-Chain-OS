@@ -29,13 +29,14 @@ SYMBOLS_FILE = PROJECT_ROOT / "data" / "symbols.json"
 class SymbolEntry:
     symbol: str
     display: str
-    kind: str           # "index" | "stock"
+    kind: str           # "index" | "stock" | "commodity"
     sector: str
-    exchange: str       # "NSE"
+    exchange: str       # "NSE" | "BSE" | "MCX"
     spot_token: str | None
     fno_eligible: bool
     lot_size: int
     strike_step: int
+    poll_tier: str = "slow"   # "fast" | "mid" | "slow" — universe-poller cadence tier
 
 
 class SymbolRegistry:
@@ -54,16 +55,19 @@ class SymbolRegistry:
                 return
             raw = json.loads(SYMBOLS_FILE.read_text(encoding="utf-8"))
             for item in raw.get("symbols", []):
+                kind = str(item.get("kind", "stock"))
+                poll_tier = str(item.get("poll_tier") or ("fast" if kind == "index" else "slow")).lower()
                 entry = SymbolEntry(
                     symbol=str(item["symbol"]).upper(),
                     display=str(item.get("display") or item["symbol"]),
-                    kind=str(item.get("kind", "stock")),
+                    kind=kind,
                     sector=str(item.get("sector", "Misc")),
                     exchange=str(item.get("exchange", "NSE")),
                     spot_token=item.get("spot_token"),
                     fno_eligible=bool(item.get("fno_eligible", False)),
                     lot_size=int(item.get("lot_size") or 0),
                     strike_step=int(item.get("strike_step") or 50),
+                    poll_tier=poll_tier,
                 )
                 self._by_symbol[entry.symbol] = entry
             self._loaded = True
@@ -105,6 +109,7 @@ class SymbolRegistry:
                 symbol=entry.symbol, display=entry.display, kind=entry.kind,
                 sector=entry.sector, exchange=entry.exchange, spot_token=entry.spot_token,
                 fno_eligible=fno_eligible, lot_size=entry.lot_size, strike_step=entry.strike_step,
+                poll_tier=entry.poll_tier,
             )
 
     def update_spot_token(self, symbol: str, spot_token: str) -> None:
@@ -116,6 +121,7 @@ class SymbolRegistry:
                 symbol=entry.symbol, display=entry.display, kind=entry.kind,
                 sector=entry.sector, exchange=entry.exchange, spot_token=spot_token,
                 fno_eligible=entry.fno_eligible, lot_size=entry.lot_size, strike_step=entry.strike_step,
+                poll_tier=entry.poll_tier,
             )
 
 
