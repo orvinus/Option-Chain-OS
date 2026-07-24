@@ -13,6 +13,7 @@ from ..core.config import settings
 from ..core.db import AsyncSessionLocal
 from ..core.time_utils import IST, market_open_today, parse_timeframe
 from ..market.symbols import get_registry
+from .greeks import calc_greeks, synthetic_future
 from .iv_calculator import calc_iv
 
 CACHE_TTL_SECONDS = 30
@@ -69,6 +70,14 @@ class OptionChainFullRow:
     pcr_volume: float | None
     pe_ce_oi: int
     pe_ce_oi_change: int
+    call_delta: float | None = None
+    call_gamma: float | None = None
+    call_theta: float | None = None
+    call_vega: float | None = None
+    put_delta: float | None = None
+    put_gamma: float | None = None
+    put_theta: float | None = None
+    put_vega: float | None = None
 
 
 @dataclass
@@ -80,6 +89,9 @@ class OptionChainFullResponse:
     computed_at: str
     lot_size: int
     rows: list[OptionChainFullRow]
+    synthetic_future: float | None = None
+    atm_iv: float | None = None
+    ivp: float | None = None
 
 
 # Now-side floored at the anchor day's session open — previous-session frozen
@@ -100,6 +112,18 @@ _SNAPSHOT_AT_OR_BEFORE_SQL = text(
         strike, option_type, oi, ltp, volume, underlying, ts
     FROM option_oi_snapshots
     WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff
+    ORDER BY strike, option_type, ts DESC
+    """
+)
+
+# Baseline floored to today's session — prevents a short-timeframe delta from
+# borrowing a previous session's OI as its baseline (mirrors OIChangeEngine).
+_SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL = text(
+    """
+    SELECT DISTINCT ON (strike, option_type)
+        strike, option_type, oi, ltp, volume, underlying, ts
+    FROM option_oi_snapshots
+    WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
@@ -193,52 +217,47 @@ class OptionChainFullEngine:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
         anchor = anchor_from_db or now_utc
+        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
-            cutoff = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
             then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            then_params = {**params, "cutoff": session_floor}
+            floored_then = False
         else:
             assert isinstance(delta_or_marker, timedelta)
             cutoff = anchor - delta_or_marker
-            then_sql = _SNAPSHOT_AT_OR_BEFORE_SQL
-            # Clamp the baseline to the earliest stored snapshot when the requested
-            # window predates available history, so per-strike OI change is not
-            # reported as ``now - 0`` (hugely inflated). Mirrors OIChangeEngine.
-            async with AsyncSessionLocal() as s0:
-                min_row = (
-                    await s0.execute(_MIN_TS_SQL, {"symbol": symbol, "expiry": expiry})
-                ).mappings().first()
-            earliest = min_row["min_ts"] if min_row else None
-            if earliest is not None:
-                if getattr(earliest, "tzinfo", None) is None:
-                    earliest = earliest.replace(tzinfo=timezone.utc)
-                else:
-                    earliest = earliest.astimezone(timezone.utc)
-                if cutoff < earliest:
-                    cutoff = earliest
-                    then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            # FLOOR the baseline to today's session (mirrors OIChangeEngine): a
+            # strike lacking a today row at/before ``cutoff`` (re-added by ATM
+            # drift, or first row after a reconnect gap) must not borrow a
+            # previous session's OI as baseline — that made short-timeframe
+            # ``now - then`` a huge, wrong-sign negative.
+            then_sql = _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL
+            then_params = {**params, "cutoff": cutoff, "floor": session_floor}
+            floored_then = True
 
-        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             now_rows = (
-                (
-                    await s.execute(
-                        _LATEST_SNAPSHOT_SQL,
-                        {"symbol": symbol, "expiry": expiry, "floor": session_floor},
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            then_rows = (
-                (
-                    await s.execute(
-                        then_sql,
-                        {"symbol": symbol, "expiry": expiry, "cutoff": cutoff},
-                    )
-                )
-                .mappings()
-                .all()
-            )
+                await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+            ).mappings().all()
+            then_rows = list((await s.execute(then_sql, then_params)).mappings().all())
+            # Per-strike baseline clamp: a now-strike missing from the floored
+            # ``then`` map (entered mid-session) is backfilled with its earliest
+            # today snapshot → change reads "since first row today", not ``now-0``.
+            if floored_then:
+                then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+                missing = {
+                    (r["strike"], r["option_type"]) for r in now_rows
+                } - then_keys
+                if missing:
+                    earliest_rows = (
+                        await s.execute(
+                            _SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": session_floor}
+                        )
+                    ).mappings().all()
+                    then_rows += [
+                        r for r in earliest_rows
+                        if (r["strike"], r["option_type"]) in missing
+                    ]
 
         now_map: dict[tuple[int, str], dict] = {(r["strike"], r["option_type"]): dict(r) for r in now_rows}
         then_map: dict[tuple[int, str], dict] = {(r["strike"], r["option_type"]): dict(r) for r in then_rows}
@@ -296,6 +315,9 @@ class OptionChainFullEngine:
             call_iv = calc_iv("CE", ce_ltp_now, iv_spot, float(strike), T_year, r_rate)
             put_iv = calc_iv("PE", pe_ltp_now, iv_spot, float(strike), T_year, r_rate)
 
+            call_g = calc_greeks("CE", iv_spot, float(strike), T_year, r_rate, call_iv)
+            put_g = calc_greeks("PE", iv_spot, float(strike), T_year, r_rate, put_iv)
+
             ce_tr = _classify_trend(ce_oi_chg, ce_ltp_chg)
             pe_tr = _classify_trend(pe_oi_chg, pe_ltp_chg)
 
@@ -349,6 +371,14 @@ class OptionChainFullEngine:
                     pcr_volume=pcr_vol,
                     pe_ce_oi=pe_ce,
                     pe_ce_oi_change=pe_ce_chg,
+                    call_delta=call_g.delta if call_g else None,
+                    call_gamma=call_g.gamma if call_g else None,
+                    call_theta=call_g.theta if call_g else None,
+                    call_vega=call_g.vega if call_g else None,
+                    put_delta=put_g.delta if put_g else None,
+                    put_gamma=put_g.gamma if put_g else None,
+                    put_theta=put_g.theta if put_g else None,
+                    put_vega=put_g.vega if put_g else None,
                 )
             )
 
@@ -367,6 +397,31 @@ class OptionChainFullEngine:
 
         reg_entry = get_registry().get(symbol)
         lot_size = (reg_entry.lot_size if reg_entry else 0) or settings.nifty_lot_size
+        step = (reg_entry.strike_step if reg_entry else 0) or settings.strike_step
+
+        # ATM strike + synthetic future + ATM IV for header metrics
+        atm_iv: float | None = None
+        synth: float | None = None
+        if final_spot is not None and rows and step > 0:
+            atm_strike = round(float(final_spot) / step) * step
+            atm_row = min(rows, key=lambda r: abs(r.strike - atm_strike))
+            synth = synthetic_future(
+                final_spot, atm_row.call_ltp, atm_row.put_ltp, float(atm_row.strike)
+            )
+            ivs = [v for v in (atm_row.call_iv, atm_row.put_iv) if v is not None]
+            if ivs:
+                atm_iv = sum(ivs) / len(ivs)
+
+        # IVP from accumulated iv_daily history (None until enough days exist)
+        ivp: float | None = None
+        if atm_iv is not None:
+            try:
+                from .iv_history import compute_ivp
+
+                ivp = await compute_ivp(symbol, atm_iv)
+            except Exception:
+                ivp = None
+
         return OptionChainFullResponse(
             timeframe=timeframe,
             expiry=expiry.isoformat(),
@@ -375,6 +430,9 @@ class OptionChainFullEngine:
             computed_at=computed_wall,
             lot_size=lot_size,
             rows=rows,
+            synthetic_future=synth,
+            atm_iv=atm_iv,
+            ivp=ivp,
         )
 
 

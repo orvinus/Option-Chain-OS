@@ -141,6 +141,14 @@ class OptionChainFullStrikeOut(BaseModel):
     pcr_volume: float | None = None
     pe_ce_oi: int = 0
     pe_ce_oi_change: int = 0
+    call_delta: float | None = None
+    call_gamma: float | None = None
+    call_theta: float | None = None
+    call_vega: float | None = None
+    put_delta: float | None = None
+    put_gamma: float | None = None
+    put_theta: float | None = None
+    put_vega: float | None = None
 
 
 class OptionChainFullResponseOut(BaseModel):
@@ -151,21 +159,79 @@ class OptionChainFullResponseOut(BaseModel):
     computed_at: str
     lot_size: int
     rows: list[OptionChainFullStrikeOut]
+    synthetic_future: float | None = None
+    atm_iv: float | None = None
+    ivp: float | None = None
+
+
+class IvScannerRowOut(BaseModel):
+    symbol: str
+    display: str = ""
+    price: float | None = None
+    price_chg: float | None = None
+    price_chg_pct: float | None = None
+    total_oi: int = 0
+    total_oi_chg: int = 0
+    total_oi_chg_pct: float | None = None
+    pcr: float | None = None
+    iv: float | None = None
+    iv_chg_pct: float | None = None
+    iv_range_1y_low: float | None = None
+    iv_range_1y_high: float | None = None
+    hv_10: float | None = None
+    hv_20: float | None = None
+    hv_30: float | None = None
+    ivr: float | None = None
+    ivp: float | None = None
+    iv_hv10: float | None = None
+    iv_hv20: float | None = None
+    iv_hv30: float | None = None
+    history_ready: bool = False
+
+
+class IvScannerResponseOut(BaseModel):
+    mode: str = Field(description="latest | historical")
+    expiry_slot: str = Field(description="near | next | far")
+    expiry: str | None = None
+    asof: str
+    max_symbols: int = 50
+    rows: list[IvScannerRowOut]
+    note: str | None = None
 
 
 class ReplayRowOut(BaseModel):
     strike: int
     call_oi: int
     put_oi: int
+    call_oi_change: int = 0
+    put_oi_change: int = 0
+    call_iv: float | None = None
+    put_iv: float | None = None
+    call_delta: float | None = None
+    put_delta: float | None = None
+    call_gamma: float | None = None
+    put_gamma: float | None = None
+    call_theta: float | None = None
+    put_theta: float | None = None
+    call_vega: float | None = None
+    put_vega: float | None = None
 
 
 class ReplayFrameOut(BaseModel):
     ts: str
     spot: float | None
+    atm: int | None = None
+    total_call_oi: int = 0
+    total_put_oi: int = 0
+    total_call_oi_change: int = 0
+    total_put_oi_change: int = 0
+    ratio: float | None = None
+    pcr: float | None = None
     rows: list[ReplayRowOut]
 
 
 class ReplayResponseOut(BaseModel):
+    symbol: str
     expiry: str
     frames: list[ReplayFrameOut]
 
@@ -174,6 +240,8 @@ class OITimeseriesPointOut(BaseModel):
     ts: str
     total_call_oi: int
     total_put_oi: int
+    ratio: float | None = None
+    pcr: float | None = None
 
 
 class OITimeseriesResponseOut(BaseModel):
@@ -181,6 +249,48 @@ class OITimeseriesResponseOut(BaseModel):
     expiry: str
     bucket: str
     points: list[OITimeseriesPointOut]
+
+
+class RatioPointOut(BaseModel):
+    ts: str
+    ratio: float | None = None
+    pcr: float | None = None
+    total_call_oi: int
+    total_put_oi: int
+
+
+class RatioTimeseriesResponseOut(BaseModel):
+    symbol: str
+    expiry: str
+    bucket: str
+    points: list[RatioPointOut]
+
+
+class HistoryDatesResponse(BaseModel):
+    symbol: str
+    expiry: str
+    dates: list[str]  # IST trading days (YYYY-MM-DD), newest first
+
+
+class MultiTFRowOut(BaseModel):
+    timeframe: str
+    call_oi_change: int
+    put_oi_change: int
+    oi_change_ratio: float | None = None
+
+
+class MultiTFResponseOut(BaseModel):
+    symbol: str
+    expiry: str
+    asof: str
+    computed_at: str
+    spot: float | None = None
+    atm_strike: int | None = None
+    total_call_oi: int
+    total_put_oi: int
+    ratio: float | None = None
+    pcr: float | None = None
+    rows: list[MultiTFRowOut]
 
 
 class InterpretationRowOut(BaseModel):

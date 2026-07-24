@@ -4,10 +4,14 @@ from . import (
     auth,
     expiries,
     health,
+    history,
     interpretation,
+    iv_scanner,
+    multi_timeframe,
     oi_change,
     oi_timeseries,
     option_chain,
+    ratio_timeseries,
     replay,
     spot,
     symbols,
@@ -22,7 +26,11 @@ api_router.include_router(spot.router)
 api_router.include_router(expiries.router)
 api_router.include_router(oi_change.router)
 api_router.include_router(oi_timeseries.router)
+api_router.include_router(ratio_timeseries.router)
+api_router.include_router(multi_timeframe.router)
+api_router.include_router(history.router)
 api_router.include_router(option_chain.router)
+api_router.include_router(iv_scanner.router)
 api_router.include_router(replay.router)
 api_router.include_router(interpretation.router)
 api_router.include_router(symbols.router)

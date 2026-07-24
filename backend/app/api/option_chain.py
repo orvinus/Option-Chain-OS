@@ -130,4 +130,7 @@ async def option_chain_full(
         computed_at=res.computed_at,
         lot_size=res.lot_size,
         rows=[OptionChainFullStrikeOut(**r.__dict__) for r in res.rows],
+        synthetic_future=getattr(res, "synthetic_future", None),
+        atm_iv=getattr(res, "atm_iv", None),
+        ivp=getattr(res, "ivp", None),
     )

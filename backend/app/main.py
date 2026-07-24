@@ -234,6 +234,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 await poller.start()
                 rt.universe_poller = poller
 
+            # Persist ATM IV for the active symbol so IVR/IVP accumulate over days.
+            asyncio.create_task(_iv_history_loop(), name="iv-history-snapshot")
+            # Persist per-strike greeks so replay/exports can show live-computed greeks.
+            asyncio.create_task(_greeks_history_loop(), name="greeks-history-snapshot")
+
         yield
 
     finally:
@@ -303,6 +308,51 @@ async def _spot_refresher(feed: OptionFeedClient) -> None:
         except Exception as e:  # pragma: no cover
             log.warning("spot_refresher.error", error=str(e))
             await asyncio.sleep(5.0)
+
+
+async def _iv_history_loop() -> None:
+    """Periodically snapshot ATM IV for the active symbol into ``iv_daily``."""
+    from .services.iv_history import snapshot_atm_iv_for_symbol
+
+    # Delay initial snapshot so the feed / DB have a chance to warm up.
+    await asyncio.sleep(60.0)
+    while True:
+        try:
+            rt = get_runtime()
+            await snapshot_atm_iv_for_symbol(rt.active_symbol)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("iv_history_loop.error", error=str(e))
+        try:
+            await asyncio.sleep(max(60.0, float(settings.iv_history_snapshot_interval_s)))
+        except asyncio.CancelledError:
+            return
+
+
+async def _greeks_history_loop() -> None:
+    """Periodically persist per-strike greeks/IV for the active symbol.
+
+    Feeds ``greeks_snapshots`` so replay/exports can show the greeks that were
+    actually computed live (not recomputed on read). Runs at a modest cadence —
+    greeks move slower than OI and this is a background enrichment, not the hot
+    path.
+    """
+    from .services.greeks_history import snapshot_greeks_for_symbol
+
+    await asyncio.sleep(75.0)  # warm up after the feed/DB (offset from IV loop)
+    while True:
+        try:
+            rt = get_runtime()
+            await snapshot_greeks_for_symbol(rt.active_symbol)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("greeks_history_loop.error", error=str(e))
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            return
 
 
 def create_app() -> FastAPI:

@@ -62,7 +62,12 @@ class Settings(BaseSettings):
     # ---------------- Ingestion scope ----------------
     underlying_symbol: str = Field(default="NIFTY", validation_alias="UNDERLYING_SYMBOL")
     nifty_index_token: str = Field(default="26000", validation_alias="NIFTY_INDEX_TOKEN")
-    strike_window: int = Field(default=50, validation_alias="STRIKE_WINDOW")
+    # Default 11 = ATM±11 = 23 strikes × 2 + spot = 47 live subscriptions, safely
+    # under the broker's ~50-instrument-per-session cap. Do NOT raise the default
+    # to 50 — that resolves to ~202 instruments, exceeds the cap, and silently
+    # truncates the option chain. A larger window needs a broker plan with a
+    # higher cap (and/or the REST universe poller for the non-active strikes).
+    strike_window: int = Field(default=11, validation_alias="STRIKE_WINDOW")
     strike_step: int = Field(default=50, validation_alias="STRIKE_STEP")
     expiries: str = Field(default="current_weekly", validation_alias="EXPIRIES")
     nifty_lot_size: int = Field(default=75, validation_alias="NIFTY_LOT_SIZE")
@@ -118,6 +123,15 @@ class Settings(BaseSettings):
     # never shipped to the browser). Blank => the /hidden-login endpoint returns 500 until set.
     hidden_user: str = Field(default="", validation_alias="HIDDEN_USER")
     hidden_password: str = Field(default="", validation_alias="HIDDEN_PASSWORD")
+
+    # ---------------- IV scanner / HV ----------------
+    iv_scanner_max_symbols: int = Field(default=50, validation_alias="IV_SCANNER_MAX_SYMBOLS")
+    yahoo_hv_enabled: bool = Field(default=True, validation_alias="YAHOO_HV_ENABLED")
+    iv_history_snapshot_interval_s: float = Field(
+        default=900.0,
+        validation_alias="IV_HISTORY_SNAPSHOT_INTERVAL_S",
+        description="Seconds between background ATM-IV snapshots for the active symbol.",
+    )
 
     # -------- Derived helpers --------
 
