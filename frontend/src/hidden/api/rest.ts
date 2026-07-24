@@ -2,6 +2,7 @@ import type {
   ActiveSymbolResponse,
   ExpiriesResponse,
   HealthResponse,
+  IvScannerResponse,
   LoginRequest,
   LoginResponse,
   NiftyCrossCheckResponse,
@@ -99,6 +100,22 @@ export const api = {
     getJSON<OIChangeResponse>("/api/oi-change", { from_ts: fromTs, to_ts: toTs, expiry, symbol }),
   optionChainFull: (timeframe: Timeframe, expiry?: string, symbol?: string) =>
     getJSON<OptionChainFullResponse>("/api/option-chain-full", { timeframe, expiry, symbol }),
+  /**
+   * Multi-symbol IV / OI scanner. `symbols` is comma-separated (max 50).
+   * `expiry` = near|next|far, `mode` = latest|historical.
+   */
+  ivScanner: (opts: {
+    symbols: string[];
+    expiry?: "near" | "next" | "far";
+    mode?: "latest" | "historical";
+    timeframe?: string;
+  }) =>
+    getJSON<IvScannerResponse>("/api/iv-scanner", {
+      symbols: opts.symbols.join(","),
+      expiry: opts.expiry ?? "near",
+      mode: opts.mode ?? "latest",
+      timeframe: opts.timeframe ?? "full_day",
+    }),
   symbols: () => getJSON<SymbolsResponse>("/api/symbols"),
   /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — Angel resubscribe can be slow. */
   setActiveSymbol: (symbol: string) =>

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { api } from "../api/rest";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { GreeksChainTable } from "../components/GreeksChainTable";
 import { HiddenLogin } from "../components/HiddenLogin";
+import { IvScanner } from "../components/IvScanner";
 import { KPIBar } from "../components/KPIBar";
 import { NetOICalculator } from "../components/NetOICalculator";
 import { OIChangeChart, type OIMode } from "../components/OIChangeChart";
@@ -10,6 +12,7 @@ import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
 import { TimeframeBar } from "../components/TimeframeBar";
 import { TimeRangeSlider } from "../components/TimeRangeSlider";
+import { useIvScanner } from "../hooks/useIvScanner";
 import { useOIChange } from "../hooks/useOIChange";
 import { useOIChangeRange } from "../hooks/useOIChangeRange";
 import { useOptionChainFull } from "../hooks/useOptionChainFull";
@@ -54,12 +57,14 @@ function isoForSessionMinute(dateStr: string, min: number): string {
   return `${dateStr}T${p(hh)}:${p(mm)}:00+05:30`;
 }
 
-export type DashTab = "oi_change" | "oi_absolute" | "net_oi";
+export type DashTab = "oi_change" | "oi_absolute" | "net_oi" | "greeks" | "iv_scan";
 
 const DASH_TABS: { id: DashTab; label: string }[] = [
   { id: "oi_change", label: "OI Change" },
   { id: "oi_absolute", label: "OI Absolute" },
   { id: "net_oi", label: "Net OI Calculator" },
+  { id: "greeks", label: "Greeks" },
+  { id: "iv_scan", label: "IV Scan" },
 ];
 
 function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry> {
@@ -104,6 +109,12 @@ export function Dashboard() {
   // `authenticated` flag so the password is required even when the broker is
   // already connected; `authenticated` still gates data loading below.
   const [gateUnlocked, setGateUnlocked] = useState(false);
+
+  // IV scanner watchlist + controls (independent of the single-symbol feed).
+  const [ivSymbols, setIvSymbols] = useState<string[]>(["NIFTY", "BANKNIFTY", "FINNIFTY"]);
+  const [ivExpiry, setIvExpiry] = useState<"near" | "next" | "far">("near");
+  const [ivMode, setIvMode] = useState<"latest" | "historical">("latest");
+  const [ivSubmitted, setIvSubmitted] = useState(true);
 
   const symbolIndex = useMemo(() => flattenSymbols(symbolGroups), [symbolGroups]);
   const activeEntry: SymbolEntry | undefined = symbolIndex[symbol];
@@ -323,6 +334,19 @@ export function Dashboard() {
       : null;
 
   const showChart = dashTab === "oi_change" || dashTab === "oi_absolute";
+  const showChainTabs = dashTab === "net_oi" || dashTab === "greeks";
+  const showIvScan = dashTab === "iv_scan";
+
+  const handleIvSymbolsChange = useCallback((syms: string[]) => {
+    setIvSymbols(syms);
+  }, []);
+
+  const ivScan = useIvScanner(
+    ivSymbols,
+    ivExpiry,
+    ivMode,
+    gateUnlocked && authenticated && showIvScan && ivSubmitted,
+  );
 
   const noOiChangeInAtmWindow = useMemo(() => {
     if (!showChart || !data || oiMode !== "change") return false;
@@ -397,7 +421,7 @@ export function Dashboard() {
                 )}
               </div>
 
-              {fnoEligible && (
+              {gateUnlocked && (
                 <div className="flex flex-wrap items-center gap-4 pt-1 border-t border-border">
                   <div className="flex flex-wrap items-center gap-1 bg-surface/50 rounded-lg p-0.5">
                     {DASH_TABS.map((t) => (
@@ -416,14 +440,16 @@ export function Dashboard() {
                     ))}
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted">Strikes ATM ±</span>
-                    <AtmWindowSelect value={atmWindow} max={ATM_MAX_WINDOW} onChange={setAtmWindow} />
-                  </div>
+                  {fnoEligible && !showIvScan && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted">Strikes ATM ±</span>
+                      <AtmWindowSelect value={atmWindow} max={ATM_MAX_WINDOW} onChange={setAtmWindow} />
+                    </div>
+                  )}
                 </div>
               )}
 
-              {fnoEligible && maxMin >= 2 && (
+              {fnoEligible && maxMin >= 2 && !showIvScan && (
                 <div className="pt-1 border-t border-border">
                   <TimeRangeSlider
                     fromMin={fromMin}
@@ -437,7 +463,7 @@ export function Dashboard() {
               )}
             </div>
 
-            {!fnoEligible && (
+            {!fnoEligible && !showIvScan && (
               <div className="panel p-6 text-sm text-muted border border-amber-500/20 flex flex-col gap-2">
                 <div className="flex items-center gap-2 text-amber-300">
                   <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -477,17 +503,54 @@ export function Dashboard() {
               />
             )}
 
-            {fnoEligible && initial.error && !data && (
+            {fnoEligible && dashTab === "greeks" && (
+              <GreeksChainTable
+                data={optionChainMerged}
+                liveSpot={liveSpot}
+                atmWindow={atmWindow}
+                symbolDisplay={symbolDisplay}
+                isLoading={isLoadingOc}
+              />
+            )}
+
+            {showIvScan && (
+              <IvScanner
+                groups={symbolGroups}
+                symbols={ivSymbols}
+                onSymbolsChange={handleIvSymbolsChange}
+                data={ivScan.data}
+                loading={ivScan.loading}
+                error={ivScan.error}
+                updatedAt={ivScan.updatedAt}
+                expiry={ivExpiry}
+                mode={ivMode}
+                onExpiryChange={setIvExpiry}
+                onModeChange={setIvMode}
+                onSubmit={() => {
+                  setIvSubmitted(true);
+                  void ivScan.refresh();
+                }}
+                onClearFilters={() => {
+                  setIvExpiry("near");
+                  setIvMode("latest");
+                }}
+              />
+            )}
+
+            {fnoEligible && initial.error && !data && !showIvScan && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Failed to load: {initial.error}
               </div>
             )}
-            {fnoEligible && initialOc.error && !optionChainMerged && dashTab === "net_oi" && (
+            {fnoEligible &&
+              initialOc.error &&
+              !optionChainMerged &&
+              showChainTabs && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Failed to load option chain: {initialOc.error}
               </div>
             )}
-            {fnoEligible && expiryError && expiries.length === 0 && (
+            {fnoEligible && expiryError && expiries.length === 0 && !showIvScan && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Error loading expiries: {expiryError}
               </div>

@@ -122,7 +122,7 @@ export interface LoginResponse {
   authenticated: boolean;
 }
 
-/** Rich option chain row (OI change, volume, IV, trends) — from `/api/option-chain-full` + WS. */
+/** Rich option chain row (OI change, volume, IV, Greeks, trends) — from `/api/option-chain-full` + WS. */
 export interface OptionChainFullRow {
   strike: number;
   call_oi: number;
@@ -143,6 +143,14 @@ export interface OptionChainFullRow {
   pcr_volume: number | null;
   pe_ce_oi: number;
   pe_ce_oi_change: number;
+  call_delta?: number | null;
+  call_gamma?: number | null;
+  call_theta?: number | null;
+  call_vega?: number | null;
+  put_delta?: number | null;
+  put_gamma?: number | null;
+  put_theta?: number | null;
+  put_vega?: number | null;
 }
 
 export interface OptionChainFullResponse {
@@ -153,4 +161,42 @@ export interface OptionChainFullResponse {
   computed_at: string;
   lot_size: number;
   rows: OptionChainFullRow[];
+  synthetic_future?: number | null;
+  atm_iv?: number | null;
+  ivp?: number | null;
+}
+
+export interface IvScannerRow {
+  symbol: string;
+  display: string;
+  price: number | null;
+  price_chg: number | null;
+  price_chg_pct: number | null;
+  total_oi: number;
+  total_oi_chg: number;
+  total_oi_chg_pct: number | null;
+  pcr: number | null;
+  iv: number | null;
+  iv_chg_pct: number | null;
+  iv_range_1y_low: number | null;
+  iv_range_1y_high: number | null;
+  hv_10: number | null;
+  hv_20: number | null;
+  hv_30: number | null;
+  ivr: number | null;
+  ivp: number | null;
+  iv_hv10: number | null;
+  iv_hv20: number | null;
+  iv_hv30: number | null;
+  history_ready: boolean;
+}
+
+export interface IvScannerResponse {
+  mode: "latest" | "historical" | string;
+  expiry_slot: "near" | "next" | "far" | string;
+  expiry: string | null;
+  asof: string;
+  max_symbols: number;
+  rows: IvScannerRow[];
+  note: string | null;
 }

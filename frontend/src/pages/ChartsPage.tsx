@@ -2,14 +2,18 @@ import { useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { ChartIntervalBar } from "../components/ChartIntervalBar";
 import { ConnectBanner } from "../components/ConnectBanner";
+import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
 import { OICandleChart } from "../components/OICandleChart";
 import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
+import { useAvailableDates } from "../hooks/useAvailableDates";
+import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import { useOITimeseries } from "../hooks/useOITimeseries";
 import { useOIStream } from "../hooks/useOIStream";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import type { ChartInterval } from "../utils/oiCandles";
+import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
 
@@ -23,12 +27,33 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   } = mc;
 
   const [interval, setChartInterval] = useState<ChartInterval>(5);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  // Resolve the ATM ± N strike window from the live spot + the symbol's strike
-  // step (same ATM math as the backend: round(spot / step) * step). These bounds
-  // are sent to /api/oi-timeseries which sums every strike inside [min, max].
+  const avail = useAvailableDates(
+    fnoEligible ? symbol : null,
+    expiry,
+    authenticated && fnoEligible && !!expiry,
+  );
+
+  // A past date is read as a fixed full-session window; today/null stays live.
+  const historical = selectedDate != null && !isToday(selectedDate, health);
+  const fromTs = historical ? isoForSessionMinuteOnDate(selectedDate!, 0) : undefined;
+  const toTs = historical ? isoForSessionMinuteOnDate(selectedDate!, maxMinForDate(selectedDate!, health)) : undefined;
+
+  // Historical: resolve THAT day's spot (as of session close) so the ATM window is
+  // centred on the selected day, not today. One-shot fetch, only while historical.
+  const histMtf = useMultiTimeframe({
+    symbol: historical && fnoEligible ? symbol : null,
+    expiry: historical ? expiry : null,
+    asOf: toTs,
+    enabled: historical && authenticated && fnoEligible && !!expiry,
+  });
+
+  // Resolve the ATM ± N strike window from the spot + the symbol's strike step
+  // (same ATM math as the backend: round(spot / step) * step). These bounds are
+  // sent to /api/oi-timeseries which sums every strike inside [min, max].
   const step = activeEntry?.strike_step ?? 50;
-  const spot = liveSpot ?? health?.latest_spot ?? null;
+  const spot = historical ? histMtf.data?.spot ?? null : liveSpot ?? health?.latest_spot ?? null;
   const { strikeMin, strikeMax, atm } = useMemo(() => {
     if (spot == null) return { strikeMin: null, strikeMax: null, atm: null };
     const a = Math.round(spot / step) * step;
@@ -41,13 +66,16 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
     expiry,
     strikeMin,
     strikeMax,
+    fromTs,
+    toTs,
   );
   const points = ts.data?.points ?? null;
 
   // Open the live OI WebSocket so the "live wire" status badge at the top reflects
   // the real push connection (same socket the dashboard uses). We only consume the
   // connection status here — the charts are driven by the polled time-series.
-  const live = useOIStream(authenticated && fnoEligible && expiry ? "5m" : null, expiry, fnoEligible ? symbol : null);
+  // No live push when viewing a past date — that session's data is closed.
+  const live = useOIStream(!historical && authenticated && fnoEligible && expiry ? "5m" : null, expiry, fnoEligible ? symbol : null);
 
   // Real-time total Call/Put OI for the selected ATM ± N window. Prefer the live
   // WS frame (updates on every push); fall back to the latest polled time-series
@@ -125,14 +153,24 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
                   <ChartIntervalBar value={interval} onChange={setChartInterval} />
                 </div>
                 {fnoEligible && (
-                  <ExpirySelect
-                    expiries={expiries}
-                    value={expiry}
-                    onChange={setExpiry}
-                    error={expiryError}
-                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <DatePicker value={selectedDate} available={avail.dates} onChange={setSelectedDate} />
+                    <ExpirySelect
+                      expiries={expiries}
+                      value={expiry}
+                      onChange={setExpiry}
+                      error={expiryError}
+                    />
+                  </div>
                 )}
               </div>
+
+              {historical && (
+                <div className="text-[11px] text-amber-300/90">
+                  Viewing historical session <b>{selectedDate}</b> — candles are built from stored snapshots
+                  for that day (live stream paused); the ATM window is centred on that day's spot.
+                </div>
+              )}
 
               {fnoEligible && (
                 <div className="flex flex-wrap items-center gap-4 pt-1 border-t border-border">

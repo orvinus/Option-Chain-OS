@@ -11,12 +11,18 @@ const POLL_MS = 20_000;
  * Pass `null` for any of *expiry* / *strikeMin* / *strikeMax* (or `null` symbol)
  * to disable the fetch — e.g. while spot/ATM is unknown or auth is pending.
  * Refetches whenever the symbol, expiry or strike window changes.
+ *
+ * A fixed `[fromTs, toTs]` window (historical date picker) is fetched ONCE — the
+ * data is closed, so polling is skipped. Live (no `toTs`) keeps polling so the
+ * series extends as new minutes flush.
  */
 export function useOITimeseries(
   symbol: string | null,
   expiry: string | null,
   strikeMin: number | null,
   strikeMax: number | null,
+  fromTs?: string | null,
+  toTs?: string | null,
 ) {
   const [data, setData] = useState<OITimeseriesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +43,7 @@ export function useOITimeseries(
     const load = (initial: boolean) => {
       if (initial) setLoading(true);
       api
-        .oiTimeseries(symbol!, expiry!, strikeMin!, strikeMax!)
+        .oiTimeseries(symbol!, expiry!, strikeMin!, strikeMax!, "1m", fromTs ?? undefined, toTs ?? undefined)
         .then((d) => {
           if (!cancelled) {
             setData(d);
@@ -53,12 +59,14 @@ export function useOITimeseries(
     };
 
     load(true);
+    // Fixed historical window => data is closed, fetch once (no poll).
+    if (toTs) return () => { cancelled = true; };
     const id = setInterval(() => load(false), POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [enabled, symbol, expiry, strikeMin, strikeMax]);
+  }, [enabled, symbol, expiry, strikeMin, strikeMax, fromTs, toTs]);
 
   return { data, error, loading };
 }

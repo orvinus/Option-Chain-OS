@@ -104,6 +104,8 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
       backgroundColor: "transparent",
       animation: true,
       animationDuration: 200,
+      // Mouse-wheel zoom + drag-pan along the time axis.
+      dataZoom: [{ type: "inside" as const, xAxisIndex: 0, filterMode: "none" as const }],
     };
 
     if (isLine) {
@@ -235,7 +237,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
             style={{ height: 420, width: "100%" }}
             opts={{ renderer: "canvas" }}
           />
-          <ChartDrawingOverlay describeAt={describeAt} />
+          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} />
 
           {liveTotal != null && (
             <div
