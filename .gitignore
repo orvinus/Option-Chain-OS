@@ -25,6 +25,9 @@ build/
 .env.local
 .env.*.local
 
+# Local-only compose override (pins backend to replay on dev PCs; never deploy to VPS)
+docker/docker-compose.override.yml
+
 # Logs
 *.log
 logs/
