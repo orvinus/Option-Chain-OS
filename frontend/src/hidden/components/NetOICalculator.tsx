@@ -10,7 +10,7 @@ import {
   totalBullishOiChg,
   totalsRowCore,
 } from "../utils/netOiMath";
-import { atmStrike, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { atmStrike, effectiveAtmWindow, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 
 interface Props {
   data: OptionChainFullResponse | null;
@@ -142,7 +142,7 @@ export function NetOICalculator({ data, liveSpot, atmWindow, isLoading }: Props)
           </div>
           {data && (
             <span className="text-xs text-muted font-mono whitespace-nowrap">
-              {atmWindow < 0 ? "All strikes" : atmWindow === 0 ? "ATM only" : `ATM ±${atmWindow}`} · TF {data.timeframe} · Lot{" "}
+              {atmWindow < 0 ? "All strikes" : effectiveAtmWindow(atmWindow) === 0 ? "ATM only" : `ATM ±${effectiveAtmWindow(atmWindow)}`} · TF {data.timeframe} · Lot{" "}
               {data.lot_size}
             </span>
           )}

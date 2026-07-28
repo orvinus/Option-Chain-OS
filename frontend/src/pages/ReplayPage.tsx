@@ -18,7 +18,7 @@ import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useReplayFrames } from "../hooks/useReplayFrames";
 import type { OIChangeResponse, ReplayFrame, ReplayRow } from "../types";
 import { buildReplayTable } from "../utils/exportData";
-import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { effectiveAtmWindow, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import { signedCompact } from "../utils/num";
 import { isoForSessionMinuteOnDate, maxMinForDate, todayIstDate } from "../utils/sessionTime";
 
@@ -290,7 +290,7 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                   </tbody>
                 </table>
                 <p className="px-3 pt-2 text-[10px] text-muted">
-                  Windowed change (ATM ± {atmWindow}) vs the frame {STEP_MIN[step] ?? 1}m×steps back, from the single replay payload.
+                  Windowed change ({atmWindow < 0 ? "all strikes" : `ATM ± ${effectiveAtmWindow(atmWindow)}`}) vs the frame {STEP_MIN[step] ?? 1}m×steps back, from the single replay payload.
                 </p>
               </div>
 

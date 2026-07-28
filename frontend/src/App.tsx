@@ -4,6 +4,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { MultiTimeframePage } from "./pages/MultiTimeframePage";
 import { RatioChartPage } from "./pages/RatioChartPage";
 import { ReplayPage } from "./pages/ReplayPage";
+import { SymbolChangeConfirm } from "./components/SymbolChangeConfirm";
 import { useMarketContext } from "./hooks/useMarketContext";
 
 type Page = "oi-change" | "charts" | "mtf" | "ratio" | "replay";
@@ -51,6 +52,12 @@ export default function App() {
       ) : (
         <Dashboard mc={mc} />
       )}
+      {/* One shared confirmation gate for leaving the NIFTY 50 default (all tabs). */}
+      <SymbolChangeConfirm
+        pendingSymbol={mc.pendingSymbol}
+        onConfirm={() => void mc.confirmSymbolChange()}
+        onCancel={mc.cancelSymbolChange}
+      />
     </>
   );
 }

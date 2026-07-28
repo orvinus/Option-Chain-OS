@@ -8,6 +8,7 @@ import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import type { MtfRow } from "../types";
 import { signedCompact, compact } from "../utils/num";
+import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
@@ -126,7 +127,7 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
             <p className="px-3 pt-2 text-[10px] text-muted">
               Ratio (C÷P), PCR, Spot and ATM are point-in-time levels (identical across rows); only the
               OI-change columns are timeframe-specific. All sums cover{" "}
-              {atmWindow < 0 ? "the full stored chain" : `strikes ATM ± ${atmWindow}`}.
+              {atmWindow < 0 ? "the full stored chain" : `strikes ATM ± ${effectiveAtmWindow(atmWindow)}`}.
             </p>
           </div>
         </>
