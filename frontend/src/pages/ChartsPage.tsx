@@ -13,6 +13,7 @@ import { useOITimeseries } from "../hooks/useOITimeseries";
 import { useOIStream } from "../hooks/useOIStream";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import type { ChartInterval } from "../utils/oiCandles";
+import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
@@ -57,7 +58,8 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const { strikeMin, strikeMax, atm } = useMemo(() => {
     if (spot == null) return { strikeMin: null, strikeMax: null, atm: null };
     const a = Math.round(spot / step) * step;
-    const w = atmWindow < 0 ? ATM_MAX_WINDOW : atmWindow;
+    // "All" (atmWindow<0) → full window; otherwise one fewer strike each side than picked.
+    const w = atmWindow < 0 ? ATM_MAX_WINDOW : effectiveAtmWindow(atmWindow);
     return { strikeMin: a - w * step, strikeMax: a + w * step, atm: a };
   }, [spot, step, atmWindow]);
 

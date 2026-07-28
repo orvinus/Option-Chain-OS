@@ -11,6 +11,7 @@ import {
 import { SERIES_COLORS } from "../components/charts/chartTheme";
 import { istIsoToChartTime } from "../components/charts/chartTime";
 import type { MarketContextValue } from "../hooks/useMarketContext";
+import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import { useRatioTimeseries } from "../hooks/useRatioTimeseries";
@@ -56,7 +57,8 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const atm = mtf.data?.atm_strike ?? null;
   const { strikeMin, strikeMax } = useMemo(() => {
     if (atm == null || atmWindow < 0) return { strikeMin: undefined, strikeMax: undefined };
-    return { strikeMin: atm - atmWindow * strikeStep, strikeMax: atm + atmWindow * strikeStep };
+    const w = effectiveAtmWindow(atmWindow); // one fewer strike each side than the picked N
+    return { strikeMin: atm - w * strikeStep, strikeMax: atm + w * strikeStep };
   }, [atm, atmWindow, strikeStep]);
 
   const { points, loading, error } = useRatioTimeseries({
@@ -126,7 +128,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
         <div className="panel p-3">
           <div className="flex items-center justify-between px-1 pb-2 text-sm">
             <div className="font-medium text-accent">
-              Ratio &amp; PCR over time · {bucket} · {atmWindow < 0 ? "all strikes" : `ATM ± ${atmWindow}`}
+              Ratio &amp; PCR over time · {bucket} · {atmWindow < 0 ? "all strikes" : `ATM ± ${effectiveAtmWindow(atmWindow)}`}
               {historical && <span className="text-amber-300/90"> · {selectedDate}</span>}
             </div>
             <div className="flex items-center gap-4 font-mono text-xs">

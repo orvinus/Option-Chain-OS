@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { api } from "../api/rest";
 import type { HealthResponse, SymbolEntry, SymbolSectorGroup } from "../types";
 
 const HEALTH_POLL_MS = 3_000;
 const EXPIRY_POLL_MS = 30_000;
+
+// The MAIN dashboard DEFAULTS to NIFTY 50 (the whole purpose of the platform).
+// The user can switch to another symbol, but only after passing a confirmation gate
+// (see `handleSymbolChange`); the unlock lasts for the session and resets on reload.
+const DEFAULT_SYMBOL = "NIFTY";
 
 function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry> {
   const out: Record<string, SymbolEntry> = {};
@@ -35,7 +40,17 @@ export interface MarketContextValue {
   symbolGroups: SymbolSectorGroup[];
   switching: boolean;
   symbolError: string | null;
+  /** Request a symbol change. If not yet verified, opens the confirmation gate
+   * (sets `pendingSymbol`) instead of switching. */
   handleSymbolChange: (next: string) => Promise<void>;
+  /** True once the user has confirmed leaving the NIFTY default this session. */
+  verified: boolean;
+  /** The symbol awaiting confirmation (drives the confirm dialog), or null. */
+  pendingSymbol: string | null;
+  /** Confirm the pending symbol change: unlock for the session and switch. */
+  confirmSymbolChange: () => Promise<void>;
+  /** Dismiss the confirm dialog without switching. */
+  cancelSymbolChange: () => void;
 
   expiry: string | null;
   setExpiry: React.Dispatch<React.SetStateAction<string | null>>;
@@ -56,10 +71,15 @@ export function useMarketContext(): MarketContextValue {
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiryError, setExpiryError] = useState<string | null>(null);
 
-  const [symbol, setSymbol] = useState<string>("NIFTY");
+  // Defaults to NIFTY; changes only via the confirmation gate. Never follows the
+  // backend's active symbol out-of-band (so /hidden switching can't drag it off NIFTY).
+  const [symbol, setSymbol] = useState<string>(DEFAULT_SYMBOL);
   const [symbolGroups, setSymbolGroups] = useState<SymbolSectorGroup[]>([]);
   const [switching, setSwitching] = useState(false);
   const [symbolError, setSymbolError] = useState<string | null>(null);
+  // Session unlock for leaving the NIFTY default, and the symbol awaiting confirmation.
+  const [verified, setVerified] = useState(false);
+  const [pendingSymbol, setPendingSymbol] = useState<string | null>(null);
 
   const [atmWindow, setAtmWindow] = useState<number>(5);
 
@@ -83,10 +103,9 @@ export function useMarketContext(): MarketContextValue {
           setHealth(h);
           setAuthenticated(h.authenticated);
           setAuthChecked(true);
-          // Sync local symbol with backend if it changed out-of-band (e.g. server restart).
-          if (h.active_symbol && h.active_symbol !== symbol) {
-            setSymbol(h.active_symbol);
-          }
+          // NOTE: intentionally do NOT adopt h.active_symbol — the main dashboard is
+          // pinned to NIFTY and must not follow the global active symbol (which the
+          // /hidden dashboard may switch to a stock/commodity).
         }
       } catch {
         if (!cancelled) setAuthChecked(true);
@@ -138,9 +157,10 @@ export function useMarketContext(): MarketContextValue {
     const load = () => {
       api.symbols().then((res) => {
         if (cancelled) return;
+        // Full registry so the user CAN pick another symbol (gated by confirm).
+        // Do NOT seed `symbol` from res.active_symbol — NIFTY stays the default.
         setSymbolGroups(res.groups);
         setSymbolError(null);
-        if (res.active_symbol) setSymbol(res.active_symbol);
       }).catch((e: unknown) => {
         if (!cancelled) setSymbolError(String(e));
       });
@@ -183,8 +203,8 @@ export function useMarketContext(): MarketContextValue {
     return () => { cancelled = true; clearInterval(id); };
   }, [authenticated, symbol, fnoEligible]);
 
-  const handleSymbolChange = useCallback(async (next: string) => {
-    if (next === symbol) return;
+  // Perform the actual symbol switch (POST /api/active-symbol + local state).
+  const doSwitch = useCallback(async (next: string) => {
     setSwitching(true);
     setSymbolError(null);
     // Optimistic UI: clear the chart so the user knows a switch is in flight.
@@ -200,7 +220,43 @@ export function useMarketContext(): MarketContextValue {
     } finally {
       setSwitching(false);
     }
-  }, [symbol]);
+  }, []);
+
+  // Request a symbol change. NIFTY is the default; leaving it the first time this
+  // session opens a confirmation gate. Once confirmed, further switches are direct.
+  const handleSymbolChange = useCallback(async (next: string) => {
+    if (next === symbol) return;
+    if (!verified) {
+      // Open the confirm dialog; the controlled <select value={symbol}> reverts on its own.
+      setPendingSymbol(next);
+      return;
+    }
+    await doSwitch(next);
+  }, [symbol, verified, doSwitch]);
+
+  const confirmSymbolChange = useCallback(async () => {
+    setVerified(true);
+    const next = pendingSymbol;
+    setPendingSymbol(null);
+    if (next) await doSwitch(next);
+  }, [pendingSymbol, doSwitch]);
+
+  const cancelSymbolChange = useCallback(() => {
+    setPendingSymbol(null);
+  }, []);
+
+  // Assert NIFTY as the backend's active symbol ONCE on load, so live NIFTY data
+  // flows here (the WS hub and spot only serve the globally-active symbol). Fires a
+  // single time — it never re-grabs the feed afterwards, so a later user-confirmed
+  // switch (or the /hidden dashboard) is not fought.
+  const nudgedActiveRef = useRef(false);
+  useEffect(() => {
+    if (!authenticated || !health || nudgedActiveRef.current) return;
+    nudgedActiveRef.current = true;
+    if (health.active_symbol !== DEFAULT_SYMBOL) {
+      void api.setActiveSymbol(DEFAULT_SYMBOL).catch(() => { /* expiries effect still loads NIFTY */ });
+    }
+  }, [authenticated, health]);
 
   const handleAuthenticated = useCallback(() => {
     setAuthenticated(true);
@@ -214,6 +270,7 @@ export function useMarketContext(): MarketContextValue {
   return {
     authenticated, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
     activeEntry, fnoEligible, symbolDisplay, liveSpot,
