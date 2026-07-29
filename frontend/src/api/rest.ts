@@ -194,4 +194,11 @@ export const api = {
   /** ~55s client cap vs backend SMARTAPI_LOGIN_TIMEOUT_S (45s default) + persist margin */
   login: (req: LoginRequest) =>
     postJSON<LoginResponse>("/api/auth/login", req, { timeoutMs: 55_000 }),
+  /**
+   * Fixed-credential gate for the main dashboard. Verified server-side against
+   * MAIN_USER / MAIN_PASSWORD (distinct from the /hidden pair). In live mode a
+   * successful sign-in also starts the broker feed, so allow ~55s.
+   */
+  gateLogin: (req: { username: string; password: string }) =>
+    postJSON<LoginResponse>("/api/auth/main-login", req, { timeoutMs: 55_000 }),
 };

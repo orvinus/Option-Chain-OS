@@ -47,6 +47,12 @@ interface Props {
   fitContent?: boolean;
   /** Floating value tooltip that follows the cursor (matches the ECharts panes). Default on. */
   showTooltip?: boolean;
+  /**
+   * Extra rows appended to the floating tooltip below the per-series rows, keyed
+   * off the hovered chart time (epoch seconds, +IST offset baked in — same value
+   * as a series point's `time`). Used to show underlying positions alongside ratios.
+   */
+  extraTooltipRows?: (timeSec: number) => Array<{ label: string; value: string; color?: string }>;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -59,7 +65,7 @@ function fmtIstAxisTime(t: UTCTimestamp): string {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }
 
-export function TimeSeriesChart({ series, height = 320, onCrosshair, fitContent, showTooltip = true }: Props) {
+export function TimeSeriesChart({ series, height = 320, onCrosshair, fitContent, showTooltip = true, extraTooltipRows }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
@@ -71,6 +77,8 @@ export function TimeSeriesChart({ series, height = 320, onCrosshair, fitContent,
   specRef.current = series;
   const showTooltipRef = useRef(showTooltip);
   showTooltipRef.current = showTooltip;
+  const extraRowsRef = useRef(extraTooltipRows);
+  extraRowsRef.current = extraTooltipRows;
   const heightRef = useRef(height);
   heightRef.current = height;
 
@@ -121,12 +129,23 @@ export function TimeSeriesChart({ series, height = 320, onCrosshair, fitContent,
           );
         })
         .join("");
-      if (!rows) {
+      // Optional caller-supplied rows (e.g. underlying Call/Put positions).
+      const extra = extraRowsRef.current?.(param.time as UTCTimestamp) ?? [];
+      const extraRows = extra
+        .map(
+          (r) =>
+            `<div style="display:flex;justify-content:space-between;gap:16px;align-items:center">` +
+            `<span style="color:#9ca3af">${r.label}</span>` +
+            `<b style="color:${r.color ?? "#e5e7eb"}">${r.value}</b></div>`,
+        )
+        .join("");
+      const sep = rows && extraRows ? `<div style="height:4px"></div>` : "";
+      if (!rows && !extraRows) {
         tip.style.display = "none";
         return;
       }
       tip.innerHTML =
-        `<div style="margin-bottom:4px;color:#e5e7eb">${fmtIstAxisTime(param.time as UTCTimestamp)}</div>${rows}`;
+        `<div style="margin-bottom:4px;color:#e5e7eb">${fmtIstAxisTime(param.time as UTCTimestamp)}</div>${rows}${sep}${extraRows}`;
       tip.style.display = "block";
       // Position near the cursor, flipping/clamping to stay inside the pane.
       const pad = 12;

@@ -1,5 +1,6 @@
 import type { OIChangeResponse } from "../types";
 import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { callPutRatio } from "../utils/ratio";
 import type { OIMode } from "./OIChangeChart";
 
 interface Props {
@@ -43,39 +44,28 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   const peVal = isChange ? peChg : totalPeOI;
   const pcrVal = isChange ? pcrChg : pcr;
 
-  // OI-Change Ratio — highlight the WEAKER (lower-buildup) side, which better
-  // reflects current sentiment. Ratio = higher ÷ lower (always ≥ 1), shown as
-  // "1 : X.XX" tagged with the weaker side. Only meaningful in change mode when
-  // BOTH sides are building OI; otherwise show "—".
-  const bothBuild = isChange && ceChg > 0 && peChg > 0;
-  const higher = bothBuild ? Math.max(ceChg, peChg) : null;
-  const lower = bothBuild ? Math.min(ceChg, peChg) : null;
-  const weakerRatio =
-    higher !== null && lower !== null && lower > 0 && Number.isFinite(higher / lower)
-      ? higher / lower // ≥ 1 by construction
-      : null;
-  const weakerSide: "Call" | "Put" | null =
-    weakerRatio === null ? null : ceChg < peChg ? "Call" : peChg < ceChg ? "Put" : null;
+  // Standardized normalized Call : Put ratio (shared across MTF / Ratio / Change-in-OI).
+  // Ratio is shown in Call : Put order with the smaller side pinned to 1; Side is the
+  // dominant (larger |OI Δ|) side. Computed on the windowed change totals.
+  const cpr = callPutRatio(ceChg, peChg);
 
   // Absolute-OI mode keeps the legacy CE ÷ PE OI ratio (the primary dashboard
   // only ever renders change mode, but this preserves the absolute-mode caller).
   const absRatio = !isChange && totalPeOI > 0 ? totalCeOI / totalPeOI : null;
 
   const hasRatio = isChange
-    ? weakerRatio !== null
+    ? cpr.side !== "NEUTRAL"
     : absRatio !== null && Number.isFinite(absRatio);
   const ratioMain = isChange
-    ? weakerRatio !== null
-      ? `1 : ${weakerRatio.toFixed(2)}`
-      : "—"
+    ? cpr.text
     : absRatio !== null && Number.isFinite(absRatio)
       ? absRatio.toFixed(3)
       : "—";
-  const ratioHint = weakerSide
-    ? `${weakerSide} weaker`
-    : isChange
-      ? "Call ÷ Put chg"
-      : "CE ÷ PE OI";
+  const ratioHint = isChange
+    ? cpr.side === "NEUTRAL"
+      ? "Neutral"
+      : `${cpr.side === "CALL" ? "Call" : "Put"} dominant`
+    : "CE ÷ PE OI";
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
