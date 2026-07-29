@@ -139,6 +139,9 @@ def _serialize_oc(res) -> dict:
         "asof": res.asof,
         "computed_at": res.computed_at,
         "lot_size": res.lot_size,
+        "synthetic_future": getattr(res, "synthetic_future", None),
+        "atm_iv": getattr(res, "atm_iv", None),
+        "ivp": getattr(res, "ivp", None),
         "rows": [r.__dict__ for r in res.rows],
     }
 

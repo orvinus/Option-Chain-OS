@@ -44,6 +44,12 @@ async def oi_change(
         t = _parse_ts(to_ts, "to_ts") if to_ts is not None else None
         if t is not None and t <= f:
             raise HTTPException(400, "'to_ts' must be after 'from_ts'.")
+        if t is None and f.astimezone(IST).date() < datetime.now(IST).date():
+            raise HTTPException(
+                400,
+                "Open-ended windows (no 'to_ts') are only supported for the current "
+                "session. Provide 'to_ts' when 'from_ts' is on a past date.",
+            )
         res = await engine.get_range(f, t, e, symbol=entry.symbol, live_spot=live_spot)
     else:
         if timeframe not in TIMEFRAME_TO_DELTA:

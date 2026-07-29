@@ -35,12 +35,34 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
-from ..core.time_utils import IST, market_open_today, parse_timeframe
+from ..core.time_utils import IST, market_close_today, market_open_today, parse_timeframe
+from ..market.symbols import get_registry
 from ..runtime import get_runtime
 
 log = get_logger("oi_change")
 
 CACHE_TTL_SECONDS = 30
+_DEFAULT_STRIKE_STEP = 50
+
+
+def _safe_ratio(num: float, den: float) -> float | None:
+    """Divide, returning ``None`` on a zero denominator (charts gap the line)."""
+    if den == 0:
+        return None
+    return num / den
+
+
+def _strike_step(symbol: str) -> int:
+    """The symbol's registry strike step (fallback 50)."""
+    entry = get_registry().get(symbol)
+    return (entry.strike_step if entry and entry.strike_step else None) or _DEFAULT_STRIKE_STEP
+
+
+def _atm_strike(symbol: str, spot: float | None) -> int | None:
+    """Nearest strike to ``spot`` using the symbol's registry step (fallback 50)."""
+    if spot is None:
+        return None
+    return int(round(float(spot) / _strike_step(symbol)) * _strike_step(symbol))
 
 # The XTS feed disseminates OI only ~once per minute, so an exact 1s/15s/30s/45s
 # window is empty most of the time. For these sub-minute timeframes we "hold the
@@ -79,22 +101,52 @@ class OIChangeResponse:
     rows: list[OIChangeRow]
 
 
+@dataclass
+class MultiTFRow:
+    timeframe: str
+    call_oi_change: int
+    put_oi_change: int
+    # Ratio of the CHANGES (call_oi_change / put_oi_change). None on zero put change.
+    oi_change_ratio: float | None
+
+
+@dataclass
+class MultiTFResponse:
+    symbol: str
+    expiry: str
+    asof: str
+    computed_at: str
+    spot: float | None
+    atm_strike: int | None
+    # Point-in-time level totals (identical across all timeframe rows).
+    total_call_oi: int
+    total_put_oi: int
+    ratio: float | None  # call/put level
+    pcr: float | None    # put/call level
+    rows: list[MultiTFRow]
+
+
+# The ``now`` side is floored at the session open of the anchor's trading day:
+# strikes whose data froze in a PREVIOUS session (window drift, weekend
+# artifacts) must not appear in the "current" chain with days-old OI. The
+# ``then``/baseline side is intentionally NOT floored — output strikes come
+# exclusively from the now-map.
 _LATEST_SNAPSHOT_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
 
-_SNAPSHOT_AT_OR_BEFORE_SQL = text(
+_SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff
+    WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
@@ -105,6 +157,19 @@ _SNAPSHOT_AT_OR_AFTER_SQL = text(
         strike, option_type, oi, ltp, underlying, ts
     FROM option_oi_snapshots
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff
+    ORDER BY strike, option_type, ts ASC
+    """
+)
+
+# Earliest snapshot per (strike, option_type) inside an explicit [cutoff, upper]
+# window. Used by the range-path baseline clamp so a strike absent on the from-day
+# can't pull a FUTURE day's first row as its "since data start" baseline.
+_SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL = text(
+    """
+    SELECT DISTINCT ON (strike, option_type)
+        strike, option_type, oi, ltp, underlying, ts
+    FROM option_oi_snapshots
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff AND ts <= :upper
     ORDER BY strike, option_type, ts ASC
     """
 )
@@ -305,7 +370,7 @@ class OIChangeEngine:
                     from dataclasses import replace as dc_replace
                     return dc_replace(cached, spot=live_spot)
                 return cached
-            result = await self._compute_range(from_utc, to_utc, expiry, symbol, live_spot)
+            result = await self._compute_range(from_utc, to_utc, expiry, symbol, live_spot, anchor)
             self._cache[cache_key] = result
             return result
 
@@ -316,21 +381,83 @@ class OIChangeEngine:
         expiry: date,
         symbol: str,
         live_spot: float | None = None,
+        anchor: datetime | None = None,
     ) -> OIChangeResponse:
         now_utc = datetime.now(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
+        from_ist = from_utc.astimezone(IST)
+        from_floor = market_open_today(from_ist).astimezone(timezone.utc)
+
+        # Resolve the effective window end. An explicit ``to_utc`` wins. When it is
+        # omitted the window is "up to latest" (a live, left-anchored window) —
+        # only meaningful for the CURRENT session: if ``from_ts`` is on a PAST day,
+        # an open-ended window would floor the now-side to the global ``MAX(ts)``
+        # (the latest data day) and return the WRONG day, so clamp the effective
+        # end to that past day's session close. (The API also rejects this shape;
+        # this is defence-in-depth for direct engine callers.)
+        effective_to = to_utc
+        if (
+            effective_to is None
+            and anchor is not None
+            and from_ist.date() < anchor.astimezone(IST).date()
+        ):
+            effective_to = market_close_today(from_ist).astimezone(timezone.utc)
+
+        # Floor the now-side at the session open of the window's effective upper
+        # bound so previous-session frozen strikes don't leak into the output.
+        upper = effective_to or anchor or now_utc
+        floor = market_open_today(upper.astimezone(IST)).astimezone(timezone.utc)
+        # Upper bound for the baseline-clamp's "earliest row in window" lookup.
+        clamp_upper = effective_to if effective_to is not None else (from_floor + timedelta(days=1))
         async with AsyncSessionLocal() as s:
-            if to_utc is None:
-                now_rows = (await s.execute(_LATEST_SNAPSHOT_SQL, params)).mappings().all()
+            if effective_to is None:
+                now_rows = (
+                    await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": floor})
+                ).mappings().all()
             else:
                 now_rows = (
-                    await s.execute(_SNAPSHOT_AT_OR_BEFORE_SQL, {**params, "cutoff": to_utc})
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                        {**params, "cutoff": effective_to, "floor": floor},
+                    )
                 ).mappings().all()
+            # FLOOR the then/baseline side to the FROM day's session open, mirroring
+            # the now-side floor. Without this a strike lacking a same-day row
+            # at/before ``from_ts`` silently borrows a PREVIOUS session's much-larger
+            # OI as its baseline, making ``now - then`` a huge wrong-sign delta — the
+            # historical-window analogue of the "1 Min shows −2Cr" bug the timeframe
+            # path already guards against.
             then_rows = (
-                await s.execute(_SNAPSHOT_AT_OR_BEFORE_SQL, {**params, "cutoff": from_utc})
+                await s.execute(
+                    _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                    {**params, "cutoff": from_utc, "floor": from_floor},
+                )
             ).mappings().all()
-        # Report the upper bound (or now) as the window's asof.
-        asof_override = to_utc if to_utc is not None else None
+            # Baseline clamp (mirrors the timeframe path): a strike whose first
+            # row lands AFTER from_ts (it entered the subscription window
+            # mid-range) has no floored baseline — without a clamp its change is
+            # reported as ``now - 0``, i.e. its full OI. Use its earliest stored
+            # snapshot WITHIN the window as the baseline so the change is "since
+            # data start" (bounded above so a future day's first row can't leak in).
+            then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+            missing = [
+                (r["strike"], r["option_type"]) for r in now_rows
+                if (r["strike"], r["option_type"]) not in then_keys
+            ]
+            if missing:
+                earliest_rows = (
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL,
+                        {**params, "cutoff": from_floor, "upper": clamp_upper},
+                    )
+                ).mappings().all()
+                missing_set = set(missing)
+                then_rows = list(then_rows) + [
+                    r for r in earliest_rows
+                    if (r["strike"], r["option_type"]) in missing_set
+                ]
+        # Report the effective upper bound (or now) as the window's asof.
+        asof_override = effective_to if effective_to is not None else None
         return _assemble("range", expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
 
     async def _compute(
@@ -344,54 +471,53 @@ class OIChangeEngine:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
         anchor = anchor_from_db or now_utc
+        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
-            cutoff = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
-            then_sql = _SNAPSHOT_AT_OR_AFTER_SQL  # earliest snapshot at/after market open
+            # Baseline = earliest snapshot at/after today's open (already today-
+            # anchored — no floor/backfill needed).
+            then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            then_params = {**params, "cutoff": session_floor}
+            floored_then = False
         else:
             assert isinstance(delta_or_marker, timedelta)
             cutoff = anchor - delta_or_marker
-            then_sql = _SNAPSHOT_AT_OR_BEFORE_SQL
-            # If the requested window reaches back before the first stored snapshot
-            # (e.g. a 1h timeframe early in the session with only 40m of history),
-            # there is no true baseline: ``AT_OR_BEFORE`` returns nothing and every
-            # strike's change would be reported as ``now - 0`` — wildly inflated.
-            # Clamp the baseline to the earliest available snapshot so the change is
-            # bounded to "since data start" instead of exploding.
-            async with AsyncSessionLocal() as s0:
-                min_row = (
-                    await s0.execute(_MIN_TS_SQL, {"symbol": symbol, "expiry": expiry})
-                ).mappings().first()
-            earliest = min_row["min_ts"] if min_row else None
-            if earliest is not None:
-                if getattr(earliest, "tzinfo", None) is None:
-                    earliest = earliest.replace(tzinfo=timezone.utc)
-                else:
-                    earliest = earliest.astimezone(timezone.utc)
-                if cutoff < earliest:
-                    cutoff = earliest
-                    then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
+            # FLOOR the baseline to today's session open. The now-side is already
+            # floored; if the then-side were not, a strike lacking a today row
+            # at/before ``cutoff`` — e.g. one just re-added by ATM-drift
+            # resubscription, or the first row after an ~83s reconnect gap —
+            # would silently borrow a PREVIOUS session's much-larger OI as its
+            # baseline, making ``now - then`` a huge, wrong-sign NEGATIVE that
+            # sums to −Cr on short timeframes (the "1 Min shows −2Cr" bug).
+            then_sql = _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL
+            then_params = {**params, "cutoff": cutoff, "floor": session_floor}
+            floored_then = True
 
         async with AsyncSessionLocal() as s:
             now_rows = (
-                (
-                    await s.execute(
-                        _LATEST_SNAPSHOT_SQL,
-                        {"symbol": symbol, "expiry": expiry},
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            then_rows = (
-                (
-                    await s.execute(
-                        then_sql,
-                        {"symbol": symbol, "expiry": expiry, "cutoff": cutoff},
-                    )
-                )
-                .mappings()
-                .all()
-            )
+                await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+            ).mappings().all()
+            then_rows = list((await s.execute(then_sql, then_params)).mappings().all())
+            # Per-strike baseline clamp (mirrors ``_compute_range``): a now-strike
+            # with no floored ``then`` row (it entered the window mid-session) is
+            # backfilled with its EARLIEST today snapshot, so its change reads as
+            # "since its first row today" (small) rather than ``now - 0`` (a full
+            # phantom add) or a leak to a prior session (huge negative).
+            if floored_then:
+                then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+                missing = {
+                    (r["strike"], r["option_type"]) for r in now_rows
+                } - then_keys
+                if missing:
+                    earliest_rows = (
+                        await s.execute(
+                            _SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": session_floor}
+                        )
+                    ).mappings().all()
+                    then_rows += [
+                        r for r in earliest_rows
+                        if (r["strike"], r["option_type"]) in missing
+                    ]
 
         # Sub-minute timeframes: hold the last OI move where the exact window is flat.
         if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None:
@@ -399,6 +525,165 @@ class OIChangeEngine:
 
         asof_override = anchor if anchor_from_db is not None else None
         return _assemble(timeframe, expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
+
+    async def get_multi(
+        self,
+        timeframes: list[str],
+        expiry: date,
+        symbol: str | None = None,
+        live_spot: float | None = None,
+        as_of: datetime | None = None,
+        atm_window: int | None = None,
+    ) -> MultiTFResponse:
+        """One row per timeframe (call/put OI change) + shared level ratio/pcr/spot/atm.
+
+        ``as_of`` (tz-aware) computes the grid as of a historical instant (for the
+        replay clock / a picked date); omit it for the live latest snapshot. Shares
+        a single "now" snapshot across all timeframes (1 now-query + N then-queries)
+        so it is far cheaper than calling ``get()`` per timeframe. ``atm_window`` (>=0)
+        restricts every sum to strikes within ATM ± N (None / <0 = the full chain).
+        """
+        symbol = (symbol or get_runtime().active_symbol).upper()
+        as_of_utc = as_of.astimezone(timezone.utc) if as_of is not None else None
+        win = atm_window if (atm_window is not None and atm_window >= 0) else None
+        async with self._lock:
+            anchor = await self._fetch_anchor_ts(symbol, expiry)
+            ref_key = as_of_utc.isoformat() if as_of_utc else (anchor.isoformat() if anchor else "now")
+            cache_key = ("multi", tuple(sorted(timeframes)), expiry.isoformat(), symbol, ref_key, win)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                if live_spot is not None and as_of_utc is None and live_spot != cached.spot:
+                    from dataclasses import replace as dc_replace
+                    return dc_replace(cached, spot=live_spot, atm_strike=_atm_strike(symbol, live_spot))
+                return cached
+            result = await self._compute_multi(timeframes, expiry, symbol, anchor, as_of_utc, live_spot, win)
+            self._cache[cache_key] = result
+            return result
+
+    async def _compute_multi(
+        self,
+        timeframes: list[str],
+        expiry: date,
+        symbol: str,
+        anchor_from_db: datetime | None,
+        as_of_utc: datetime | None,
+        live_spot: float | None,
+        atm_window: int | None = None,
+    ) -> MultiTFResponse:
+        now_utc = datetime.now(timezone.utc)
+        ref = as_of_utc or anchor_from_db or now_utc
+        session_floor = market_open_today(ref.astimezone(IST)).astimezone(timezone.utc)
+        params = {"symbol": symbol, "expiry": expiry}
+
+        async with AsyncSessionLocal() as s:
+            # NOW snapshot — shared across every timeframe.
+            if as_of_utc is None:
+                now_rows = (
+                    await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+                ).mappings().all()
+            else:
+                now_rows = (
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                        {**params, "cutoff": as_of_utc, "floor": session_floor},
+                    )
+                ).mappings().all()
+            now_map = {(r["strike"], r["option_type"]): dict(r) for r in now_rows}
+
+            # Resolve spot/ATM up-front so an ATM ± N window can filter strikes before
+            # every sum (each timeframe's OI-change AND the shared totals/ratio/pcr).
+            stored_spot = next(
+                (float(r["underlying"]) for r in now_map.values() if r.get("underlying") is not None),
+                None,
+            )
+            spot = live_spot if (live_spot is not None and as_of_utc is None) else stored_spot
+            atm = _atm_strike(symbol, spot)
+            if atm_window is not None and atm is not None:
+                step = _strike_step(symbol)
+                lo, hi = atm - atm_window * step, atm + atm_window * step
+                def in_window(strike: int) -> bool:
+                    return lo <= strike <= hi
+            else:
+                def in_window(strike: int) -> bool:
+                    return True
+
+            # Earliest-today snapshot (for the per-tf baseline clamp) fetched at most once.
+            earliest_rows: list | None = None
+
+            rows_out: list[MultiTFRow] = []
+            for tf in timeframes:
+                delta_or_marker = parse_timeframe(tf)
+                if delta_or_marker == "full_day":
+                    then_rows = list(
+                        (
+                            await s.execute(_SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": session_floor})
+                        ).mappings().all()
+                    )
+                else:
+                    assert isinstance(delta_or_marker, timedelta)
+                    cutoff = ref - delta_or_marker
+                    then_rows = list(
+                        (
+                            await s.execute(
+                                _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                                {**params, "cutoff": cutoff, "floor": session_floor},
+                            )
+                        ).mappings().all()
+                    )
+                    then_keys = {(r["strike"], r["option_type"]) for r in then_rows}
+                    missing = set(now_map.keys()) - then_keys
+                    if missing:
+                        if earliest_rows is None:
+                            earliest_rows = (
+                                await s.execute(
+                                    _SNAPSHOT_AT_OR_AFTER_SQL, {**params, "cutoff": session_floor}
+                                )
+                            ).mappings().all()
+                        then_rows += [
+                            r for r in earliest_rows
+                            if (r["strike"], r["option_type"]) in missing
+                        ]
+                then_map = {(r["strike"], r["option_type"]): dict(r) for r in then_rows}
+                ce_chg = 0
+                pe_chg = 0
+                for (strike, otype), nrow in now_map.items():
+                    if not in_window(strike):
+                        continue
+                    trow = then_map.get((strike, otype))
+                    d = int(nrow["oi"]) - (int(trow["oi"]) if trow else 0)
+                    if otype == "CE":
+                        ce_chg += d
+                    else:
+                        pe_chg += d
+                rows_out.append(
+                    MultiTFRow(
+                        timeframe=tf,
+                        call_oi_change=ce_chg,
+                        put_oi_change=pe_chg,
+                        oi_change_ratio=_safe_ratio(ce_chg, pe_chg),
+                    )
+                )
+
+        total_ce = sum(int(r["oi"]) for k, r in now_map.items() if k[1] == "CE" and in_window(k[0]))
+        total_pe = sum(int(r["oi"]) for k, r in now_map.items() if k[1] == "PE" and in_window(k[0]))
+        max_ts: datetime | None = None
+        for r in now_map.values():
+            if max_ts is None or r["ts"] > max_ts:
+                max_ts = r["ts"]
+        asof_ts = as_of_utc or max_ts or ref
+        return MultiTFResponse(
+            symbol=symbol,
+            expiry=expiry.isoformat(),
+            asof=asof_ts.astimezone(IST).isoformat(),
+            computed_at=now_utc.astimezone(IST).isoformat(),
+            spot=spot,
+            atm_strike=atm,
+            total_call_oi=total_ce,
+            total_put_oi=total_pe,
+            ratio=_safe_ratio(total_ce, total_pe),
+            pcr=_safe_ratio(total_pe, total_ce),
+            rows=rows_out,
+        )
 
     async def _merge_hold_last(
         self,

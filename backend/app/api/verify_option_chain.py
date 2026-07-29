@@ -27,12 +27,15 @@ LTP_TOL_PTS = 5.0
 LTP_TOL_PCT = 10.0
 OI_TOL_PCT = 10.0
 
+# Floored at the latest data day's session open — the cross-check must compare
+# only the strikes that are live in the current session, not rows frozen days
+# ago by strike-window drift (those always "fail" vs live NSE data).
 _LATEST_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, expiry
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
@@ -63,11 +66,17 @@ async def option_chain_cross_check(
     entry = resolve_fno_symbol(symbol)
     expiry_date: date = await resolve_expiry(expiry, symbol=entry.symbol)
 
-    # Fetch our DB data.
+    # Fetch our DB data (scoped to the latest session with data).
+    from .option_chain import latest_session_floor
+
     async with AsyncSessionLocal() as sess:
+        floor = await latest_session_floor(sess, entry.symbol, expiry_date)
         db_rows = (
-            await sess.execute(_LATEST_SQL, {"symbol": entry.symbol, "expiry": expiry_date})
-        ).mappings().all()
+            await sess.execute(
+                _LATEST_SQL,
+                {"symbol": entry.symbol, "expiry": expiry_date, "floor": floor},
+            )
+        ).mappings().all() if floor is not None else []
 
     # Organise our data as {strike: {CE: ..., PE: ...}}.
     our_book: dict[int, dict[str, dict]] = {}
@@ -95,8 +104,22 @@ async def option_chain_cross_check(
         nse_fetch_error = f"NSE fetch failed: {e}"
         log.warning("verify.option_chain.nse_error", symbol=entry.symbol, error=str(e))
 
-    # Organise NSE data as {strike: NSEOptionRow}.
-    nse_book: dict[int, NSEOptionRow] = {r.strike: r for r in nse_rows}
+    # Organise NSE data as {strike: NSEOptionRow}, scaling OI from NSE's unit
+    # (CONTRACTS/lots) to ours (units = contracts x market lot) so the two are
+    # directly comparable. Without this the OI check is off by ~lot_size (65x
+    # for NIFTY) and always fails.
+    lot = int(getattr(entry, "lot_size", 0) or 0) or 1
+    nse_book: dict[int, NSEOptionRow] = {
+        r.strike: NSEOptionRow(
+            strike=r.strike,
+            expiry=r.expiry,
+            ce_ltp=r.ce_ltp,
+            pe_ltp=r.pe_ltp,
+            ce_oi=r.ce_oi * lot if r.ce_oi is not None else None,
+            pe_oi=r.pe_oi * lot if r.pe_oi is not None else None,
+        )
+        for r in nse_rows
+    }
 
     all_strikes = sorted(our_book.keys() | nse_book.keys())
 

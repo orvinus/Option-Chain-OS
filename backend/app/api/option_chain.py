@@ -1,13 +1,14 @@
 """GET /api/option-chain — latest CE/PE OI + LTP per strike (per symbol)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
-from ..core.time_utils import IST, TIMEFRAME_TO_DELTA
+from ..core.time_utils import IST, TIMEFRAME_TO_DELTA, market_open_today
 from ._expiry_utils import resolve_expiry
 from ._symbol_utils import resolve_fno_symbol
 from ..runtime import get_runtime
@@ -22,15 +23,36 @@ from .schemas import (
 router = APIRouter(tags=["option-chain"])
 
 
+# Floored at the latest data day's session open: strikes frozen in a previous
+# session (window drift, weekend artifacts) are not part of the current chain.
 _LATEST_FULL_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
     FROM option_oi_snapshots
-    WHERE symbol = :symbol AND expiry = :expiry
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
 )
+
+_MAX_TS_SQL = text(
+    """
+    SELECT MAX(ts) AS max_ts
+    FROM option_oi_snapshots
+    WHERE symbol = :symbol AND expiry = :expiry
+    """
+)
+
+
+async def latest_session_floor(s, symbol: str, expiry) -> "datetime | None":
+    """Session-open (09:15 IST) of the most recent trading day with data."""
+    row = (await s.execute(_MAX_TS_SQL, {"symbol": symbol, "expiry": expiry})).mappings().first()
+    max_ts = row["max_ts"] if row else None
+    if max_ts is None:
+        return None
+    if getattr(max_ts, "tzinfo", None) is None:
+        max_ts = max_ts.replace(tzinfo=timezone.utc)
+    return market_open_today(max_ts.astimezone(IST)).astimezone(timezone.utc)
 
 
 @router.get("/option-chain", response_model=OptionChainResponse)
@@ -41,16 +63,17 @@ async def option_chain(
     entry = resolve_fno_symbol(symbol)
     e = await resolve_expiry(expiry, symbol=entry.symbol)
     async with AsyncSessionLocal() as s:
+        floor = await latest_session_floor(s, entry.symbol, e)
         rows = (
             (
                 await s.execute(
                     _LATEST_FULL_SQL,
-                    {"symbol": entry.symbol, "expiry": e},
+                    {"symbol": entry.symbol, "expiry": e, "floor": floor},
                 )
             )
             .mappings()
             .all()
-        )
+        ) if floor is not None else []
 
     book: dict[int, dict[str, object]] = {}
     spot: Optional[float] = None
@@ -107,4 +130,7 @@ async def option_chain_full(
         computed_at=res.computed_at,
         lot_size=res.lot_size,
         rows=[OptionChainFullStrikeOut(**r.__dict__) for r in res.rows],
+        synthetic_future=getattr(res, "synthetic_future", None),
+        atm_iv=getattr(res, "atm_iv", None),
+        ivp=getattr(res, "ivp", None),
     )

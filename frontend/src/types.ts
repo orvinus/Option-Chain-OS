@@ -44,6 +44,112 @@ export interface ExpiriesResponse {
   expiries: string[];
 }
 
+/** One time bucket of total Call/Put OI for the Charts page — from `/api/oi-timeseries`. */
+export interface OITimeseriesPoint {
+  /** ISO-8601 IST bucket-start timestamp. */
+  ts: string;
+  total_call_oi: number;
+  total_put_oi: number;
+  /** Call/Put ratio and PCR of the bucketed totals (null when a side is 0). */
+  ratio?: number | null;
+  pcr?: number | null;
+}
+
+export interface OITimeseriesResponse {
+  symbol: string;
+  expiry: string;
+  bucket: string;
+  points: OITimeseriesPoint[];
+}
+
+/** IST trading days with stored data — from `/api/history-dates` (date picker). */
+export interface HistoryDatesResponse {
+  symbol: string;
+  expiry: string;
+  /** "YYYY-MM-DD", newest first. */
+  dates: string[];
+}
+
+/** One bucket of ratio/PCR over time — from `/api/ratio-timeseries` (Ratio chart). */
+export interface RatioPoint {
+  ts: string;
+  ratio: number | null;
+  pcr: number | null;
+  total_call_oi: number;
+  total_put_oi: number;
+}
+
+export interface RatioTimeseriesResponse {
+  symbol: string;
+  expiry: string;
+  bucket: string;
+  points: RatioPoint[];
+}
+
+/** One timeframe row of the multi-timeframe grid — from `/api/multi-timeframe`. */
+export interface MtfRow {
+  timeframe: Timeframe;
+  call_oi_change: number;
+  put_oi_change: number;
+  /** Ratio of the changes (call_oi_change / put_oi_change), null on 0 put change. */
+  oi_change_ratio: number | null;
+}
+
+export interface MultiTimeframeResponse {
+  symbol: string;
+  expiry: string;
+  asof: string;
+  computed_at: string;
+  /** Point-in-time levels, shared by every row. */
+  spot: number | null;
+  atm_strike: number | null;
+  total_call_oi: number;
+  total_put_oi: number;
+  ratio: number | null; // call/put level
+  pcr: number | null; // put/call level
+  rows: MtfRow[];
+}
+
+/** One per-strike row inside a replay frame. */
+export interface ReplayRow {
+  strike: number;
+  call_oi: number;
+  put_oi: number;
+  call_oi_change: number;
+  put_oi_change: number;
+  /** Greeks/IV (present only when ?with_greeks and the populator has run). */
+  call_iv?: number | null;
+  put_iv?: number | null;
+  call_delta?: number | null;
+  put_delta?: number | null;
+  call_gamma?: number | null;
+  put_gamma?: number | null;
+  call_theta?: number | null;
+  put_theta?: number | null;
+  call_vega?: number | null;
+  put_vega?: number | null;
+}
+
+/** One time-step of a replay session — from `/api/replay`. */
+export interface ReplayFrame {
+  ts: string;
+  spot: number | null;
+  atm: number | null;
+  total_call_oi: number;
+  total_put_oi: number;
+  total_call_oi_change: number;
+  total_put_oi_change: number;
+  ratio: number | null;
+  pcr: number | null;
+  rows: ReplayRow[];
+}
+
+export interface ReplayFramesResponse {
+  symbol: string;
+  expiry: string;
+  frames: ReplayFrame[];
+}
+
 export interface SpotResponse {
   symbol: string;
   spot: number | null;

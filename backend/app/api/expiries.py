@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..runtime import get_runtime
 from ._symbol_utils import resolve_symbol
 from .schemas import ExpiriesResponse
@@ -48,11 +49,19 @@ async def expiries(symbol: str | None = Query(default=None)) -> ExpiriesResponse
     entry = resolve_symbol(symbol)
     rt = get_runtime()
 
-    # Live runtime list is authoritative only for the active symbol.
-    if entry.symbol == rt.active_symbol and rt.expiries:
-        return ExpiriesResponse(expiries=[e.isoformat() for e in sorted(rt.expiries)])
+    # Return the UNION of two sources, so the dropdown offers both the live
+    # upcoming expiry (subscribed, fills as ticks arrive) AND any historical
+    # expiries that already have stored data. Using the live runtime as an
+    # exclusive override hid expiries with 965k rows behind a single empty live
+    # expiry — making "No OI data" unavoidable when the current expiry hasn't
+    # ingested yet.
+    expiry_set: set = set()
 
-    # Fallback: derive distinct expiries from the snapshot table.
+    # Source 1: live runtime list (authoritative only for the active symbol).
+    if entry.symbol == rt.active_symbol and rt.expiries:
+        expiry_set.update(rt.expiries)
+
+    # Source 2: distinct expiries that actually have snapshot data in the DB.
     async with AsyncSessionLocal() as s:
         rows = (
             await s.execute(
@@ -63,8 +72,17 @@ async def expiries(symbol: str | None = Query(default=None)) -> ExpiriesResponse
                 {"symbol": entry.symbol},
             )
         ).all()
-    if rows:
-        return ExpiriesResponse(expiries=[r[0].isoformat() for r in rows])
+    expiry_set.update(r[0] for r in rows)
+
+    if expiry_set:
+        # Live (non-expired) expiries first, ascending, then past expiries most
+        # recent first. The frontend defaults to expiries[0]
+        # (useMarketContext.ts) — a plain ascending sort put months-old expired
+        # contracts first, so the dashboard opened on frozen historical data.
+        today = now_ist().date()
+        upcoming = sorted(e for e in expiry_set if e >= today)
+        past = sorted((e for e in expiry_set if e < today), reverse=True)
+        return ExpiriesResponse(expiries=[e.isoformat() for e in upcoming + past])
 
     # Active F&O symbol with nothing resolved yet (first option fetch was likely
     # throttled to empty). Kick off a guarded background re-resolution so the

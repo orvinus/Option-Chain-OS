@@ -16,6 +16,8 @@ interface Props {
   liveSpot?: number | null;
   /** From `/api/health` — avoids blaming "market closed" during the regular session. */
   nseSessionOpen?: boolean;
+  /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
+  strikeStep?: number | null;
 }
 
 // ── formatting helpers ──────────────────────────────────────────────────────
@@ -40,19 +42,20 @@ export function OIChangeChart({
   underlyingLabel = "NIFTY",
   liveSpot,
   nseSessionOpen,
+  strikeStep,
 }: Props) {
   const allChangeZero = useMemo(() => {
     if (!data || mode !== "change") return false;
     const spotForWindow = liveSpot ?? data.spot ?? null;
-    const windowRows = filterOiRowsByAtmWindow(data.rows, spotForWindow, atmWindow);
+    const windowRows = filterOiRowsByAtmWindow(data.rows, spotForWindow, atmWindow, strikeStep);
     if (windowRows.length === 0) return false;
     return windowRows.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, mode, atmWindow, liveSpot]);
+  }, [data, mode, atmWindow, liveSpot, strikeStep]);
 
   const option: EChartsOption = useMemo(() => {
     const allRows: OIChangeRow[] = data?.rows ?? [];
     const spot = liveSpot ?? data?.spot ?? null;
-    const rows = filterOiRowsByAtmWindow(allRows, spot, atmWindow);
+    const rows = filterOiRowsByAtmWindow(allRows, spot, atmWindow, strikeStep);
 
     const strikes = rows.map((r) => r.strike);
 
@@ -146,7 +149,7 @@ export function OIChangeChart({
       },
       tooltip: {
         trigger: "axis",
-        axisPointer: { type: "shadow" },
+        axisPointer: { type: "cross", label: { backgroundColor: "#1f2937" } },
         backgroundColor: "rgba(10,15,30,0.97)",
         borderColor: "#1e3a5f",
         borderWidth: 1,
@@ -195,6 +198,8 @@ export function OIChangeChart({
           formatter: (v: number) => compactNum(v),
         },
       },
+      // Mouse-wheel zoom + drag-pan across the strike axis (no extra UI chrome).
+      dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none" }],
       series: [
         {
           name: seriesLabel.pe,
@@ -213,7 +218,7 @@ export function OIChangeChart({
         },
       ],
     } satisfies EChartsOption;
-  }, [data, mode, atmWindow, underlyingLabel, allChangeZero, liveSpot]);
+  }, [data, mode, atmWindow, underlyingLabel, allChangeZero, liveSpot, strikeStep]);
 
   // ── loading skeleton ────────────────────────────────────────────────────
   if (isLoading && !data) {

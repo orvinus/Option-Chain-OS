@@ -1,13 +1,21 @@
 """Fetch NSE India option chain data for cross-checking our XTS broker feed.
 
-Sources:
-  - Indices: https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY
-  - Equities: https://www.nseindia.com/api/option-chain-equities?symbol=SBIN
+Sources (v3 — NSE retired the legacy ``option-chain-indices``/``-equities``
+endpoints, which now return 404):
+  - Indices:  https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY&expiry=07-Jul-2026
+  - Equities: https://www.nseindia.com/api/option-chain-v3?type=Equity&symbol=SBIN&expiry=...
+
+The v3 API requires an explicit expiry (DD-MMM-YYYY), so ``expiry_filter`` is
+mandatory here.
+
+UNITS: NSE reports ``openInterest`` in CONTRACTS (lots). Our XTS feed reports
+OI in units (contracts x market lot). Callers must scale NSE OI by the
+instrument's lot size before comparing (see verify_option_chain).
 
 NSE requires a browser-like session (cookie from the homepage) — same pattern
 as ``nifty_public_quote.py``.
 
-NSE expiry dates come as strings like "26-Dec-2024"; we normalise them to
+NSE expiry dates come as strings like "07-Jul-2026"; we normalise them to
 ``datetime.date`` objects before returning.
 """
 from __future__ import annotations
@@ -59,11 +67,11 @@ def _parse_nse_expiry(s: str) -> date | None:
 
 
 def _nse_symbol(symbol: str) -> tuple[str, str]:
-    """Return (nse_api_symbol, endpoint_type) for the given internal symbol."""
+    """Return (nse_api_symbol, v3 ``type`` param) for the given internal symbol."""
     sym = symbol.upper()
-    endpoint = "option-chain-indices" if sym in _INDEX_SYMBOLS else "option-chain-equities"
+    chain_type = "Indices" if sym in _INDEX_SYMBOLS else "Equity"
     nse_sym = _SYMBOL_TO_NSE.get(sym, sym)
-    return nse_sym, endpoint
+    return nse_sym, chain_type
 
 
 def _parse_response(payload: dict) -> list[NSEOptionRow]:
@@ -72,7 +80,8 @@ def _parse_response(payload: dict) -> list[NSEOptionRow]:
     rows: list[NSEOptionRow] = []
     for item in data:
         strike_raw = item.get("strikePrice")
-        expiry_raw = item.get("expiryDate")
+        # v3 uses "expiryDates" (DD-MMM-YYYY) at item level; legacy used "expiryDate".
+        expiry_raw = item.get("expiryDates") or item.get("expiryDate")
         if strike_raw is None or expiry_raw is None:
             continue
         expiry = _parse_nse_expiry(str(expiry_raw))
@@ -116,14 +125,21 @@ async def fetch_nse_option_chain(
 ) -> tuple[list[NSEOptionRow], str]:
     """Return (rows, source_endpoint) for the given symbol.
 
-    ``expiry_filter`` restricts rows to a single expiry; None returns all.
+    ``expiry_filter`` is REQUIRED: the v3 API serves one expiry per request
+    (legacy all-expiry endpoints were retired by NSE and return 404).
     Raises on network/parse failure so callers can catch and degrade gracefully.
     """
-    nse_sym, endpoint = _nse_symbol(symbol)
-    url = f"https://www.nseindia.com/api/{endpoint}?symbol={nse_sym}"
+    if expiry_filter is None:
+        raise ValueError("expiry_filter is required (NSE option-chain-v3 serves one expiry per request)")
+    nse_sym, chain_type = _nse_symbol(symbol)
+    endpoint = f"option-chain-v3-{chain_type.lower()}"
+    url = (
+        "https://www.nseindia.com/api/option-chain-v3"
+        f"?type={chain_type}&symbol={nse_sym}&expiry={expiry_filter.strftime('%d-%b-%Y')}"
+    )
     option_chain_page = (
         "https://www.nseindia.com/option-chain"
-        if endpoint == "option-chain-indices"
+        if chain_type == "Indices"
         else "https://www.nseindia.com/market-data/equity-stock-indices-details?symbol="
         + nse_sym
     )
@@ -131,7 +147,9 @@ async def fetch_nse_option_chain(
         "User-Agent": UA,
         "Accept-Language": "en-IN,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        # No "br": httpx can only decompress brotli when the optional brotli
+        # package is installed; advertising it hands us undecodable bytes.
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',

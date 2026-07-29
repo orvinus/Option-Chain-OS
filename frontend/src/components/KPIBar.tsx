@@ -1,5 +1,6 @@
 import type { OIChangeResponse } from "../types";
 import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { callPutRatio } from "../utils/ratio";
 import type { OIMode } from "./OIChangeChart";
 
 interface Props {
@@ -8,6 +9,8 @@ interface Props {
   atmWindow: number;
   /** Live spot from /api/health when the Angel feed is connected — aligns ATM with the active index/stock. */
   liveSpot?: number | null;
+  /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
+  strikeStep?: number | null;
 }
 
 /** Indian compact notation matching Sensibull's display */
@@ -20,10 +23,11 @@ function compact(n: number, showSign = false): string {
   return `${sign}${abs === 0 ? "0" : abs.toLocaleString()}`;
 }
 
-export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
+export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   const rows = data?.rows ?? [];
   const spot = liveSpot ?? data?.spot ?? null;
-  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow);
+  const step = strikeStep ?? 50;
+  const windowRows = filterOiRowsByAtmWindow(rows, spot, atmWindow, strikeStep);
 
   // Absolute OI totals (in contracts, same unit Sensibull uses)
   const totalCeOI = windowRows.reduce((s, r) => s + r.call_oi, 0);
@@ -40,19 +44,28 @@ export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
   const peVal = isChange ? peChg : totalPeOI;
   const pcrVal = isChange ? pcrChg : pcr;
 
-  const callPutRatio =
-    isChange
-      ? peChg !== 0
-        ? ceChg / peChg
-        : null
-      : totalPeOI > 0
-        ? totalCeOI / totalPeOI
-        : null;
-  const ratioMain =
-    callPutRatio !== null && Number.isFinite(callPutRatio)
-      ? callPutRatio.toFixed(3)
+  // Standardized normalized Call : Put ratio (shared across MTF / Ratio / Change-in-OI).
+  // Ratio is shown in Call : Put order with the smaller side pinned to 1; Side is the
+  // dominant (larger |OI Δ|) side. Computed on the windowed change totals.
+  const cpr = callPutRatio(ceChg, peChg);
+
+  // Absolute-OI mode keeps the legacy CE ÷ PE OI ratio (the primary dashboard
+  // only ever renders change mode, but this preserves the absolute-mode caller).
+  const absRatio = !isChange && totalPeOI > 0 ? totalCeOI / totalPeOI : null;
+
+  const hasRatio = isChange
+    ? cpr.side !== "NEUTRAL"
+    : absRatio !== null && Number.isFinite(absRatio);
+  const ratioMain = isChange
+    ? cpr.text
+    : absRatio !== null && Number.isFinite(absRatio)
+      ? absRatio.toFixed(3)
       : "—";
-  const ratioHint = isChange ? "Call ÷ Put chg" : "CE ÷ PE OI";
+  const ratioHint = isChange
+    ? cpr.side === "NEUTRAL"
+      ? "Neutral"
+      : `${cpr.side === "CALL" ? "Call" : "Put"} dominant`
+    : "CE ÷ PE OI";
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -86,14 +99,12 @@ export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
         <span className="text-[10px] text-muted/60">contracts</span>
       </div>
 
-      {/* Call ÷ Put (windowed; same timeframe as chart) */}
+      {/* OI-change ratio (windowed) — "1 : X.XX" on the weaker/lower-buildup side */}
       <div className="kpi">
         <span className="text-xs text-muted uppercase tracking-wider">Ratio</span>
         <span
           className={`text-xl font-mono font-bold tabular-nums ${
-            callPutRatio !== null && Number.isFinite(callPutRatio)
-              ? "text-yellow-400"
-              : "text-muted"
+            hasRatio ? "text-yellow-400" : "text-muted"
           }`}
         >
           {ratioMain}
@@ -124,7 +135,7 @@ export function KPIBar({ data, mode, atmWindow, liveSpot }: Props) {
         </span>
         {spot != null && (
           <span className="text-[10px] text-muted/60">
-            ATM: {Math.round(spot / 50) * 50}
+            ATM: {Math.round(spot / step) * step}
           </span>
         )}
       </div>

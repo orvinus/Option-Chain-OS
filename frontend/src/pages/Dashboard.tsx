@@ -1,91 +1,48 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
-import { api } from "../api/rest";
-import { ConnectBanner } from "../components/ConnectBanner";
 import { ExpirySelect } from "../components/ExpirySelect";
 import { KPIBar } from "../components/KPIBar";
-import { NetOICalculator } from "../components/NetOICalculator";
-import { OIChangeChart, type OIMode } from "../components/OIChangeChart";
+import { OIChangeChart } from "../components/OIChangeChart";
 import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
 import { TimeframeBar } from "../components/TimeframeBar";
 import { TimeRangeSlider } from "../components/TimeRangeSlider";
+import { DatePicker } from "../components/DatePicker";
+import { ExportButton } from "../components/ExportButton";
+import { buildSnapshotTable } from "../utils/exportData";
 import { useOIChange } from "../hooks/useOIChange";
 import { useOIChangeRange } from "../hooks/useOIChangeRange";
-import { useOptionChainFull } from "../hooks/useOptionChainFull";
 import { useOIStream } from "../hooks/useOIStream";
-import type {
-  HealthResponse,
-  SymbolEntry,
-  SymbolSectorGroup,
-  Timeframe,
-} from "../types";
+import { useAvailableDates } from "../hooks/useAvailableDates";
+import type { MarketContextValue } from "../hooks/useMarketContext";
+import type { Timeframe } from "../types";
 import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import {
+  SESSION_SPAN_MIN,
+  clamp,
+  isToday,
+  isoForSessionMinuteOnDate,
+  maxMinForDate,
+  todayIstDate,
+} from "../utils/sessionTime";
 
-const HEALTH_POLL_MS = 3_000;
-const EXPIRY_POLL_MS = 30_000;
 const ATM_MAX_WINDOW = 50;
-
-// NSE regular session in minutes-from-midnight (IST). The custom-range slider
-// spans 09:15 → 15:30 (375 minutes).
-const SESSION_OPEN_MIN = 9 * 60 + 15;
-const SESSION_CLOSE_MIN = 15 * 60 + 30;
-const SESSION_SPAN_MIN = SESSION_CLOSE_MIN - SESSION_OPEN_MIN; // 375
 const RANGE_DEFAULT_LOOKBACK_MIN = 30;
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+export function Dashboard({ mc }: { mc: MarketContextValue }) {
+  const {
+    authenticated, authChecked, health, connectError,
+    symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    expiry, setExpiry, expiries, expiryError,
+    atmWindow, setAtmWindow,
+    activeEntry, fnoEligible, symbolDisplay, liveSpot,
+  } = mc;
 
-/** Parse health.now_ist ("YYYY-MM-DDTHH:MM:SS...+05:30") into IST date + minutes-from-open. */
-function parseNowIst(nowIst: string | undefined): { date: string; sinceOpen: number } | null {
-  if (!nowIst || nowIst.length < 16) return null;
-  const date = nowIst.slice(0, 10);
-  const hh = Number(nowIst.slice(11, 13));
-  const mm = Number(nowIst.slice(14, 16));
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return { date, sinceOpen: hh * 60 + mm - SESSION_OPEN_MIN };
-}
-
-/** Build an IST ISO timestamp for a given minutes-from-open on the trading date. */
-function isoForSessionMinute(dateStr: string, min: number): string {
-  const total = SESSION_OPEN_MIN + Math.round(min);
-  const hh = Math.floor(total / 60);
-  const mm = total % 60;
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${dateStr}T${p(hh)}:${p(mm)}:00+05:30`;
-}
-
-export type DashTab = "oi_change" | "oi_absolute" | "net_oi";
-
-const DASH_TABS: { id: DashTab; label: string }[] = [
-  { id: "oi_change", label: "OI Change" },
-  { id: "oi_absolute", label: "OI Absolute" },
-  { id: "net_oi", label: "Net OI Calculator" },
-];
-
-function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry> {
-  const out: Record<string, SymbolEntry> = {};
-  for (const g of groups) {
-    for (const s of g.symbols) {
-      out[s.symbol] = s;
-    }
-  }
-  return out;
-}
-
-export function Dashboard() {
   const [timeframe, setTimeframe] = useState<Timeframe>("5m");
-  const [expiry, setExpiry] = useState<string | null>(null);
-  const [expiries, setExpiries] = useState<string[]>([]);
-  const [expiryError, setExpiryError] = useState<string | null>(null);
+  // Registry strike step (NIFTY 50, SENSEX 100) — drives ATM math and windowing.
+  const strikeStep = activeEntry?.strike_step ?? 50;
 
-  const [symbol, setSymbol] = useState<string>("NIFTY");
-  const [symbolGroups, setSymbolGroups] = useState<SymbolSectorGroup[]>([]);
-  const [switching, setSwitching] = useState(false);
-  const [symbolError, setSymbolError] = useState<string | null>(null);
-
-  const [dashTab, setDashTab] = useState<DashTab>("oi_change");
-  const oiMode: OIMode = dashTab === "oi_absolute" ? "absolute" : "change";
-
+  // This build (Ayush Bhai branch) ships only the OI Change view.
   // Custom time-range selection (minutes from 09:15). `rangeMode` switches the
   // chart from preset timeframes to an explicit [from, to] window; `toAtLive`
   // keeps the right handle pinned to "now" so the window stays live until the
@@ -94,147 +51,49 @@ export function Dashboard() {
   const [fromMin, setFromMin] = useState(0);
   const [toMin, setToMin] = useState(SESSION_SPAN_MIN);
   const [toAtLive, setToAtLive] = useState(true);
+  // Selected historical trading date (null = live / today). A past date forces an
+  // explicit fixed window and reads exclusively from the range fetch.
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  const [atmWindow, setAtmWindow] = useState<number>(5);
+  const avail = useAvailableDates(
+    fnoEligible ? symbol : null,
+    expiry,
+    authenticated && fnoEligible && !!expiry,
+  );
+  const effectiveDate = selectedDate ?? todayIstDate(health);
+  const historical = selectedDate != null && !isToday(selectedDate, health);
 
-  const [authenticated, setAuthenticated] = useState(false);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-
-  const symbolIndex = useMemo(() => flattenSymbols(symbolGroups), [symbolGroups]);
-  const activeEntry: SymbolEntry | undefined = symbolIndex[symbol];
-  const fnoEligible = activeEntry?.fno_eligible ?? true;
-  const symbolDisplay = activeEntry?.display ?? symbol;
-
-  // Poll /api/health for auth, market session, and ingestion
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const h = await api.health();
-        if (!cancelled) {
-          setHealth(h);
-          setAuthenticated(h.authenticated);
-          setAuthChecked(true);
-          // Sync local symbol with backend if it changed out-of-band (e.g. server restart).
-          if (h.active_symbol && h.active_symbol !== symbol) {
-            setSymbol(h.active_symbol);
-          }
-        }
-      } catch {
-        if (!cancelled) setAuthChecked(true);
-      }
-    };
-    void check();
-    const id = setInterval(() => void check(), HEALTH_POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
-    // symbol intentionally excluded from deps — we only want to sync once on initial mount/poll.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Load the symbol registry once authenticated; retry every 3s on transient failure
-  // or when groups is empty (e.g. backend came up after frontend).
-  useEffect(() => {
-    if (!authenticated) return;
-    let cancelled = false;
-    const load = () => {
-      api.symbols().then((res) => {
-        if (cancelled) return;
-        setSymbolGroups(res.groups);
-        setSymbolError(null);
-        if (res.active_symbol) setSymbol(res.active_symbol);
-      }).catch((e: unknown) => {
-        if (!cancelled) setSymbolError(String(e));
-      });
-    };
-    load();
-    const id = setInterval(() => {
-      // Re-fetch until we have at least one group; thereafter stop polling.
-      setSymbolGroups((curr) => {
-        if (curr.length === 0) load();
-        return curr;
-      });
-    }, 3_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated]);
-
-  // Load expiries for the current symbol when it changes (or auth flips on).
-  useEffect(() => {
-    if (!authenticated) return;
-    if (!fnoEligible) {
-      setExpiries([]);
-      setExpiry(null);
-      setExpiryError(null);
-      return;
-    }
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const res = await api.expiries(symbol);
-        if (cancelled) return;
-        setExpiries(res.expiries);
-        setExpiryError(null);
-        setExpiry((curr) => {
-          if (curr && res.expiries.includes(curr)) return curr;
-          return res.expiries[0] ?? null;
-        });
-      } catch (e) { if (!cancelled) setExpiryError(String(e)); }
-    };
-    void tick();
-    const id = setInterval(() => void tick(), EXPIRY_POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated, symbol, fnoEligible]);
-
-  const handleSymbolChange = useCallback(async (next: string) => {
-    if (next === symbol) return;
-    setSwitching(true);
-    setSymbolError(null);
-    // Optimistic UI: clear the chart so the user knows a switch is in flight.
-    setExpiry(null);
-    setExpiries([]);
-    try {
-      const res = await api.setActiveSymbol(next);
-      setSymbol(res.symbol);
-      setExpiries(res.expiries);
-      setExpiry(res.expiries[0] ?? null);
-    } catch (e) {
-      setSymbolError(String(e));
-    } finally {
-      setSwitching(false);
-    }
-  }, [symbol]);
-
-  // Drive the streaming hooks only when we have a valid F&O context.
-  const activeTimeframe: Timeframe | null = authenticated && expiry && fnoEligible ? timeframe : null;
+  // Drive the streaming hooks only when we have a valid F&O context — and NOT when
+  // viewing a historical date (live/preset data is current-session only).
+  const activeTimeframe: Timeframe | null =
+    authenticated && expiry && fnoEligible && !historical ? timeframe : null;
   const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null);
-  const initialOc = useOptionChainFull(activeTimeframe, expiry, fnoEligible ? symbol : null);
   const live = useOIStream(activeTimeframe, expiry, fnoEligible ? symbol : null);
 
-  // ── Custom time-range mode ───────────────────────────────────────────────
-  const nowInfo = useMemo(() => parseNowIst(health?.now_ist), [health?.now_ist]);
-  const maxMin = useMemo(
-    () => (nowInfo ? clamp(nowInfo.sinceOpen, 0, SESSION_SPAN_MIN) : SESSION_SPAN_MIN),
-    [nowInfo],
-  );
+  // ── Custom time-range / historical mode ──────────────────────────────────
+  // maxMin: today clamps to the live edge; a past date exposes the full session.
+  const maxMin = useMemo(() => maxMinForDate(effectiveDate, health), [effectiveDate, health]);
 
-  // Not in range mode: park the handles at the live edge (last N minutes) so the
-  // slider is pre-positioned when the user grabs it.
+  // Live-edge parking (today, not in range mode): pre-position the slider handles.
   useEffect(() => {
-    if (rangeMode) return;
+    if (rangeMode || historical) return;
     setToMin(maxMin);
     setFromMin(clamp(maxMin - RANGE_DEFAULT_LOOKBACK_MIN, 0, maxMin));
-  }, [maxMin, rangeMode]);
+  }, [maxMin, rangeMode, historical]);
 
-  // Right handle pinned to "now": keep it pinned to maxMin as the session advances.
+  // Right handle pinned to "now" (today only): keep it at maxMin as time advances.
   useEffect(() => {
-    if (!rangeMode || !toAtLive) return;
+    if (historical || !rangeMode || !toAtLive) return;
     setToMin(maxMin);
     setFromMin((f) => Math.min(f, Math.max(0, maxMin - 1)));
-  }, [maxMin, rangeMode, toAtLive]);
+  }, [maxMin, rangeMode, toAtLive, historical]);
 
-  const rangeFromTs = nowInfo ? isoForSessionMinute(nowInfo.date, fromMin) : null;
-  const rangeToTs = toAtLive ? null : nowInfo ? isoForSessionMinute(nowInfo.date, toMin) : null;
-  const rangeActive = rangeMode && authenticated && fnoEligible && !!expiry && !!rangeFromTs;
+  // Build timestamps on the EFFECTIVE date (not just today) — the blank-chart fix.
+  const rangeFromTs = effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, fromMin) : null;
+  const liveEdge = !historical && toAtLive; // open-ended only for the current session
+  const rangeToTs = liveEdge ? null : effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, toMin) : null;
+  const windowActive = rangeMode || historical;
+  const rangeActive = windowActive && authenticated && fnoEligible && !!expiry && !!rangeFromTs;
   const range = useOIChangeRange(
     rangeFromTs,
     rangeToTs,
@@ -248,19 +107,44 @@ export function Dashboard() {
       setRangeMode(true);
       setFromMin(from);
       setToMin(to);
-      setToAtLive(to >= maxMin);
+      setToAtLive(!historical && to >= maxMin);
     },
-    [maxMin],
+    [maxMin, historical],
   );
   const handleSliderClear = useCallback(() => {
+    if (historical) {
+      // Keep the historical date; reset the window to the full session.
+      setFromMin(0);
+      setToMin(SESSION_SPAN_MIN);
+      setToAtLive(false);
+      return;
+    }
     setRangeMode(false);
     setToAtLive(true);
-  }, []);
+  }, [historical]);
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
+    // Selecting a preset timeframe implies the live current session.
     setTimeframe(tf);
     setRangeMode(false);
     setToAtLive(true);
+    setSelectedDate(null);
   }, []);
+  const handleDateChange = useCallback(
+    (date: string | null) => {
+      setSelectedDate(date);
+      const isPast = date != null && !isToday(date, health);
+      if (isPast) {
+        setRangeMode(true);
+        setToAtLive(false);
+        setFromMin(0);
+        setToMin(SESSION_SPAN_MIN);
+      } else {
+        setRangeMode(false);
+        setToAtLive(true);
+      }
+    },
+    [health],
+  );
 
   const presetData = useMemo(() => {
     const liveOk =
@@ -276,23 +160,9 @@ export function Dashboard() {
     return (liveOk ? live.data : null) ?? (initialOk ? initial.data : null);
   }, [live.data, initial.data, activeTimeframe, expiry]);
 
-  // In custom-range mode the chart is driven by the range fetch; otherwise by
-  // the preset-timeframe live/REST data.
-  const data = rangeMode ? range.data : presetData;
-
-  const optionChainMerged = useMemo(() => {
-    const liveOk =
-      live.optionChainData != null &&
-      activeTimeframe != null &&
-      live.optionChainData.timeframe === activeTimeframe &&
-      live.optionChainData.expiry === expiry;
-    const initialOk =
-      initialOc.data != null &&
-      activeTimeframe != null &&
-      initialOc.data.timeframe === activeTimeframe &&
-      initialOc.data.expiry === expiry;
-    return (liveOk ? live.optionChainData : null) ?? (initialOk ? initialOc.data : null);
-  }, [live.optionChainData, initialOc.data, activeTimeframe, expiry]);
+  // In custom-range / historical mode the chart is driven by the range fetch;
+  // otherwise by the preset-timeframe live/REST data.
+  const data = windowActive ? range.data : presetData;
 
   const hasMatchingSnapshot = useMemo(() => {
     if (activeTimeframe == null || expiry == null) return false;
@@ -301,34 +171,15 @@ export function Dashboard() {
     return ok(live.data) || ok(initial.data);
   }, [live.data, initial.data, activeTimeframe, expiry]);
 
-  const hasMatchingOptionChain = useMemo(() => {
-    if (activeTimeframe == null || expiry == null) return false;
-    const ok = (d: typeof live.optionChainData) =>
-      d != null && d.timeframe === activeTimeframe && d.expiry === expiry;
-    return ok(live.optionChainData) || ok(initialOc.data);
-  }, [live.optionChainData, initialOc.data, activeTimeframe, expiry]);
-
-  const isLoading = rangeMode
+  const isLoading = windowActive
     ? range.loading && !range.data
     : initial.loading && !hasMatchingSnapshot;
-  const isLoadingOc = initialOc.loading && !hasMatchingOptionChain;
-
-  const liveSpot =
-    health?.feed_connected && health.latest_spot != null && health.active_symbol === symbol
-      ? health.latest_spot
-      : null;
-
-  const showChart = dashTab === "oi_change" || dashTab === "oi_absolute";
 
   const noOiChangeInAtmWindow = useMemo(() => {
-    if (!showChart || !data || oiMode !== "change") return false;
-    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow);
+    if (!data) return false;
+    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow, strikeStep);
     return wr.length > 0 && wr.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, oiMode, atmWindow, liveSpot, showChart]);
-
-  const handleAuthenticated = useCallback(() => {
-    setAuthenticated(true);
-  }, []);
+  }, [data, atmWindow, liveSpot, strikeStep]);
 
   if (!authChecked) {
     return (
@@ -357,7 +208,24 @@ export function Dashboard() {
 
       <main className="flex flex-col gap-4">
         {!authenticated ? (
-          <ConnectBanner onAuthenticated={handleAuthenticated} />
+          <div className="panel p-8 flex flex-col items-center gap-4 max-w-md mx-auto w-full text-center border border-accent/30">
+            <svg className="w-8 h-8 animate-spin text-accent" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
+            </svg>
+            <div>
+              <h2 className="text-lg font-semibold text-foreground">Connecting to broker…</h2>
+              <p className="mt-1 text-sm text-muted">
+                Starting live option-chain ingestion via the XTS API key in .env.
+              </p>
+            </div>
+            {connectError && (
+              <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-sm text-red-400">
+                {connectError}
+                <div className="text-xs text-muted mt-1">Retrying automatically…</div>
+              </div>
+            )}
+          </div>
         ) : (
           <>
             {/* ── Controls row ──────────────────────────────────── */}
@@ -381,37 +249,37 @@ export function Dashboard() {
                   <TimeframeBar value={rangeMode ? null : timeframe} onChange={handleTimeframeChange} />
                 </div>
                 {fnoEligible && (
-                  <ExpirySelect
-                    expiries={expiries}
-                    value={expiry}
-                    onChange={setExpiry}
-                    error={expiryError}
-                  />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <DatePicker value={selectedDate} available={avail.dates} onChange={handleDateChange} />
+                    <ExpirySelect
+                      expiries={expiries}
+                      value={expiry}
+                      onChange={setExpiry}
+                      error={expiryError}
+                    />
+                  </div>
                 )}
               </div>
+              {historical && (
+                <div className="text-[11px] text-amber-300/90">
+                  Viewing historical session <b>{effectiveDate}</b> — data is read from stored snapshots
+                  for the selected window.
+                </div>
+              )}
 
               {fnoEligible && (
                 <div className="flex flex-wrap items-center gap-4 pt-1 border-t border-border">
-                  <div className="flex flex-wrap items-center gap-1 bg-surface/50 rounded-lg p-0.5">
-                    {DASH_TABS.map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => setDashTab(t.id)}
-                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
-                          dashTab === t.id
-                            ? "bg-accent text-black shadow"
-                            : "text-muted hover:text-foreground"
-                        }`}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-
+                  <span className="text-xs font-medium text-accent">OI Change</span>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted">Strikes ATM ±</span>
                     <AtmWindowSelect value={atmWindow} max={ATM_MAX_WINDOW} onChange={setAtmWindow} />
+                  </div>
+                  <div className="ml-auto">
+                    <ExportButton
+                      getTable={() => (data ? buildSnapshotTable(data) : null)}
+                      filenameBase={`oi-change_${symbol}_${effectiveDate ?? "live"}_${historical ? "hist" : timeframe}`}
+                      disabled={!data}
+                    />
                   </div>
                 </div>
               )}
@@ -445,28 +313,20 @@ export function Dashboard() {
               </div>
             )}
 
-            {fnoEligible && dashTab === "oi_change" && (
-              <KPIBar data={data} mode={oiMode} atmWindow={atmWindow} liveSpot={liveSpot} />
+            {fnoEligible && (
+              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} strikeStep={strikeStep} />
             )}
 
-            {fnoEligible && showChart && (
+            {fnoEligible && (
               <OIChangeChart
                 data={data}
-                mode={oiMode}
+                mode="change"
                 atmWindow={atmWindow}
                 isLoading={isLoading}
                 underlyingLabel={symbolDisplay}
                 liveSpot={liveSpot}
                 nseSessionOpen={health?.nse_session_open}
-              />
-            )}
-
-            {fnoEligible && dashTab === "net_oi" && (
-              <NetOICalculator
-                data={optionChainMerged}
-                liveSpot={liveSpot}
-                atmWindow={atmWindow}
-                isLoading={isLoadingOc}
+                strikeStep={strikeStep}
               />
             )}
 
@@ -475,17 +335,12 @@ export function Dashboard() {
                 Failed to load: {initial.error}
               </div>
             )}
-            {fnoEligible && initialOc.error && !optionChainMerged && dashTab === "net_oi" && (
-              <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
-                Failed to load option chain: {initialOc.error}
-              </div>
-            )}
             {fnoEligible && expiryError && expiries.length === 0 && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Error loading expiries: {expiryError}
               </div>
             )}
-            {fnoEligible && showChart &&
+            {fnoEligible &&
               data &&
               data.rows.length > 0 &&
               noOiChangeInAtmWindow && (
@@ -499,25 +354,15 @@ export function Dashboard() {
                     <>
                       NSE session is <b>open</b> (server clock), so this usually means the feed is quiet, OI has not moved
                       versus the comparison snapshot, or DB flushes are stale — check <b>XTS feed</b>, <b>Last DB flush</b>,
-                      and <b>WS LIVE</b> in the header. Try another timeframe or wait for the next minute bucket.
-                      Switch to <b>OI Absolute</b> tab to confirm snapshots are updating.
+                      and <b>WS LIVE</b> in the header. Try a longer timeframe (OI refreshes from the exchange ~once/min).
                     </>
                   ) : (
                     <>
                       Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
-                      static end-of-day style OI, so intraday deltas stay flat. Switch to <b>OI Absolute</b> tab for the
-                      distribution.
+                      static end-of-day style OI, so intraday deltas stay flat.
                     </>
                   )}
                 </span>
-              </div>
-            )}
-            {fnoEligible && showChart && data && oiMode === "absolute" && (
-              <div className="panel p-2 text-xs text-slate-400/70 border border-slate-700/30 flex items-center gap-2">
-                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01" />
-                </svg>
-                Absolute OI shows the <b>latest snapshot</b> — values are identical across timeframes. Timeframe only affects <b>OI Change</b> calculations.
               </div>
             )}
           </>
@@ -525,7 +370,7 @@ export function Dashboard() {
       </main>
 
       <footer className="text-center text-xs text-muted py-6 mt-2">
-        Multi-symbol option-chain intelligence • Powered by Shrilakshmi/Symphony XTS WebSocket
+        NIFTY 50 &amp; SENSEX OI-change intelligence • Powered by Shrilakshmi/Symphony XTS WebSocket
       </footer>
     </div>
   );

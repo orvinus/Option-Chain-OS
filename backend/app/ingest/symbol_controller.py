@@ -12,6 +12,7 @@ For non-F&O symbols, only the spot token is subscribed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 
 from ..auth import get_session_manager
 from ..core.logging import get_logger
@@ -19,8 +20,23 @@ from ..market.scripmaster import InstrumentToken, resolve_option_universe
 from ..market.symbols import SymbolEntry, get_registry
 from ..market_data import xts_client
 from ..runtime import get_runtime
+from ..services.spot_fallback import db_last_underlying
 
 log = get_logger("symbol_controller")
+
+# XTS /instruments/indexlist names differ from our F&O symbol codes (e.g. our
+# "BANKNIFTY" is "NIFTY BANK" on XTS). Explicit aliases make index spot resolution
+# exact instead of relying on fragile substring matching ("NIFTY 50" ⊂ "NIFTY 500").
+# Verified against the live indexlist 2026-07-13.
+_INDEX_XTS_NAME = {
+    "NIFTY": "NIFTY 50",
+    "BANKNIFTY": "NIFTY BANK",
+    "FINNIFTY": "NIFTY FIN SERVICE",
+    "MIDCPNIFTY": "NIFTY MID SELECT",
+    "NIFTYNXT50": "NIFTY NEXT 50",
+    "SENSEX": "SENSEX",
+    "BANKEX": "BANKEX",
+}
 
 
 @dataclass
@@ -32,25 +48,68 @@ class SwitchResult:
     expiries: list[str]
 
 
+def _is_commodity(entry: SymbolEntry) -> bool:
+    return entry.kind == "commodity" or (entry.exchange or "").upper() == "MCX"
+
+
+def _spot_segment(entry: SymbolEntry) -> int:
+    """XTS segment for the symbol's reference-price instrument.
+
+    Indices/equities use the cash market (NSECM/BSECM). MCX commodities have no
+    cash spot — their reference is the near-month FUTURE, which lives on MCXFO(51),
+    so the "spot" quote is fetched on the FO segment.
+    """
+    if _is_commodity(entry):
+        return xts_client.SEG_MCXFO
+    return xts_client.SEG_BSECM if (entry.exchange or "").upper() == "BSE" else xts_client.SEG_NSECM
+
+
 async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
-    """Return the XTS NSECM spot instrument id for ``entry``, caching it on the registry."""
+    """Return the XTS spot instrument id for ``entry``, caching it on the registry.
+
+    Uses the entry's exchange to pick the cash-market segment (NSECM for NIFTY,
+    BSECM for SENSEX) so the index/spot lookup hits the right exchange.
+    """
+    sess = get_session_manager()
+
+    # Commodities (MCX): no cash spot — the reference is the NEAR-MONTH FUTURE, which
+    # ROLLS at monthly expiry. Always re-derive (bypassing any cached spot_token) so
+    # the token doesn't go stale after the near contract expires. Cheap: it just
+    # filters the in-memory master. Falls back to the last-known token off-session.
+    if _is_commodity(entry):
+        if not sess.authenticated:
+            return entry.spot_token
+        return await _resolve_commodity_future_token(entry)
+
     if entry.spot_token:
         return entry.spot_token
-    sess = get_session_manager()
     if not sess.authenticated:
         log.warning("symbol_controller.no_session_for_spot_lookup", symbol=entry.symbol)
         return None
 
-    # Indices: resolve from the XTS index list by display/symbol name.
+    spot_seg = _spot_segment(entry)
+
+    # Indices: resolve from the XTS index list. Prefer an exact match on the known
+    # XTS name (alias), then the symbol/display, then a substring fallback.
     if entry.kind == "index":
         try:
-            index_map = await xts_client.get_index_list(sess.token, xts_client.SEG_NSECM)
+            index_map = await xts_client.get_index_list(sess.token, spot_seg)
         except Exception as e:
             log.warning("symbol_controller.indexlist.error", symbol=entry.symbol, error=str(e))
             index_map = {}
-        wanted = {entry.display.upper().strip(), entry.symbol.upper().strip()}
+        candidates = {entry.symbol.upper().strip(), (entry.display or "").upper().strip()}
+        alias = _INDEX_XTS_NAME.get(entry.symbol.upper())
+        if alias:
+            candidates.add(alias.upper())
+        candidates.discard("")
+        # Exact match first (avoids "NIFTY 50" wrongly matching "NIFTY 500").
         for name, iid in index_map.items():
-            if name in wanted or any(w and w in name for w in wanted):
+            if name in candidates:
+                get_registry().update_spot_token(entry.symbol, iid)
+                return iid
+        # Substring fallback only if no exact match found.
+        for name, iid in index_map.items():
+            if any(c in name for c in candidates):
                 get_registry().update_spot_token(entry.symbol, iid)
                 return iid
         log.warning("symbol_controller.index_token_not_found", symbol=entry.symbol)
@@ -64,7 +123,7 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
         return None
     sym = entry.symbol.upper().strip()
     for item in items:
-        if int(item.get("ExchangeSegment") or 0) != xts_client.SEG_NSECM:
+        if int(item.get("ExchangeSegment") or 0) != spot_seg:
             continue
         name = (item.get("Name") or "").upper().strip()
         series = (item.get("Series") or "").upper().strip()
@@ -74,7 +133,7 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
             return iid
     # Fallback: first NSECM equity match by name.
     for item in items:
-        if int(item.get("ExchangeSegment") or 0) != xts_client.SEG_NSECM:
+        if int(item.get("ExchangeSegment") or 0) != spot_seg:
             continue
         if (item.get("Name") or "").upper().strip() == sym:
             iid = str(item.get("ExchangeInstrumentID") or "").strip()
@@ -85,12 +144,40 @@ async def _resolve_spot_token(entry: SymbolEntry) -> str | None:
     return None
 
 
-async def _fetch_spot_ltp(spot_token: str) -> float | None:
+async def _resolve_commodity_future_token(entry: SymbolEntry) -> str | None:
+    """Near-month future instrument id for an MCX commodity, from the cached master.
+
+    Each option row carries ``underlying_id`` (the future it settles against). We
+    pick the earliest non-expired expiry's underlying and cache it as the spot
+    token so ATM windowing quotes the near-future price on MCXFO.
+    """
+    from ..market.scripmaster import _parse_expiry, get_scripmaster
+
+    try:
+        rows = await get_scripmaster(entry.symbol)
+    except Exception as e:
+        log.warning("symbol_controller.commodity_master.error", symbol=entry.symbol, error=str(e))
+        return None
+    today = datetime.utcnow().date()
+    best: tuple[date, str] | None = None
+    for r in rows:
+        uid = (r.get("underlying_id") or "").strip()
+        exp = _parse_expiry(r.get("expiry", ""))
+        if uid and exp and exp >= today and (best is None or exp < best[0]):
+            best = (exp, uid)
+    if best:
+        get_registry().update_spot_token(entry.symbol, best[1])
+        return best[1]
+    log.warning("symbol_controller.commodity_future_not_found", symbol=entry.symbol)
+    return None
+
+
+async def _fetch_spot_ltp(spot_token: str, spot_seg: int = xts_client.SEG_NSECM) -> float | None:
     sess = get_session_manager()
     if not sess.authenticated:
         return None
     try:
-        return await xts_client.quote_ltp(sess.token, xts_client.SEG_NSECM, spot_token)
+        return await xts_client.quote_ltp(sess.token, spot_seg, spot_token)
     except Exception as e:
         log.warning("symbol_controller.spot_fetch.error", token=spot_token, error=str(e))
         return None
@@ -108,18 +195,23 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
 
     log.info("symbol_controller.switch.start", symbol=sym, fno=entry.fno_eligible)
 
+    spot_seg = _spot_segment(entry)
     spot_token = await _resolve_spot_token(entry)
-    spot = await _fetch_spot_ltp(spot_token) if spot_token else None
+    spot = await _fetch_spot_ltp(spot_token, spot_seg) if spot_token else None
 
     feed = rt.feed_client  # OptionFeedClient | None
     tokens: list[InstrumentToken] = []
     expiries_iso: list[str] = []
 
     if entry.fno_eligible:
-        # Without a spot value we cannot pick the strike window — fall back to
-        # whatever runtime had (or a 1.0 placeholder so the resolver still
-        # iterates the scripmaster).
-        spot_for_window = spot or rt.latest_spot or 1.0
+        # Without a spot value we cannot pick the strike window. Fall back to
+        # the last stored underlying FOR THIS SYMBOL; runtime's latest_spot is
+        # only trustworthy when it already belongs to this symbol (using the
+        # previous symbol's spot centred a SENSEX window on NIFTY's price ->
+        # zero contracts). 1.0 placeholder keeps the resolver iterating.
+        db_spot = await db_last_underlying(sym) if spot is None else None
+        same_symbol_spot = rt.latest_spot if rt.active_symbol == sym else None
+        spot_for_window = spot or db_spot or same_symbol_spot or 1.0
         try:
             tokens, expiries = await resolve_option_universe(
                 spot=spot_for_window, symbol=sym
@@ -132,11 +224,15 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
             rt.expiries = []
 
     if feed is not None and spot_token is not None:
-        await feed.swap_subscription(tokens, spot_token, sym)
+        await feed.swap_subscription(tokens, spot_token, sym, spot_seg)
 
     rt.tokens = tokens
     if spot is not None:
         rt.latest_spot = spot
+    elif entry.fno_eligible and spot_for_window > 1.0:
+        # Never leave the previous symbol's spot in runtime — /api/spot and the
+        # resubscribe loop would keep serving/centring on the wrong index.
+        rt.latest_spot = spot_for_window
     rt.active_symbol = sym
 
     log.info(

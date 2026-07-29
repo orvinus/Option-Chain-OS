@@ -12,6 +12,8 @@ interface Props {
   symbolDisplay: string;
   /** Raw symbol ticker. The NIFTY public cross-check button only renders for NIFTY. */
   symbolTicker: string;
+  /** Optional ATM strike shown beside Spot (e.g. on the Charts page). */
+  atmStrike?: number | null;
 }
 
 /** NSE / snapshot times should read in IST regardless of the viewer's locale. */
@@ -127,7 +129,7 @@ function referenceSourceLabel(source: string): string {
   }
 }
 
-export function SpotHeader({ data, status, health, streamError, symbolDisplay, symbolTicker }: Props) {
+export function SpotHeader({ data, status, health, streamError, symbolDisplay, symbolTicker, atmStrike }: Props) {
   const [cross, setCross] = useState<NiftyCrossCheckResponse | null>(null);
   const [crossLoading, setCrossLoading] = useState(false);
   const [crossErr, setCrossErr] = useState<string | null>(null);
@@ -212,6 +214,13 @@ export function SpotHeader({ data, status, health, streamError, symbolDisplay, s
               </div>
             )}
           </div>
+
+          {atmStrike != null && (
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-xs text-muted uppercase tracking-wider">ATM</span>
+              <span className="font-mono text-2xl font-bold tabular-nums text-foreground">{atmStrike}</span>
+            </div>
+          )}
 
           {timeStr && (
             <div className="flex flex-col items-end gap-0.5">

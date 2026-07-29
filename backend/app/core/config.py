@@ -62,7 +62,12 @@ class Settings(BaseSettings):
     # ---------------- Ingestion scope ----------------
     underlying_symbol: str = Field(default="NIFTY", validation_alias="UNDERLYING_SYMBOL")
     nifty_index_token: str = Field(default="26000", validation_alias="NIFTY_INDEX_TOKEN")
-    strike_window: int = Field(default=50, validation_alias="STRIKE_WINDOW")
+    # Default 11 = ATM±11 = 23 strikes × 2 + spot = 47 live subscriptions, safely
+    # under the broker's ~50-instrument-per-session cap. Do NOT raise the default
+    # to 50 — that resolves to ~202 instruments, exceeds the cap, and silently
+    # truncates the option chain. A larger window needs a broker plan with a
+    # higher cap (and/or the REST universe poller for the non-active strikes).
+    strike_window: int = Field(default=11, validation_alias="STRIKE_WINDOW")
     strike_step: int = Field(default=50, validation_alias="STRIKE_STEP")
     expiries: str = Field(default="current_weekly", validation_alias="EXPIRIES")
     nifty_lot_size: int = Field(default=75, validation_alias="NIFTY_LOT_SIZE")
@@ -73,6 +78,24 @@ class Settings(BaseSettings):
         validation_alias="PERSIST_BUCKET",
         description="DB flush bucket. Use 1s or 5s if you rely on sub-minute OI timeframes (1s/15s/30s/45s); 1min often yields flat deltas for those windows.",
     )
+
+    # ---------------- Universe poller (all-symbol REST-quote snapshotter) ----------------
+    # The live WS feed can only carry ~50 instruments for the ONE viewed symbol.
+    # This background poller REST-quotes every other F&O symbol's chain on a tiered
+    # cadence into the same DB (option_oi_snapshots), so all symbols accrue OI in
+    # parallel. It NEVER logs in (single-session-per-appKey) — it reuses the live
+    # session's token and, on a 401, waits for the feed's own self-heal to refresh it.
+    poller_enabled: bool = Field(default=False, validation_alias="POLLER_ENABLED")
+    poller_strike_window: int = Field(default=7, validation_alias="POLLER_STRIKE_WINDOW")
+    poller_expiries: str = Field(default="current_weekly", validation_alias="POLLER_EXPIRIES")
+    poller_quote_chunk: int = Field(default=25, validation_alias="POLLER_QUOTE_CHUNK")
+    poller_max_concurrency: int = Field(default=6, validation_alias="POLLER_MAX_CONCURRENCY")
+    poller_pace_ms: int = Field(default=50, validation_alias="POLLER_PACE_MS")
+    poller_max_429_retries: int = Field(default=5, validation_alias="POLLER_MAX_429_RETRIES")
+    poller_skip_active_symbol: bool = Field(default=True, validation_alias="POLLER_SKIP_ACTIVE_SYMBOL")
+    poller_tier_fast_interval_s: float = Field(default=20.0, validation_alias="POLLER_TIER_FAST_S")
+    poller_tier_mid_interval_s: float = Field(default=60.0, validation_alias="POLLER_TIER_MID_S")
+    poller_tier_slow_interval_s: float = Field(default=180.0, validation_alias="POLLER_TIER_SLOW_S")
 
     # ---------------- API server ----------------
     api_host: str = Field(default="0.0.0.0", validation_alias="API_HOST")
@@ -95,11 +118,34 @@ class Settings(BaseSettings):
     smartapi_login_timeout_s: float = Field(default=45.0, validation_alias="SMARTAPI_LOGIN_TIMEOUT_S")
     db_persist_timeout_s: float = Field(default=20.0, validation_alias="DB_PERSIST_TIMEOUT_S")
 
+    # ---------------- Dashboard gates ----------------
+    # Fixed username + password protecting the /hidden dashboard (verified server-side,
+    # never shipped to the browser). Blank => the /hidden-login endpoint returns 500 until set.
+    hidden_user: str = Field(default="", validation_alias="HIDDEN_USER")
+    hidden_password: str = Field(default="", validation_alias="HIDDEN_PASSWORD")
+    # Separate fixed credential for the MAIN dashboard at "/" (distinct from /hidden).
+    # Blank => the /main-login endpoint returns 500 until set.
+    main_user: str = Field(default="", validation_alias="MAIN_USER")
+    main_password: str = Field(default="", validation_alias="MAIN_PASSWORD")
+
+    # ---------------- IV scanner / HV ----------------
+    iv_scanner_max_symbols: int = Field(default=50, validation_alias="IV_SCANNER_MAX_SYMBOLS")
+    yahoo_hv_enabled: bool = Field(default=True, validation_alias="YAHOO_HV_ENABLED")
+    iv_history_snapshot_interval_s: float = Field(
+        default=900.0,
+        validation_alias="IV_HISTORY_SNAPSHOT_INTERVAL_S",
+        description="Seconds between background ATM-IV snapshots for the active symbol.",
+    )
+
     # -------- Derived helpers --------
 
     @property
     def expiry_policies(self) -> list[str]:
         return [s.strip() for s in self.expiries.split(",") if s.strip()]
+
+    @property
+    def poller_expiry_policies(self) -> list[str]:
+        return [s.strip() for s in self.poller_expiries.split(",") if s.strip()]
 
     @property
     def cors_origins_list(self) -> list[str]:
