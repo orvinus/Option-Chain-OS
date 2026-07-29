@@ -20,6 +20,7 @@ import type { OIChangeResponse, ReplayFrame, ReplayRow } from "../types";
 import { buildReplayTable } from "../utils/exportData";
 import { effectiveAtmWindow, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import { signedCompact } from "../utils/num";
+import { callPutRatio, type DominantSide } from "../utils/ratio";
 import { isoForSessionMinuteOnDate, maxMinForDate, todayIstDate } from "../utils/sessionTime";
 
 const STEPS = ["1m", "5m", "15m"] as const;
@@ -37,6 +38,9 @@ const MTF: { tf: string; label: string; mins: number | null }[] = [
 
 const fmtGreek = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(3));
 const changeColor = (v: number) => (v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-muted");
+const sideColor = (s: DominantSide) =>
+  s === "CALL" ? "text-emerald-400" : s === "PUT" ? "text-red-400" : "text-muted";
+const sideLabel = (s: DominantSide) => (s === "CALL" ? "Call" : s === "PUT" ? "Put" : "Neutral");
 
 /** Sum call/put OI over the ATM window for a frame's rows. */
 function windowTotals(rows: ReplayRow[], spot: number | null, atmWindow: number, strikeStep: number) {
@@ -277,19 +281,31 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                       <th className="text-left py-1.5 px-3">Timeframe</th>
                       <th className="text-right py-1.5 px-3">Call OI Δ</th>
                       <th className="text-right py-1.5 px-3">Put OI Δ</th>
+                      <th className="text-right py-1.5 px-3">Ratio</th>
+                      <th className="text-right py-1.5 px-3">Side</th>
+                      <th className="text-right py-1.5 px-3">Spot</th>
+                      <th className="text-right py-1.5 px-3">ATM</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {mtfRows.map((r) => (
+                    {mtfRows.map((r) => {
+                      const rr = callPutRatio(r.call, r.put);
+                      return (
                       <tr key={r.tf} className="border-b border-border/40">
                         <td className="text-left py-1.5 px-3 text-foreground">{r.label}</td>
                         <td className={`text-right py-1.5 px-3 ${changeColor(r.call)}`}>{signedCompact(r.call)}</td>
                         <td className={`text-right py-1.5 px-3 ${changeColor(r.put)}`}>{signedCompact(r.put)}</td>
+                        <td className="text-right py-1.5 px-3 text-foreground tabular-nums">{rr.text}</td>
+                        <td className={`text-right py-1.5 px-3 font-semibold ${sideColor(rr.side)}`}>{sideLabel(rr.side)}</td>
+                        <td className="text-right py-1.5 px-3 text-muted">{current?.spot != null ? current.spot.toFixed(1) : "—"}</td>
+                        <td className="text-right py-1.5 px-3 text-muted">{current?.atm ?? "—"}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
                 <p className="px-3 pt-2 text-[10px] text-muted">
+                  Ratio (normalized Call : Put) and Side (dominant OI-Δ side) are per timeframe; Spot and ATM are playhead levels.
                   Windowed change ({atmWindow < 0 ? "all strikes" : `ATM ± ${effectiveAtmWindow(atmWindow)}`}) vs the frame {STEP_MIN[step] ?? 1}m×steps back, from the single replay payload.
                 </p>
               </div>

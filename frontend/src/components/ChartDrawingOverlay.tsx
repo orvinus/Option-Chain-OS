@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * Transparent annotation layer rendered on top of a chart. Provides a small
@@ -153,9 +154,15 @@ interface Props {
   describeAt?: (px: number, py: number) => { value: string; time: string | null } | null;
   /** When set, committed drawings are persisted to localStorage under this key. */
   persistKey?: string;
+  /**
+   * When provided, the toolbar is portaled into this element (e.g. a slot beside
+   * the chart heading) instead of floating over the top-right of the canvas — so
+   * it never overlaps chart data. The drawing canvas stays over the chart.
+   */
+  toolbarContainer?: HTMLElement | null;
 }
 
-export function ChartDrawingOverlay({ describeAt, persistKey }: Props) {
+export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorTagRef = useRef<HTMLDivElement>(null);
@@ -381,6 +388,56 @@ export function ChartDrawingOverlay({ describeAt, persistKey }: Props) {
 
   const interactive = tool !== "cursor";
 
+  // Toolbar element — floated in the chart's top-right corner by default, or (when
+  // a container is supplied) portaled into that slot beside the heading so it never
+  // overlaps chart data. State stays here, so all tools/undo/redo work unchanged.
+  const toolbar = (
+    <div
+      className={
+        "flex items-center gap-1 rounded-lg border border-border bg-surface/90 backdrop-blur-sm px-1.5 py-1 shadow-lg" +
+        (toolbarContainer ? "" : " absolute top-2 right-2")
+      }
+      style={{ pointerEvents: "auto" }}
+    >
+      <ToolBtn active={tool === "cursor"} title="Cursor — interact with chart" onClick={() => setTool("cursor")}>
+        {svg("M5 3l13 7-5 1.5L11 17z")}
+      </ToolBtn>
+      <ToolBtn active={tool === "hline"} title="Horizontal line" onClick={() => setTool("hline")}>
+        {svg("M3 12h18")}
+      </ToolBtn>
+      <ToolBtn active={tool === "vline"} title="Vertical line" onClick={() => setTool("vline")}>
+        {svg("M12 3v18")}
+      </ToolBtn>
+      <ToolBtn active={tool === "trend"} title="Trend line (2 points)" onClick={() => setTool("trend")}>
+        {svg("M4 20L20 4")}
+      </ToolBtn>
+      <ToolBtn active={tool === "ray"} title="Ray (extends from the first point)" onClick={() => setTool("ray")}>
+        {svg("M4 20L20 4|M20 4h-5|M20 4v5")}
+      </ToolBtn>
+      <ToolBtn active={tool === "rect"} title="Rectangle" onClick={() => setTool("rect")}>
+        {svg("M4 6h16v12H4z")}
+      </ToolBtn>
+      <ToolBtn active={tool === "free"} title="Freehand pen" onClick={() => setTool("free")}>
+        {svg("M4 20l3.5-1L18 8.5 15.5 6 5 16.5z|M14 7l3 3")}
+      </ToolBtn>
+      <ToolBtn active={tool === "eraser"} title="Eraser — click/drag over a line to remove it" onClick={() => setTool("eraser")}>
+        {svg("M15 4l5 5-9 9H6l-3-3z|M9 11l5 5")}
+      </ToolBtn>
+
+      <span className="w-px h-5 bg-border mx-0.5" />
+
+      <ToolBtn disabled={!canUndo} title="Undo" onClick={undo}>
+        {svg("M9 7L4 12l5 5|M4 12h10a5 5 0 010 10h-2")}
+      </ToolBtn>
+      <ToolBtn disabled={!canRedo} title="Redo" onClick={redo}>
+        {svg("M15 7l5 5-5 5|M20 12H10a5 5 0 000 10h2")}
+      </ToolBtn>
+      <ToolBtn disabled={shapes.length === 0} title="Clear all annotations" onClick={clearAll}>
+        {svg("M4 7h16|M9 7V4h6v3|M6 7l1 13h10l1-13")}
+      </ToolBtn>
+    </div>
+  );
+
   return (
     <div ref={rootRef} className="absolute inset-0 z-10" style={{ pointerEvents: "none" }}>
       <canvas
@@ -405,47 +462,7 @@ export function ChartDrawingOverlay({ describeAt, persistKey }: Props) {
         style={{ display: "none", pointerEvents: "none", whiteSpace: "nowrap", zIndex: 20 }}
       />
 
-      <div
-        className="absolute top-2 right-2 flex items-center gap-1 rounded-lg border border-border bg-surface/90 backdrop-blur-sm px-1.5 py-1 shadow-lg"
-        style={{ pointerEvents: "auto" }}
-      >
-        <ToolBtn active={tool === "cursor"} title="Cursor — interact with chart" onClick={() => setTool("cursor")}>
-          {svg("M5 3l13 7-5 1.5L11 17z")}
-        </ToolBtn>
-        <ToolBtn active={tool === "hline"} title="Horizontal line" onClick={() => setTool("hline")}>
-          {svg("M3 12h18")}
-        </ToolBtn>
-        <ToolBtn active={tool === "vline"} title="Vertical line" onClick={() => setTool("vline")}>
-          {svg("M12 3v18")}
-        </ToolBtn>
-        <ToolBtn active={tool === "trend"} title="Trend line (2 points)" onClick={() => setTool("trend")}>
-          {svg("M4 20L20 4")}
-        </ToolBtn>
-        <ToolBtn active={tool === "ray"} title="Ray (extends from the first point)" onClick={() => setTool("ray")}>
-          {svg("M4 20L20 4|M20 4h-5|M20 4v5")}
-        </ToolBtn>
-        <ToolBtn active={tool === "rect"} title="Rectangle" onClick={() => setTool("rect")}>
-          {svg("M4 6h16v12H4z")}
-        </ToolBtn>
-        <ToolBtn active={tool === "free"} title="Freehand pen" onClick={() => setTool("free")}>
-          {svg("M4 20l3.5-1L18 8.5 15.5 6 5 16.5z|M14 7l3 3")}
-        </ToolBtn>
-        <ToolBtn active={tool === "eraser"} title="Eraser — click/drag over a line to remove it" onClick={() => setTool("eraser")}>
-          {svg("M15 4l5 5-9 9H6l-3-3z|M9 11l5 5")}
-        </ToolBtn>
-
-        <span className="w-px h-5 bg-border mx-0.5" />
-
-        <ToolBtn disabled={!canUndo} title="Undo" onClick={undo}>
-          {svg("M9 7L4 12l5 5|M4 12h10a5 5 0 010 10h-2")}
-        </ToolBtn>
-        <ToolBtn disabled={!canRedo} title="Redo" onClick={redo}>
-          {svg("M15 7l5 5-5 5|M20 12H10a5 5 0 000 10h2")}
-        </ToolBtn>
-        <ToolBtn disabled={shapes.length === 0} title="Clear all annotations" onClick={clearAll}>
-          {svg("M4 7h16|M9 7V4h6v3|M6 7l1 13h10l1-13")}
-        </ToolBtn>
-      </div>
+      {toolbarContainer ? createPortal(toolbar, toolbarContainer) : toolbar}
     </div>
   );
 }

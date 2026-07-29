@@ -9,11 +9,15 @@ import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import type { MtfRow } from "../types";
 import { signedCompact, compact } from "../utils/num";
 import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
+import { callPutRatio, type DominantSide } from "../utils/ratio";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
 const fmt2 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 const changeColor = (v: number) => (v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-muted");
+const sideColor = (s: DominantSide) =>
+  s === "CALL" ? "text-emerald-400" : s === "PUT" ? "text-red-400" : "text-muted";
+const sideLabel = (s: DominantSide) => (s === "CALL" ? "Call" : s === "PUT" ? "Put" : "Neutral");
 
 const TF_LABEL: Record<string, string> = {
   "1m": "1 Min", "3m": "3 Min", "5m": "5 Min", "10m": "10 Min", "15m": "15 Min",
@@ -99,34 +103,36 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
                   <th className="text-left py-2 px-3">Timeframe</th>
                   <th className="text-right py-2 px-3">Call OI Δ</th>
                   <th className="text-right py-2 px-3">Put OI Δ</th>
-                  <th className="text-right py-2 px-3">OIΔ Ratio (C÷P)</th>
-                  <th className="text-right py-2 px-3">Ratio (C÷P)</th>
-                  <th className="text-right py-2 px-3">PCR</th>
+                  <th className="text-right py-2 px-3">Ratio</th>
+                  <th className="text-right py-2 px-3">Side</th>
                   <th className="text-right py-2 px-3">Spot</th>
                   <th className="text-right py-2 px-3">ATM</th>
                 </tr>
               </thead>
               <tbody>
-                {data?.rows.map((r: MtfRow) => (
+                {data?.rows.map((r: MtfRow) => {
+                  const rr = callPutRatio(r.call_oi_change, r.put_oi_change);
+                  return (
                   <tr key={r.timeframe} className="border-b border-border/40 hover:bg-white/5">
                     <td className="text-left py-2 px-3 text-foreground">{TF_LABEL[r.timeframe] ?? r.timeframe}</td>
                     <td className={`text-right py-2 px-3 ${changeColor(r.call_oi_change)}`}>{signedCompact(r.call_oi_change)}</td>
                     <td className={`text-right py-2 px-3 ${changeColor(r.put_oi_change)}`}>{signedCompact(r.put_oi_change)}</td>
-                    <td className="text-right py-2 px-3 text-muted">{fmt2(r.oi_change_ratio)}</td>
-                    <td className="text-right py-2 px-3 text-muted">{fmt2(data.ratio)}</td>
-                    <td className="text-right py-2 px-3 text-muted">{fmt2(data.pcr)}</td>
+                    <td className="text-right py-2 px-3 text-foreground tabular-nums">{rr.text}</td>
+                    <td className={`text-right py-2 px-3 font-semibold ${sideColor(rr.side)}`}>{sideLabel(rr.side)}</td>
                     <td className="text-right py-2 px-3 text-muted">{data.spot != null ? data.spot.toFixed(1) : "—"}</td>
                     <td className="text-right py-2 px-3 text-muted">{data.atm_strike ?? "—"}</td>
                   </tr>
-                ))}
+                  );
+                })}
                 {!data && loading && (
-                  <tr><td colSpan={8} className="py-6 text-center text-muted text-xs">Loading…</td></tr>
+                  <tr><td colSpan={7} className="py-6 text-center text-muted text-xs">Loading…</td></tr>
                 )}
               </tbody>
             </table>
             <p className="px-3 pt-2 text-[10px] text-muted">
-              Ratio (C÷P), PCR, Spot and ATM are point-in-time levels (identical across rows); only the
-              OI-change columns are timeframe-specific. All sums cover{" "}
+              Ratio (normalized Call : Put) and Side (dominant OI-Δ side) are computed per timeframe from
+              that row's Call/Put OI change. Spot and ATM are point-in-time levels (identical across rows).
+              All sums cover{" "}
               {atmWindow < 0 ? "the full stored chain" : `strikes ATM ± ${effectiveAtmWindow(atmWindow)}`}.
             </p>
           </div>

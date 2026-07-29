@@ -1,6 +1,6 @@
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { ChartDrawingOverlay } from "./ChartDrawingOverlay";
 import type { OITimeseriesPoint } from "../types";
 import {
@@ -194,6 +194,9 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
   }, [series, interval, isLine, title, theme, sinceLabel]);
 
   const hasData = (points?.length ?? 0) > 0;
+  // Slot beside the heading that hosts the drawing toolbar (portaled from the
+  // overlay) so it no longer floats over the chart data.
+  const [toolbarSlot, setToolbarSlot] = useState<HTMLDivElement | null>(null);
 
   return (
     <div className="panel p-4 relative">
@@ -209,6 +212,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
             Δ from {sinceLabel} (data start)
           </span>
         )}
+        <div ref={setToolbarSlot} className="ml-auto flex items-center" />
       </div>
 
       {isLoading && (
@@ -237,7 +241,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
             style={{ height: 420, width: "100%" }}
             opts={{ renderer: "canvas" }}
           />
-          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} />
+          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} toolbarContainer={toolbarSlot} />
 
           {liveTotal != null && (
             <div
