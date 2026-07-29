@@ -1,6 +1,7 @@
 import React, { Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { LoginGate } from "./components/LoginGate";
 import "./index.css";
 
 // Two isolated dashboards on one app/backend:
@@ -20,7 +21,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <HiddenApp />
       </Suspense>
     ) : (
-      <App />
+      <LoginGate>
+        <App />
+      </LoginGate>
     )}
   </React.StrictMode>
 );

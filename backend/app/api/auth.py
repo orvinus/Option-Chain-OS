@@ -145,28 +145,29 @@ async def login(body: LoginRequest) -> LoginResponse:
     )
 
 
-@router.post("/hidden-login", response_model=LoginResponse)
-async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
-    """Fixed-credential gate for the /hidden dashboard.
+async def _fixed_credential_gate(
+    body: HiddenLoginRequest, cfg_user: str, cfg_password: str, gate_label: str, env_hint: str
+) -> LoginResponse:
+    """Shared logic for the fixed-credential dashboard gates (/hidden and the main /).
 
     Verifies a single username+password from .env (never shipped to the browser),
-    then — since the hidden dashboard only loads data once the broker session is
-    live — establishes the XTS market-data session by reusing the same login flow.
+    then — since these dashboards only load data once the broker session is live —
+    establishes the XTS market-data session by reusing the same login flow.
     """
     # (a) Reject misconfiguration FIRST: blank env would make compare_digest("","")
     #     return True and let empty credentials through.
-    if not settings.hidden_user or not settings.hidden_password:
+    if not cfg_user or not cfg_password:
         raise HTTPException(
             500,
-            "Hidden dashboard login is not configured. Set HIDDEN_USER and "
-            "HIDDEN_PASSWORD in your .env file and restart the backend.",
+            f"{gate_label} login is not configured. Set {env_hint} in your .env file "
+            "and restart the backend.",
         )
 
     # (b) Constant-time compare on bytes (str raises TypeError on non-ASCII).
     #     Use `&` (not `and`) so both comparisons always run — no per-field timing leak.
     ok = secrets.compare_digest(
-        body.username.encode(), settings.hidden_user.encode()
-    ) & secrets.compare_digest(body.password.encode(), settings.hidden_password.encode())
+        body.username.encode(), cfg_user.encode()
+    ) & secrets.compare_digest(body.password.encode(), cfg_password.encode())
     if not ok:
         raise HTTPException(401, "Invalid username or password.")
 
@@ -181,10 +182,31 @@ async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
         )
 
     # (c) Start / confirm the broker feed. If a session already exists (e.g. admin
-    #     logged in on the primary dashboard, or auto-login at startup), reuse it —
+    #     logged in on the other dashboard, or auto-login at startup), reuse it —
     #     a fresh force=True login would invalidate the single-session token and
     #     needlessly reconnect the running feed.
     sess = get_session_manager()
     if sess.authenticated:
         return LoginResponse(status="ok", message="Already connected.", authenticated=True)
     return await login(LoginRequest())
+
+
+@router.post("/hidden-login", response_model=LoginResponse)
+async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
+    """Fixed-credential gate for the /hidden dashboard (HIDDEN_USER / HIDDEN_PASSWORD)."""
+    return await _fixed_credential_gate(
+        body, settings.hidden_user, settings.hidden_password,
+        "Hidden dashboard", "HIDDEN_USER and HIDDEN_PASSWORD",
+    )
+
+
+@router.post("/main-login", response_model=LoginResponse)
+async def main_login(body: HiddenLoginRequest) -> LoginResponse:
+    """Fixed-credential gate for the main dashboard at "/" (MAIN_USER / MAIN_PASSWORD).
+
+    A distinct credential from /hidden so the two dashboards can be shared separately.
+    """
+    return await _fixed_credential_gate(
+        body, settings.main_user, settings.main_password,
+        "Main dashboard", "MAIN_USER and MAIN_PASSWORD",
+    )
