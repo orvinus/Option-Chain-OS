@@ -11,6 +11,7 @@ import {
   type ChartInterval,
   type OISide,
 } from "../utils/oiCandles";
+import { compact as compactNum } from "../utils/num";
 
 interface Props {
   points: OITimeseriesPoint[] | null;
@@ -22,16 +23,6 @@ interface Props {
   liveTotal?: number | null;
   /** True when the live WS push is connected — drives the "live" pulse on the badge. */
   liveOn?: boolean;
-}
-
-/** Compact Indian number notation — matches the OI Change chart axis labels. */
-function compactNum(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${sign}${(abs / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}K`;
-  return `${sign}${abs.toLocaleString()}`;
 }
 
 // Call = red theme, Put = blue theme. Up candle (close ≥ open) = bright fill,

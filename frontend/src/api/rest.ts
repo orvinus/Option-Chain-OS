@@ -94,8 +94,8 @@ export const api = {
   spot: (symbol?: string) => getJSON<SpotResponse>("/api/spot", { symbol }),
   niftyCrossCheck: () => getJSON<NiftyCrossCheckResponse>("/api/verify/nifty-cross-check"),
   expiries: (symbol?: string) => getJSON<ExpiriesResponse>("/api/expiries", { symbol }),
-  oiChange: (timeframe: Timeframe, expiry?: string, symbol?: string) =>
-    getJSON<OIChangeResponse>("/api/oi-change", { timeframe, expiry, symbol }),
+  oiChange: (timeframe: Timeframe, expiry?: string, symbol?: string, asOf?: string) =>
+    getJSON<OIChangeResponse>("/api/oi-change", { timeframe, expiry, symbol, as_of: asOf }),
   /**
    * OI change over an explicit window. `toTs` omitted => "up to latest" (live,
    * left-anchored window). Timestamps are ISO-8601 (IST offset recommended).

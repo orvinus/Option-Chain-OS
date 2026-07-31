@@ -63,12 +63,18 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const effectiveDate = selectedDate ?? todayIstDate(health);
   const historical = selectedDate != null && !isToday(selectedDate, health);
 
-  // Drive the streaming hooks only when we have a valid F&O context — and NOT when
-  // viewing a historical date (live/preset data is current-session only).
+  // The preset timeframe drives the view live, OR — when a past date is picked
+  // and the user hasn't opened a custom window — "as of that date's close", so it
+  // matches the Multi-TF grid's row for the same timeframe/date. Only an explicit
+  // custom window (rangeMode) disables the preset fetch.
+  const asOfTs = historical && effectiveDate
+    ? isoForSessionMinuteOnDate(effectiveDate, maxMinForDate(effectiveDate, health))
+    : undefined;
   const activeTimeframe: Timeframe | null =
-    authenticated && expiry && fnoEligible && !historical ? timeframe : null;
-  const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null);
-  const live = useOIStream(activeTimeframe, expiry, fnoEligible ? symbol : null);
+    authenticated && expiry && fnoEligible && !rangeMode ? timeframe : null;
+  const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null, asOfTs);
+  // Live WS only for the current session; a historical date reads the REST as-of snapshot.
+  const live = useOIStream(historical ? null : activeTimeframe, expiry, fnoEligible ? symbol : null);
 
   // ── Custom time-range / historical mode ──────────────────────────────────
   // maxMin: today clamps to the live edge; a past date exposes the full session.
@@ -92,7 +98,9 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const rangeFromTs = effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, fromMin) : null;
   const liveEdge = !historical && toAtLive; // open-ended only for the current session
   const rangeToTs = liveEdge ? null : effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, toMin) : null;
-  const windowActive = rangeMode || historical;
+  // Only an explicit custom window reads the range fetch; a plain historical date
+  // uses the preset timeframe as-of close (presetData) so it matches Multi-TF.
+  const windowActive = rangeMode;
   const rangeActive = windowActive && authenticated && fnoEligible && !!expiry && !!rangeFromTs;
   const range = useOIChangeRange(
     rangeFromTs,
@@ -123,24 +131,23 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     setToAtLive(true);
   }, [historical]);
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
-    // Selecting a preset timeframe implies the live current session.
+    // A preset timeframe shows that timeframe live, or — when a past date is
+    // selected — as of that date's close. Keep the date; just exit any custom window.
     setTimeframe(tf);
     setRangeMode(false);
-    setToAtLive(true);
-    setSelectedDate(null);
   }, []);
   const handleDateChange = useCallback(
     (date: string | null) => {
       setSelectedDate(date);
       const isPast = date != null && !isToday(date, health);
+      // A past date defaults to the selected TIMEFRAME as of that day's close
+      // (matches the Multi-TF grid). Range mode is entered only if the user drags
+      // the slider; reset the slider bounds to the full session for when they do.
+      setRangeMode(false);
+      setToAtLive(!isPast);
       if (isPast) {
-        setRangeMode(true);
-        setToAtLive(false);
         setFromMin(0);
         setToMin(SESSION_SPAN_MIN);
-      } else {
-        setRangeMode(false);
-        setToAtLive(true);
       }
     },
     [health],
@@ -262,8 +269,8 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
               </div>
               {historical && (
                 <div className="text-[11px] text-amber-300/90">
-                  Viewing historical session <b>{effectiveDate}</b> — data is read from stored snapshots
-                  for the selected window.
+                  Viewing historical session <b>{effectiveDate}</b> —{" "}
+                  {rangeMode ? "custom window" : `${timeframe} as of the session close`}, read from stored snapshots.
                 </div>
               )}
 

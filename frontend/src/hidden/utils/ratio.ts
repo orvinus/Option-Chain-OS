@@ -1,16 +1,9 @@
-/** Standardized Call:Put ratio + dominant Side used across the app (Multi-TF,
- * Change-in-OI, Replay).
+/** Standardized Call:Put ratio + dominant Side (hidden-dashboard copy — keep in
+ * sync with `frontend/src/utils/ratio.ts`).
  *
- * The ratio TEXT is normalized so the SMALLER side is always 1 and shown in
- * Call : Put order (e.g. 2L call / 10L put -> "1 : 5"); it is driven by
- * MAGNITUDES and is unchanged by the Side rule below.
- *
- * "Side" is the DOMINANT side per the finalized spec: the side whose *signed*
- * OI change is the SMALLER (lower) value — signs included. So the more-negative
- * (or less-positive) side wins: Call smaller -> CALL, Put smaller -> PUT, equal
- * -> NEUTRAL. Examples: +4Cr/+2Cr -> PUT, +4Cr/-2Cr -> PUT, -4Cr/-2Cr -> CALL,
- * +3Cr/+3Cr -> NEUTRAL. Inputs are OI *changes* (in whole contracts) and may be
- * negative (unwinding).
+ * Ratio TEXT is magnitude-normalized with the smaller side pinned to 1. "Side" is
+ * the dominant side per the finalized spec: the side whose *signed* OI change is
+ * the SMALLER (lower) value (signs included), Neutral on a tie.
  */
 
 export type DominantSide = "CALL" | "PUT" | "NEUTRAL";
@@ -18,7 +11,7 @@ export type DominantSide = "CALL" | "PUT" | "NEUTRAL";
 export interface CallPutRatio {
   /** Dominant side = whichever OI change is the SMALLER *signed* value (Neutral on tie). */
   side: DominantSide;
-  /** Normalized "Call : Put" text with the smaller side pinned to 1 (e.g. "1 : 5", "5 : 1", "1 : 1"). */
+  /** Normalized "Call : Put" text with the smaller side pinned to 1 (e.g. "1 : 5"). */
   text: string;
   /** |call| / |put| (null when put is ~0). */
   callPerPut: number | null;
@@ -40,8 +33,7 @@ export function callPutRatio(callChange: number, putChange: number): CallPutRati
   const a = Math.abs(callChange);
   const b = Math.abs(putChange);
 
-  // Dominant Side = the side with the SMALLER *signed* OI change (Neutral on a
-  // tie). Note this is independent of the magnitude-based ratio text below.
+  // Dominant Side = the side with the SMALLER *signed* OI change (Neutral on a tie).
   let side: DominantSide;
   if (Math.abs(callChange - putChange) < EPS) side = "NEUTRAL";
   else side = callChange < putChange ? "CALL" : "PUT";

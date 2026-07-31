@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
@@ -15,56 +15,25 @@ import { SERIES_COLORS } from "../components/charts/chartTheme";
 import { istIsoToChartTime } from "../components/charts/chartTime";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import { useAvailableDates } from "../hooks/useAvailableDates";
+import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import { useReplayFrames } from "../hooks/useReplayFrames";
-import type { OIChangeResponse, ReplayFrame, ReplayRow } from "../types";
+import type { OIChangeResponse, ReplayRow } from "../types";
 import { buildReplayTable } from "../utils/exportData";
-import { effectiveAtmWindow, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { signedCompact } from "../utils/num";
-import { callPutRatio, type DominantSide } from "../utils/ratio";
+import { changeColor, sideColor, sideLabel } from "../utils/ui";
+import { callPutRatio } from "../utils/ratio";
 import { isoForSessionMinuteOnDate, maxMinForDate, todayIstDate } from "../utils/sessionTime";
 
 const STEPS = ["1m", "5m", "15m"] as const;
 const ATM_MAX_WINDOW = 50;
-const STEP_MIN: Record<string, number> = { "1m": 1, "5m": 5, "15m": 15 };
-
-// Timeframes for the synced multi-TF grid (minutes; null = full-day / first frame).
-const MTF: { tf: string; label: string; mins: number | null }[] = [
-  { tf: "1m", label: "1 Min", mins: 1 }, { tf: "3m", label: "3 Min", mins: 3 },
-  { tf: "5m", label: "5 Min", mins: 5 }, { tf: "10m", label: "10 Min", mins: 10 },
-  { tf: "15m", label: "15 Min", mins: 15 }, { tf: "30m", label: "30 Min", mins: 30 },
-  { tf: "1h", label: "1 Hour", mins: 60 }, { tf: "2h", label: "2 Hour", mins: 120 },
-  { tf: "3h", label: "3 Hour", mins: 180 }, { tf: "full_day", label: "Full Day", mins: null },
-];
+// Labels for the synced multi-timeframe grid (keys match /api/multi-timeframe rows).
+const TF_LABEL: Record<string, string> = {
+  "1m": "1 Min", "3m": "3 Min", "5m": "5 Min", "10m": "10 Min", "15m": "15 Min",
+  "30m": "30 Min", "1h": "1 Hour", "2h": "2 Hour", "3h": "3 Hour", full_day: "Full Day",
+};
 
 const fmtGreek = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(3));
-const changeColor = (v: number) => (v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-muted");
-const sideColor = (s: DominantSide) =>
-  s === "CALL" ? "text-emerald-400" : s === "PUT" ? "text-red-400" : "text-muted";
-const sideLabel = (s: DominantSide) => (s === "CALL" ? "Call" : s === "PUT" ? "Put" : "Neutral");
-
-/** Sum call/put OI over the ATM window for a frame's rows. */
-function windowTotals(rows: ReplayRow[], spot: number | null, atmWindow: number, strikeStep: number) {
-  const win = filterOiRowsByAtmWindow(rows, spot, atmWindow, strikeStep);
-  let call = 0;
-  let put = 0;
-  for (const r of win) { call += r.call_oi; put += r.put_oi; }
-  return { call, put };
-}
-
-/** Multi-timeframe OI change at the playhead, computed client-side from the frames. */
-function computeMtf(
-  frames: ReplayFrame[], index: number, stepMin: number, atmWindow: number, strikeStep: number,
-): { tf: string; label: string; call: number; put: number }[] {
-  const now = frames[index];
-  if (!now) return [];
-  const nowT = windowTotals(now.rows, now.spot, atmWindow, strikeStep);
-  return MTF.map(({ tf, label, mins }) => {
-    const back = mins == null ? index : Math.round(mins / stepMin);
-    const thenFrame = frames[Math.max(0, index - back)];
-    const thenT = windowTotals(thenFrame.rows, thenFrame.spot ?? now.spot, atmWindow, strikeStep);
-    return { tf, label, call: nowT.call - thenT.call, put: nowT.put - thenT.put };
-  });
-}
 
 export function ReplayPage({ mc }: { mc: MarketContextValue }) {
   const {
@@ -145,11 +114,30 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
     return has ? row : null;
   }, [current]);
 
-  // Synced multi-timeframe grid at the playhead (client-side, from the frames payload).
-  const mtfRows = useMemo(
-    () => computeMtf(frames, index, STEP_MIN[step] ?? 1, atmWindow, strikeStep),
-    [frames, index, step, atmWindow, strikeStep],
-  );
+  // Synced multi-timeframe grid at the playhead, from the SAME backend engine the
+  // Multi-TF page uses (canonical Engine A: session-floored baseline + per-strike
+  // clamp) — so Replay's per-timeframe Δ/Side match Multi-TF exactly for the same
+  // instant. The playhead timestamp is throttled (~3/sec) so scrubbing/playback
+  // don't fetch per frame; the hook + backend cache by as_of so repeats are free.
+  const playheadTs = current?.ts ?? null;
+  const playheadRef = useRef<string | null>(playheadTs);
+  playheadRef.current = playheadTs;
+  const [mtfAsOf, setMtfAsOf] = useState<string | null>(null);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setMtfAsOf((prev) => (prev === playheadRef.current ? prev : playheadRef.current));
+    }, 350);
+    return () => clearInterval(id);
+  }, []);
+  const mtf = useMultiTimeframe({
+    symbol: fnoEligible ? symbol : null,
+    expiry,
+    asOf: mtfAsOf,
+    atmWindow: effectiveAtmWindow(atmWindow),
+    enabled: authenticated && fnoEligible && !!expiry && mtfAsOf != null,
+  });
+  const gridSpot = mtf.data?.spot ?? current?.spot ?? null;
+  const gridAtm = mtf.data?.atm_strike ?? current?.atm ?? null;
 
   // Synthetic OIChangeResponse for the by-strike chart + KPI bar (reuse as-is).
   const frameData: OIChangeResponse | null = useMemo(() => {
@@ -288,25 +276,26 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {mtfRows.map((r) => {
-                      const rr = callPutRatio(r.call, r.put);
+                    {(mtf.data?.rows ?? []).map((r) => {
+                      const rr = callPutRatio(r.call_oi_change, r.put_oi_change);
                       return (
-                      <tr key={r.tf} className="border-b border-border/40">
-                        <td className="text-left py-1.5 px-3 text-foreground">{r.label}</td>
-                        <td className={`text-right py-1.5 px-3 ${changeColor(r.call)}`}>{signedCompact(r.call)}</td>
-                        <td className={`text-right py-1.5 px-3 ${changeColor(r.put)}`}>{signedCompact(r.put)}</td>
+                      <tr key={r.timeframe} className="border-b border-border/40">
+                        <td className="text-left py-1.5 px-3 text-foreground">{TF_LABEL[r.timeframe] ?? r.timeframe}</td>
+                        <td className={`text-right py-1.5 px-3 ${changeColor(r.call_oi_change)}`}>{signedCompact(r.call_oi_change)}</td>
+                        <td className={`text-right py-1.5 px-3 ${changeColor(r.put_oi_change)}`}>{signedCompact(r.put_oi_change)}</td>
                         <td className="text-right py-1.5 px-3 text-foreground tabular-nums">{rr.text}</td>
                         <td className={`text-right py-1.5 px-3 font-semibold ${sideColor(rr.side)}`}>{sideLabel(rr.side)}</td>
-                        <td className="text-right py-1.5 px-3 text-muted">{current?.spot != null ? current.spot.toFixed(1) : "—"}</td>
-                        <td className="text-right py-1.5 px-3 text-muted">{current?.atm ?? "—"}</td>
+                        <td className="text-right py-1.5 px-3 text-muted">{gridSpot != null ? gridSpot.toFixed(1) : "—"}</td>
+                        <td className="text-right py-1.5 px-3 text-muted">{gridAtm ?? "—"}</td>
                       </tr>
                       );
                     })}
                   </tbody>
                 </table>
                 <p className="px-3 pt-2 text-[10px] text-muted">
-                  Ratio (normalized Call : Put) and Side (dominant OI-Δ side) are per timeframe; Spot and ATM are playhead levels.
-                  Windowed change ({atmWindow < 0 ? "all strikes" : `ATM ± ${effectiveAtmWindow(atmWindow)}`}) vs the frame {STEP_MIN[step] ?? 1}m×steps back, from the single replay payload.
+                  Ratio (normalized Call : Put) and Side (smaller-signed OI-Δ side) per timeframe, computed by the
+                  same backend engine as the Multi-TF tab, as of the playhead instant. Sums cover{" "}
+                  {atmWindow < 0 ? "the full chain" : `strikes ATM ± ${effectiveAtmWindow(atmWindow)}`}.
                 </p>
               </div>
 

@@ -12,7 +12,7 @@ import {
 import { SERIES_COLORS } from "../components/charts/chartTheme";
 import { istIsoToChartTime } from "../components/charts/chartTime";
 import type { MarketContextValue } from "../hooks/useMarketContext";
-import { compact } from "../utils/num";
+import { compact, fmt2 } from "../utils/num";
 import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
@@ -25,8 +25,6 @@ const BUCKET_LABEL: Record<string, string> = {
   "1m": "1m", "5m": "5m", "10m": "10m", "15m": "15m", "30m": "30m", full_day: "Full Day",
 };
 const ATM_MAX_WINDOW = 50;
-
-const fmt2 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 
 export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const {
