@@ -18,8 +18,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+import pytz
+
 from ..core.config import settings
 from ..core.logging import get_logger
+from ..core.time_utils import IST
 from ..market_data import xts_client
 
 log = get_logger("scripmaster")
@@ -56,9 +59,15 @@ class ScripMasterCache:
     fetched_at: datetime | None = None
 
     def fresh(self) -> bool:
-        return bool(self.raw) and self.fetched_at is not None and (
-            datetime.utcnow() - self.fetched_at < CACHE_TTL
-        )
+        if not self.raw or self.fetched_at is None:
+            return False
+        if datetime.utcnow() - self.fetched_at >= CACHE_TTL:
+            return False
+        # Also invalidate across an IST trading-date change. A TTL alone can carry a
+        # master over a session boundary, which is exactly when new expiries/strikes
+        # get listed — the stale copy would silently omit them for hours.
+        fetched_ist = pytz.utc.localize(self.fetched_at).astimezone(IST).date()
+        return fetched_ist == datetime.now(IST).date()
 
 
 # Per-symbol cache and per-symbol lock.
@@ -261,7 +270,7 @@ def _disk_path(symbol: str) -> Path:
     return CACHE_DIR / f"{symbol.upper()}.json"
 
 
-async def _load_from_disk(symbol: str) -> list[dict] | None:
+async def _load_from_disk(symbol: str) -> tuple[list[dict], datetime] | None:
     path = _disk_path(symbol)
     # One-shot migration: if the legacy single-file cache exists and this symbol
     # is NIFTY, fall back to it so we don't lose the warm cache after upgrade.
@@ -271,10 +280,15 @@ async def _load_from_disk(symbol: str) -> list[dict] | None:
         return None
     try:
         stat = path.stat()
-        age = datetime.utcnow() - datetime.utcfromtimestamp(stat.st_mtime)
+        mtime = datetime.utcfromtimestamp(stat.st_mtime)
+        age = datetime.utcnow() - mtime
         if age >= CACHE_TTL:
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        # Return the file's own mtime so the in-memory entry inherits the REAL fetch
+        # time. Stamping it with "now" (the old behaviour) restarted the TTL on every
+        # load, letting a nearly-expired file live for another full TTL — up to ~40h
+        # of staleness, long enough to miss a newly listed expiry or strike.
+        return json.loads(path.read_text(encoding="utf-8")), mtime
     except Exception as e:
         log.warning("scripmaster.disk_cache.error", symbol=symbol, error=str(e))
         return None
@@ -301,9 +315,8 @@ async def get_scripmaster(symbol: str | None = None, force_refresh: bool = False
         if not force_refresh:
             disk = await _load_from_disk(sym)
             if disk is not None:
-                entry.raw = disk
-                entry.fetched_at = datetime.utcnow()
-                return disk
+                entry.raw, entry.fetched_at = disk
+                return entry.raw
         data = await _fetch_via_master(sym)
         entry.raw = data
         entry.fetched_at = datetime.utcnow()

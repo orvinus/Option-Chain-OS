@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
+from ..core.time_utils import IST
 
 log = get_logger("services.greeks_history")
 
@@ -55,6 +56,19 @@ async def snapshot_greeks_for_symbol(symbol: str, timeframe: str = "5m") -> None
         expiry = await resolve_expiry(None, symbol=symbol)
         engine = get_option_chain_full_engine()
         res = await engine.get(timeframe, expiry, symbol=symbol)
+
+        # This loop runs 24/7; without a guard it stamped ts=now onto greeks recomputed
+        # from the LAST session's prices every weekend, holiday and overnight tick, so
+        # replay/exports showed "greeks" for hours the market never traded. Only persist
+        # when the chain is actually from the current session (same test as iv_history).
+        if res.asof:
+            try:
+                if datetime.fromisoformat(res.asof).astimezone(IST).date() != datetime.now(IST).date():
+                    log.info("greeks_history.skip_stale_chain", symbol=symbol, asof=res.asof)
+                    return
+            except ValueError:
+                pass
+
         ts = datetime.now(timezone.utc)
         params: list[dict] = []
         for r in res.rows:

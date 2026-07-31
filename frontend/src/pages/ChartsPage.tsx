@@ -54,7 +54,12 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   // (same ATM math as the backend: round(spot / step) * step). These bounds are
   // sent to /api/oi-timeseries which sums every strike inside [min, max].
   const step = activeEntry?.strike_step ?? 50;
-  const spot = historical ? histMtf.data?.spot ?? null : liveSpot ?? health?.latest_spot ?? null;
+  // NOTE: no `?? health.latest_spot` fallback. `liveSpot` is already guarded (feed
+  // connected AND health.active_symbol === this symbol); the raw health value is the
+  // GLOBALLY active symbol's price, so falling back to it centred this symbol's strike
+  // window on another instrument's spot and sent a wrong [strikeMin,strikeMax] to
+  // /api/oi-timeseries. The page already renders a "waiting for spot" state below.
+  const spot = historical ? histMtf.data?.spot ?? null : liveSpot;
   const { strikeMin, strikeMax, atm } = useMemo(() => {
     if (spot == null) return { strikeMin: null, strikeMax: null, atm: null };
     const a = atmRound(spot, step);
@@ -127,6 +132,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
         symbolDisplay={symbolDisplay}
         symbolTicker={symbol}
         atmStrike={atm}
+        spot={spot}
       />
 
       <main className="flex flex-col gap-4">

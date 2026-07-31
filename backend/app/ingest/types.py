@@ -13,7 +13,10 @@ class Tick:
     expiry: date
     strike: int
     option_type: str  # 'CE' | 'PE' | 'IDX' (for spot)
-    ltp: float
+    # None when no price is known yet (e.g. an untraded strike, or the first frame
+    # after a reconnect wiped the merged state). Persisted as NULL — never 0, which
+    # would be indistinguishable from a real quote.
+    ltp: float | None
     oi: int
     volume: int
     underlying: float | None = None  # filled in by aggregator from latest spot

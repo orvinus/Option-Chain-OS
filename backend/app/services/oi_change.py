@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
-from ..core.time_utils import IST, market_close_today, market_open_today, parse_timeframe
+from ..core.time_utils import IST, market_close_today, market_open_today, parse_timeframe, session_floor_for
 from ..market.symbols import get_registry
 from ..runtime import get_runtime
 
@@ -238,6 +238,7 @@ def _assemble(
     rows: list[OIChangeRow] = []
     max_ts: Optional[datetime] = None
     spot: Optional[float] = None
+    spot_ts: Optional[datetime] = None
     total_ce_chg = 0
     total_pe_chg = 0
     for strike in strikes:
@@ -275,8 +276,12 @@ def _assemble(
                 continue
             if max_ts is None or r["ts"] > max_ts:
                 max_ts = r["ts"]
-            if spot is None and r.get("underlying") is not None:
+            # Track the underlying attached to the freshest row rather than the first
+            # strike seen (rows arrive in strike order, so "first" meant lowest strike —
+            # typically a quiet deep-ITM contract carrying a stale spot).
+            if r.get("underlying") is not None and (spot_ts is None or r["ts"] >= spot_ts):
                 spot = float(r["underlying"])
+                spot_ts = r["ts"]
 
     asof_ts = asof_override if asof_override is not None else (max_ts or now_utc)
     computed_wall = now_utc.astimezone(IST).isoformat()
@@ -397,6 +402,17 @@ class OIChangeEngine:
         now_utc = datetime.now(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         from_ist = from_utc.astimezone(IST)
+
+        # Re-anchor a window that starts AFTER the last stored session. On a weekend,
+        # an exchange holiday, or before the first flush of the day, the dashboard's
+        # default "today 09:15 -> now" window contains no data at all: the now-side
+        # still resolves to the last data day (it is floored to the anchor), but the
+        # baseline side finds nothing, so `now - 0` reported the ENTIRE open interest
+        # as if it were today's change. Fall back to the latest stored session, which
+        # is what the timeframe path (`_compute`) already does via market_open_today(anchor).
+        if anchor is not None and from_ist.date() > anchor.astimezone(IST).date():
+            from_ist = market_open_today(anchor.astimezone(IST))
+            from_utc = from_ist.astimezone(timezone.utc)
         from_floor = market_open_today(from_ist).astimezone(timezone.utc)
 
         # Resolve the effective window end. An explicit ``to_utc`` wins. When it is
@@ -467,6 +483,20 @@ class OIChangeEngine:
                     r for r in earliest_rows
                     if (r["strike"], r["option_type"]) in missing_set
                 ]
+            # Last-resort guard: if NO baseline could be established at all while we do
+            # have current rows, `now - 0` would report every strike's entire open
+            # interest as "change". Reporting zero change is the honest answer when the
+            # baseline is unknown — never the full OI.
+            if now_rows and not then_rows:
+                log.warning(
+                    "oi_change.range.no_baseline",
+                    symbol=symbol,
+                    expiry=expiry.isoformat(),
+                    from_ts=from_utc.isoformat(),
+                    hint="no baseline snapshot in window; reporting zero change instead "
+                    "of now-0 (which would be the entire OI).",
+                )
+                then_rows = list(now_rows)
         # Report the effective upper bound (or now) as the window's asof.
         asof_override = effective_to if effective_to is not None else None
         return _assemble("range", expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
@@ -484,7 +514,7 @@ class OIChangeEngine:
         now_utc = datetime.now(timezone.utc)
         # "now" reference: an explicit historical instant, else the DB anchor, else wall clock.
         anchor = as_of_utc or anchor_from_db or now_utc
-        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        session_floor = session_floor_for(anchor).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
             # Baseline = earliest snapshot at/after today's open (already today-
@@ -579,9 +609,17 @@ class OIChangeEngine:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 if live_spot is not None and as_of_utc is None and live_spot != cached.spot:
-                    from dataclasses import replace as dc_replace
-                    return dc_replace(cached, spot=live_spot, atm_strike=_atm_strike(symbol, live_spot))
-                return cached
+                    # Patching a fresh spot onto a cached response is only sound while
+                    # the ATM is unchanged. With an ATM +/- N window the cached sums were
+                    # computed around the OLD atm_strike, so rewriting atm_strike alone
+                    # advertised a window the numbers were never summed over. Recompute
+                    # instead when the ATM actually moved.
+                    new_atm = _atm_strike(symbol, live_spot)
+                    if win is None or new_atm == cached.atm_strike:
+                        from dataclasses import replace as dc_replace
+                        return dc_replace(cached, spot=live_spot, atm_strike=new_atm)
+                else:
+                    return cached
             result = await self._compute_multi(timeframes, expiry, symbol, anchor, as_of_utc, live_spot, win)
             self._cache[cache_key] = result
             return result
@@ -598,7 +636,7 @@ class OIChangeEngine:
     ) -> MultiTFResponse:
         now_utc = datetime.now(timezone.utc)
         ref = as_of_utc or anchor_from_db or now_utc
-        session_floor = market_open_today(ref.astimezone(IST)).astimezone(timezone.utc)
+        session_floor = session_floor_for(ref).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
 
         async with AsyncSessionLocal() as s:
@@ -618,10 +656,16 @@ class OIChangeEngine:
 
             # Resolve spot/ATM up-front so an ATM ± N window can filter strikes before
             # every sum (each timeframe's OI-change AND the shared totals/ratio/pcr).
-            stored_spot = next(
-                (float(r["underlying"]) for r in now_map.values() if r.get("underlying") is not None),
-                None,
+            # Take the underlying from the FRESHEST row, not the first one. now_map is
+            # built in strike order, so `next(...)` picked the LOWEST strike — usually a
+            # quiet deep-ITM contract whose carried-forward underlying can be minutes
+            # stale, and that stale spot then set the ATM for every window and sum.
+            _spot_row = max(
+                (r for r in now_map.values() if r.get("underlying") is not None),
+                key=lambda r: r["ts"],
+                default=None,
             )
+            stored_spot = float(_spot_row["underlying"]) if _spot_row is not None else None
             spot = live_spot if (live_spot is not None and as_of_utc is None) else stored_spot
             atm = _atm_strike(symbol, spot)
             if atm_window is not None and atm is not None:

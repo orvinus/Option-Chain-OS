@@ -11,6 +11,7 @@ For non-F&O symbols, only the spot token is subscribed.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -23,6 +24,9 @@ from ..runtime import get_runtime
 from ..services.spot_fallback import db_last_underlying
 
 log = get_logger("symbol_controller")
+
+# Serialises symbol switches (drift-watch re-centre vs. user-initiated switch).
+_switch_lock = asyncio.Lock()
 
 # XTS /instruments/indexlist names differ from our F&O symbol codes (e.g. our
 # "BANKNIFTY" is "NIFTY BANK" on XTS). Explicit aliases make index spot resolution
@@ -186,8 +190,20 @@ async def _fetch_spot_ltp(spot_token: str, spot_seg: int = xts_client.SEG_NSECM)
 async def switch_active_symbol(symbol: str) -> SwitchResult:
     """Switch the live WS subscription to ``symbol``.
 
+    Serialised: the ATM-drift watcher re-centres by calling this for the CURRENT
+    symbol on its own timer, and the dashboard calls it via POST /api/active-symbol.
+    Both mutate the same runtime state and both await REST round-trips in the middle,
+    so without the lock they interleaved — unsubscribing one symbol's universe while
+    subscribing another's, and leaving ``rt.active_symbol`` disagreeing with what the
+    feed is actually streaming.
+
     Raises ``KeyError`` if the symbol is not in the registry.
     """
+    async with _switch_lock:
+        return await _switch_active_symbol_locked(symbol)
+
+
+async def _switch_active_symbol_locked(symbol: str) -> SwitchResult:
     reg = get_registry()
     entry = reg.require(symbol)
     sym = entry.symbol
@@ -233,6 +249,14 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
         # Never leave the previous symbol's spot in runtime — /api/spot and the
         # resubscribe loop would keep serving/centring on the wrong index.
         rt.latest_spot = spot_for_window
+    else:
+        # No trustworthy spot for the NEW symbol (live quote failed and nothing is
+        # stored for it — common for the many symbols that have never been viewed
+        # while the poller is off). Without this branch the PREVIOUS symbol's price
+        # stayed in runtime and, because active_symbol is reassigned just below,
+        # /api/spot would serve it as this symbol's spot. None is the honest value:
+        # every consumer already treats a missing spot as "waiting for price".
+        rt.latest_spot = None
     rt.active_symbol = sym
 
     log.info(

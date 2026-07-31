@@ -28,7 +28,7 @@ import asyncio
 import json
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlencode
 
@@ -38,6 +38,7 @@ import socketio  # type: ignore
 from ..auth import get_session_manager
 from ..core.config import settings
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..market.scripmaster import InstrumentToken
 from ..market_data import xts_client
 from .types import Tick
@@ -115,6 +116,16 @@ class OptionFeedClient:
         # ~80s) does not make OI momentarily collapse to 0 and write false
         # "OI crashed to zero" snapshots. Cleared only on symbol swap.
         self._last_oi: dict[str, int] = {}
+        # Last known *good* price/volume per token, same rationale as ``_last_oi``:
+        # ``_state`` is cleared on every reconnect, so without these the first frame
+        # after a bounce (typically a 1510 OI frame, which passes the OI gate via
+        # ``_last_oi``) would persist a row with ltp=0/volume=0 — a phantom "premium
+        # crashed to zero" that also flips the buildup label and poisons IV.
+        # UNLIKE OI, price and cumulative volume do NOT carry across trading days, so
+        # these are keyed to a session date and dropped when the IST date rolls over.
+        self._last_ltp: dict[str, float] = {}
+        self._last_volume: dict[str, int] = {}
+        self._px_day: date | None = None
         # Current subscription set per message code (for unsubscribe): code -> [instrument dicts].
         self._sub_groups: dict[int, list[dict]] = {}
         self._last_tick_at: float = 0.0
@@ -178,7 +189,7 @@ class OptionFeedClient:
             self._active_symbol = new_symbol
             self._latest_underlying = None
             self._state.clear()
-            self._last_oi.clear()
+            self._prune_value_caches()
             log.info("ws.swap_subscription.deferred", symbol=new_symbol, token_count=len(new_tokens))
             return
 
@@ -190,7 +201,7 @@ class OptionFeedClient:
         self._active_symbol = new_symbol
         self._latest_underlying = None
         self._state.clear()
-        self._last_oi.clear()
+        self._prune_value_caches()
 
         new_groups = self._build_subscription_groups()
         try:
@@ -198,7 +209,11 @@ class OptionFeedClient:
             for code, insts in old_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     await xts_client.unsubscribe(token, chunk, code)
-            ok = 0; skipped = 0; errors = 0
+            ok = 0  # newly subscribed
+            already = 0  # benign "already subscribed"
+            rejected = 0  # real 400 (incl. cap breach) — no data flows
+            errors = 0  # non-400 transport errors
+            reasons: Counter[str] = Counter()
             for code, insts in new_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
@@ -212,9 +227,21 @@ class OptionFeedClient:
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
-                                        skipped += 1
+                                        is_already, detail = _classify_400(he2.response)
+                                        if detail:
+                                            reasons[detail] += 1
+                                        if is_already:
+                                            already += 1
+                                        else:
+                                            rejected += 1
+                                            log.warning(
+                                                "ws.swap.rejected",
+                                                inst=self._describe_inst(inst),
+                                                code=code, detail=detail,
+                                            )
                                     else:
                                         errors += 1
+                                        log.warning("ws.swap.inst_error", inst=self._describe_inst(inst), code=code)
                                 except Exception:
                                     errors += 1
                         else:
@@ -222,8 +249,25 @@ class OptionFeedClient:
             self._sub_groups = new_groups
             log.info(
                 "ws.swap_subscription.subscribed",
-                newly_subscribed=ok, already_present=skipped, errors=errors,
+                newly_subscribed=ok, already_present=already,
+                rejected=rejected, errors=errors, reasons=dict(reasons) or None,
             )
+            # Unlike the old code (which swallowed EVERY per-instrument 400 as a
+            # benign "skipped"), a cap breach during a re-center is now surfaced and
+            # healed. A partial breach silently drops (strike, side) instruments —
+            # the "missing strike" symptom; if it was the broker's 50-instrument cap
+            # (usually stale gateway slots the unsubscribe above didn't free), self-
+            # heal to a fresh 0/50 session and re-subscribe the current window.
+            if rejected or errors:
+                log.warning(
+                    "ws.swap.partial_truncation",
+                    subscribed=ok + already, rejected=rejected, errors=errors,
+                    reasons=dict(reasons) or None,
+                    hint="some strikes were NOT re-subscribed after the ATM re-center "
+                    "and will be missing from the chain until healed.",
+                )
+                if _has_cap_breach(reasons):
+                    await self._self_heal_auth()
         except Exception as e:
             log.warning("ws.swap_subscription.error", error=str(e))
         self._last_tick_at = time.time()
@@ -361,6 +405,17 @@ class OptionFeedClient:
                 pass
         return {MSG_TOUCHLINE: touchline, MSG_OPENINTEREST: list(options)}
 
+    def _describe_inst(self, inst: dict) -> str:
+        """Readable label (e.g. '24300PE') for a subscription instrument dict, so
+        cap-rejection logs name the exact (strike, side) that went dark."""
+        iid = inst.get("exchangeInstrumentID")
+        meta = self._token_meta.get(str(iid))
+        if meta is not None:
+            return f"{meta.strike}{meta.option_type}"
+        if self._index_token and str(iid) == str(self._index_token):
+            return "INDEX"
+        return str(iid)
+
     async def _subscribe_all(self) -> None:
         groups = self._build_subscription_groups()
         total = sum(len(v) for v in groups.values())
@@ -410,13 +465,13 @@ class OptionFeedClient:
                                             rejected += 1
                                             log.warning(
                                                 "ws.subscribe.rejected",
-                                                inst=inst,
+                                                inst=self._describe_inst(inst),
                                                 code=code,
                                                 detail=detail,
                                             )
                                     else:
                                         errors += 1
-                                        log.warning("ws.subscribe.inst_error", inst=inst, code=code)
+                                        log.warning("ws.subscribe.inst_error", inst=self._describe_inst(inst), code=code)
                                 except Exception:
                                     errors += 1
                         else:
@@ -449,8 +504,11 @@ class OptionFeedClient:
                 ):
                     await self._self_heal_auth()
             else:
-                # Healthy subscribe — clear the self-heal attempt counter.
-                self._auto_relogin_attempts = 0
+                # Only a FULLY clean subscribe clears the self-heal attempt counter;
+                # a partial cap breach must let attempts accrue so the self-heal
+                # below can give up instead of storming re-logins.
+                if not (rejected or errors):
+                    self._auto_relogin_attempts = 0
                 log.info(
                     "ws.subscribe.success",
                     instruments=total,
@@ -481,6 +539,13 @@ class OptionFeedClient:
                         "on the same XTS appKey stealing the session, or STRIKE_WINDOW "
                         "exceeding the broker's 50-instrument cap.",
                     )
+                    # If the rejection was the broker's 50-instrument cap (usually
+                    # stale gateway slots a prior ATM re-center never freed), self-
+                    # heal: a fresh session starts at 0/50 and re-subscribes the full
+                    # window. Cooldown + attempt cap in _self_heal_auth prevent a
+                    # login storm if the window genuinely exceeds the cap.
+                    if _has_cap_breach(reasons):
+                        await self._self_heal_auth()
         except Exception as e:
             # Don't drop the connection on a subscribe hiccup; if no data flows the
             # heartbeat will recover. Avoids a reconnect storm on transient errors.
@@ -518,9 +583,19 @@ class OptionFeedClient:
         )
         try:
             await get_session_manager().login()
-            # Force the supervisor to reconnect so the socket re-handshakes with
-            # the fresh token (the live socket is still bound to the dead one).
-            self._reconnect_requested = True
+            # Force a reconnect so the socket re-handshakes on the fresh token
+            # (a fresh session starts at 0/50 subscription slots, releasing stale
+            # ones a swap failed to free on the gateway). The trigger differs by
+            # caller context:
+            if self._connected.is_set():
+                # Live feed (ATM re-center / swap cap breach): drop the socket so
+                # the supervisor reconnects cleanly on the fresh token.
+                self._connected.clear()
+            else:
+                # During _connect_once (connect-path breach): the socket just
+                # opened is bound to the now-dead token — flag it so _connect_once
+                # tears it down and the supervisor reconnects.
+                self._reconnect_requested = True
             log.info("ws.self_heal.relogin_ok")
         except Exception as e:
             log.error("ws.self_heal.relogin_failed", error=str(e))
@@ -585,7 +660,40 @@ class OptionFeedClient:
             st["ltp"] = ltp
         if vol is not None:
             st["volume"] = vol
+        self._remember_px(token, ltp, vol)
         self._emit(token, st)
+
+    def _prune_value_caches(self) -> None:
+        """Drop cached OI/price/volume for tokens outside the NEW subscription set.
+
+        Previously these were cleared wholesale on every swap. Most swaps are ATM-drift
+        re-centres of the SAME symbol, where the windows overlap heavily: wiping the
+        memory meant a retained strike that XTS answers with "already subscribed"
+        (so it may not resend a snapshot immediately) had no last-known OI, and
+        ``_emit`` skipped it until its next OI update — a self-inflicted gap.
+        Keys are exchange instrument ids, globally unique, so a retained entry can
+        never be attributed to a different contract.
+        """
+        keep = set(self._token_meta)
+        self._last_oi = {k: v for k, v in self._last_oi.items() if k in keep}
+        self._last_ltp = {k: v for k, v in self._last_ltp.items() if k in keep}
+        self._last_volume = {k: v for k, v in self._last_volume.items() if k in keep}
+
+    def _remember_px(self, token: str, ltp: float | None, vol: int | None) -> None:
+        """Record the last known good price/volume, scoped to the IST trading day.
+
+        Price and cumulative volume reset every session, so a carry-forward must never
+        cross a day boundary (unlike open interest, which genuinely does carry over).
+        """
+        today = now_ist().date()
+        if self._px_day != today:
+            self._px_day = today
+            self._last_ltp.clear()
+            self._last_volume.clear()
+        if ltp is not None and ltp > 0:
+            self._last_ltp[token] = float(ltp)
+        if vol is not None and vol > 0:
+            self._last_volume[token] = int(vol)
 
     def _handle_oi(self, data: Any) -> None:
         obj = _as_obj(data)
@@ -624,6 +732,22 @@ class OptionFeedClient:
             # No real OI is known for this token yet (brand-new subscription before
             # its first 1510 frame). Skip rather than persist a misleading 0-OI row.
             return
+
+        # Same reasoning as OI, for price: ``_state`` is wiped on reconnect, so a
+        # post-bounce OI-first frame would otherwise stamp ltp=0 (a phantom "premium
+        # went to zero" that flips the buildup label and yields a garbage IV).
+        # Fall back to the last good same-day price; if none is known, persist NULL
+        # rather than 0 — NULL means "price unknown" and every consumer already
+        # handles it, whereas 0 is indistinguishable from a real quote. We must NOT
+        # skip the row: a genuinely untraded strike still has real OI that belongs in
+        # the totals.
+        ltp_val = float(st.get("ltp") or 0.0)
+        ltp: float | None = ltp_val if ltp_val > 0 else self._last_ltp.get(token)
+        # Cumulative traded volume never decreases within a session, so a lower value
+        # after a reconnect is a reset artifact, not a real number.
+        vol = int(st.get("volume") or 0)
+        vol = max(vol, self._last_volume.get(token, 0))
+
         tick = Tick(
             ts=datetime.now(timezone.utc),
             token=token,
@@ -631,9 +755,9 @@ class OptionFeedClient:
             expiry=meta.expiry,
             strike=meta.strike,
             option_type=meta.option_type,
-            ltp=float(st["ltp"]),
+            ltp=ltp,
             oi=oi,
-            volume=int(st["volume"]),
+            volume=vol,
             underlying=self._latest_underlying,
         )
         try:
@@ -690,6 +814,14 @@ def _classify_400(resp: httpx.Response) -> tuple[bool, str]:
     is_limit = "limit" in low and ("exceed" in low or "50/50" in low)
     is_already = "already" in low and "subscrib" in low and not is_limit
     return is_already, detail
+
+
+def _has_cap_breach(reasons: "Counter[str]") -> bool:
+    """True if any XTS 400 reason indicates the broker's ~50-instrument cap."""
+    return any(
+        "limit" in r.lower() and ("exceed" in r.lower() or "50/50" in r.lower())
+        for r in reasons
+    )
 
 
 def _instrument_id(obj: dict) -> str:

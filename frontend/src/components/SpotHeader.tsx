@@ -14,6 +14,10 @@ interface Props {
   symbolTicker: string;
   /** Optional ATM strike shown beside Spot (e.g. on the Charts page). */
   atmStrike?: number | null;
+  /** Spot resolved by the page (already guarded for symbol + historical date).
+   *  When provided it wins over the live feed price — a historical session must not
+   *  display today's live quote as its spot. */
+  spot?: number | null;
 }
 
 /** NSE / snapshot times should read in IST regardless of the viewer's locale. */
@@ -40,6 +44,42 @@ function formatTime(asof: string | undefined | null): string {
 }
 
 type StatusInfo = { dot: string; label: string; badge: string; shortHint: string };
+
+/** Data is considered stale after this many seconds without a new DB flush.
+ *  OI refreshes from the exchange roughly once a minute and PERSIST_BUCKET is 1min,
+ *  so three missed flushes means the numbers on screen have stopped moving. */
+const STALE_AFTER_S = 180;
+
+function formatAge(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
+/** Age of the newest STORED data (not socket liveness).
+ *
+ * The stream badge only reports whether the browser's WebSocket is open — server
+ * pings keep it green even when no market data has landed for many minutes, so a
+ * frozen feed looked perfectly healthy. This surfaces the thing that actually
+ * matters when trading off these numbers: how old they are.
+ */
+function dataFreshness(
+  health: HealthResponse | null,
+): { label: string; stale: boolean; title: string } | null {
+  const last = health?.last_flush_at;
+  if (!last) return null;
+  const ms = new Date(last).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const ageSec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  // Only flag staleness while the exchange session is open — outside market hours the
+  // newest data is legitimately old and warning about it would just be noise.
+  const stale = Boolean(health?.nse_session_open) && ageSec > STALE_AFTER_S;
+  return {
+    stale,
+    label: stale ? `DATA STALE · ${formatAge(ageSec)} OLD` : `DATA ${formatAge(ageSec)} OLD`,
+    title: `Newest stored snapshot: ${new Date(last).toLocaleString("en-IN", { timeZone: MARKET_TZ })} IST`,
+  };
+}
 
 function statusInfo(status: StreamStatus): StatusInfo {
   switch (status) {
@@ -129,7 +169,7 @@ function referenceSourceLabel(source: string): string {
   }
 }
 
-export function SpotHeader({ data, status, health, streamError, symbolDisplay, symbolTicker, atmStrike }: Props) {
+export function SpotHeader({ data, status, health, streamError, symbolDisplay, symbolTicker, atmStrike, spot: spotProp }: Props) {
   const [cross, setCross] = useState<NiftyCrossCheckResponse | null>(null);
   const [crossLoading, setCrossLoading] = useState(false);
   const [crossErr, setCrossErr] = useState<string | null>(null);
@@ -152,12 +192,21 @@ export function SpotHeader({ data, status, health, streamError, symbolDisplay, s
   const dateStr = formatHeaderDate(snapshotBuilt);
   const timeStr = formatTime(snapshotBuilt);
   const exchangeTimeStr = exchangeTs ? formatTime(exchangeTs) : "";
+  // Prefer the page-resolved spot (guarded for the selected date AND the active
+  // symbol). Falling back to health.latest_spot unguarded was wrong twice over: it
+  // showed TODAY's live price while viewing a historical session, and it showed the
+  // globally-active symbol's price when this header names a different symbol.
   const spot =
-    health?.latest_spot != null && health.feed_connected
-      ? health.latest_spot
-      : data?.spot;
+    spotProp !== undefined
+      ? spotProp ?? data?.spot
+      : health?.latest_spot != null &&
+          health.feed_connected &&
+          health.active_symbol === symbolTicker
+        ? health.latest_spot
+        : data?.spot;
   const si = statusInfo(status);
   const offCaption = livePushOffCaption(status, health, streamError);
+  const freshness = dataFreshness(health);
 
   return (
     <header className="flex flex-col gap-2 px-2 py-4">
@@ -249,6 +298,25 @@ export function SpotHeader({ data, status, health, streamError, symbolDisplay, s
                 </span>
               )}
             </div>
+            {/* Age of the DATA, independent of socket liveness — a green "LIVE PUSH ON"
+                badge says nothing about whether numbers are still arriving. */}
+            {freshness && (
+              <div
+                className={`flex items-center gap-2 px-3 py-1 rounded-lg border text-[11px] font-semibold tracking-wide ${
+                  freshness.stale
+                    ? "border-red-500/50 text-red-300 bg-red-500/10"
+                    : "border-border text-muted bg-panel/60"
+                }`}
+                title={freshness.title}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    freshness.stale ? "bg-red-500 animate-pulse" : "bg-slate-500"
+                  }`}
+                />
+                {freshness.label}
+              </div>
+            )}
             {offCaption && (
               <p className="text-[11px] text-muted leading-snug text-right pl-1 border-r-2 border-amber-600/40 pr-2">
                 {offCaption}

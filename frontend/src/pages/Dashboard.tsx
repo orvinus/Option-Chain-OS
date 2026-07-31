@@ -182,11 +182,16 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     ? range.loading && !range.data
     : initial.loading && !hasMatchingSnapshot;
 
+  // Spot to use for ATM centring and display. A HISTORICAL session must use that
+  // day's stored spot — using today's live price re-centred the strike window (and
+  // the header) on a price the selected session never traded at.
+  const effSpot = historical ? data?.spot ?? null : liveSpot;
+
   const noOiChangeInAtmWindow = useMemo(() => {
     if (!data) return false;
-    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow, strikeStep);
+    const wr = filterOiRowsByAtmWindow(data.rows, effSpot ?? data.spot ?? null, atmWindow, strikeStep);
     return wr.length > 0 && wr.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, atmWindow, liveSpot, strikeStep]);
+  }, [data, atmWindow, effSpot, strikeStep]);
 
   if (!authChecked) {
     return (
@@ -211,6 +216,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
         streamError={live.streamError}
         symbolDisplay={symbolDisplay}
         symbolTicker={symbol}
+        spot={effSpot}
       />
 
       <main className="flex flex-col gap-4">
@@ -321,7 +327,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
             )}
 
             {fnoEligible && (
-              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} strikeStep={strikeStep} />
+              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={effSpot} strikeStep={strikeStep} />
             )}
 
             {fnoEligible && (
@@ -331,13 +337,16 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                 atmWindow={atmWindow}
                 isLoading={isLoading}
                 underlyingLabel={symbolDisplay}
-                liveSpot={liveSpot}
+                liveSpot={effSpot}
                 nseSessionOpen={health?.nse_session_open}
                 strikeStep={strikeStep}
               />
             )}
 
-            {fnoEligible && initial.error && !data && (
+            {/* Surface the error from whichever fetch is actually driving the view.
+                The custom-window/historical path uses `range`, whose failures were
+                never rendered — the chart just said "Waiting for data…" forever. */}
+            {fnoEligible && (windowActive ? range.error : initial.error) && !data && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Failed to load: {initial.error}
               </div>

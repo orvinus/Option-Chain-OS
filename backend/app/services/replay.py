@@ -67,7 +67,10 @@ _REPLAY_SERIES_SQL = text(
             strike,
             option_type,
             locf(last(oi, ts)) AS oi,
-            locf(last(underlying, ts)) AS underlying
+            locf(last(underlying, ts)) AS underlying,
+            -- Age of the carried-forward values, so the frame's spot can be taken from
+            -- the FRESHEST leg rather than whichever strike happens to sort first.
+            locf(last(ts, ts)) AS last_ts
         FROM option_oi_snapshots
         WHERE symbol = :symbol
           AND expiry = :expiry
@@ -75,7 +78,7 @@ _REPLAY_SERIES_SQL = text(
           AND ts <= :end
         GROUP BY 1, 2, 3
     )
-    SELECT bucket, strike, option_type, oi, underlying
+    SELECT bucket, strike, option_type, oi, underlying, last_ts
     FROM per_strike
     WHERE oi IS NOT NULL
     ORDER BY bucket, strike, option_type
@@ -124,20 +127,36 @@ async def fetch_replay(
     buckets: list[datetime] = []
     by_bucket: dict[datetime, dict[int, dict[str, int]]] = {}
     spot_by_bucket: dict[datetime, float | None] = {}
+    spot_ts_by_bucket: dict[datetime, datetime | None] = {}
     for r in rows:
         b = r["bucket"]
         if b not in by_bucket:
             by_bucket[b] = {}
             spot_by_bucket[b] = None
+            spot_ts_by_bucket[b] = None
             buckets.append(b)
         by_bucket[b].setdefault(r["strike"], {"CE": 0, "PE": 0})[r["option_type"]] = int(r["oi"])
-        if spot_by_bucket[b] is None and r.get("underlying") is not None:
-            spot_by_bucket[b] = float(r["underlying"])
+        # Take the frame's spot from the FRESHEST leg. Rows arrive in strike order, so
+        # the old "first non-null wins" locked onto the LOWEST strike — typically a
+        # quiet deep-ITM contract whose locf-carried underlying stops updating, which
+        # froze the replay spot (and therefore the ATM) for the rest of the session.
+        u = r.get("underlying")
+        if u is not None:
+            lts = r.get("last_ts")
+            cur_ts = spot_ts_by_bucket.get(b)
+            if spot_by_bucket[b] is None or (lts is not None and (cur_ts is None or lts > cur_ts)):
+                spot_by_bucket[b] = float(u)
+                spot_ts_by_bucket[b] = lts
 
-    # Baseline = the first frame's book (per strike + totals) for change-since-start.
-    base_book: dict[int, dict[str, int]] = by_bucket[buckets[0]] if buckets else {}
-    base_ce = sum(v.get("CE", 0) for v in base_book.values())
-    base_pe = sum(v.get("PE", 0) for v in base_book.values())
+    # Per-strike baseline for change-since-start. A strike absent from the FIRST frame
+    # (it entered the window later via ATM drift) previously fell back to 0, so its
+    # entire open interest was reported as "change". Use the first book each strike is
+    # actually seen with, mirroring the per-strike baseline clamp in OIChangeEngine.
+    base_book: dict[int, dict[str, int]] = {}
+    for b in buckets:
+        for strike, v in by_bucket[b].items():
+            if strike not in base_book:
+                base_book[strike] = dict(v)
 
     frames: list[ReplayFrame] = []
     for b in buckets:
@@ -145,6 +164,12 @@ async def fetch_replay(
         spot = spot_by_bucket[b]
         total_ce = sum(v.get("CE", 0) for v in book.values())
         total_pe = sum(v.get("PE", 0) for v in book.values())
+        # Baseline totals cover exactly the strikes PRESENT in this frame, using each
+        # one's first-seen book. This keeps the frame total change equal to the sum of
+        # the per-strike changes (a global baseline over all strikes would make early
+        # frames negative once a later strike joined).
+        base_ce = sum(base_book.get(k, {}).get("CE", 0) for k in book)
+        base_pe = sum(base_book.get(k, {}).get("PE", 0) for k in book)
         replay_rows: list[ReplayRow] = []
         if not summary:
             g_map = greeks_by_bucket.get(b, {})
