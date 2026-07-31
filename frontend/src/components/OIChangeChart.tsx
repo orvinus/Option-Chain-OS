@@ -3,6 +3,7 @@ import type { EChartsOption } from "echarts";
 import { useMemo } from "react";
 import type { OIChangeResponse, OIChangeRow } from "../types";
 import { filterOiRowsByAtmWindow, nearestIdx } from "../utils/oiStrikeWindow";
+import { compact as compactNum } from "../utils/num";
 
 export type OIMode = "change" | "absolute";
 
@@ -18,18 +19,6 @@ interface Props {
   nseSessionOpen?: boolean;
   /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
   strikeStep?: number | null;
-}
-
-// ── formatting helpers ──────────────────────────────────────────────────────
-
-/** Compact Indian number notation — matches Sensibull axis labels */
-function compactNum(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${sign}${(abs / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}K`;
-  return `${sign}${abs.toLocaleString()}`;
 }
 
 // ── main component ──────────────────────────────────────────────────────────

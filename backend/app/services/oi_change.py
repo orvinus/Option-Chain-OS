@@ -321,18 +321,29 @@ class OIChangeEngine:
         expiry: date,
         symbol: str | None = None,
         live_spot: float | None = None,
+        as_of: datetime | None = None,
     ) -> OIChangeResponse:
+        """Strike-wise OI change for a timeframe.
+
+        ``as_of`` (tz-aware) computes the timeframe as of a historical instant
+        (a picked past date), mirroring ``get_multi``; omit it for the live
+        latest snapshot. This lets the OI Change page show "15m as of a past
+        date" identically to the Multi-TF grid's 15m row for that date.
+        """
         symbol = (symbol or get_runtime().active_symbol).upper()
+        as_of_utc = as_of.astimezone(timezone.utc) if as_of is not None else None
         async with self._lock:
             anchor = await self._fetch_anchor_ts(symbol, expiry)
-            cache_key = (timeframe, expiry.isoformat(), symbol, anchor)
+            ref_key = as_of_utc.isoformat() if as_of_utc else (anchor.isoformat() if anchor else "now")
+            cache_key = (timeframe, expiry.isoformat(), symbol, ref_key)
             cached = self._cache.get(cache_key)
             if cached is not None:
-                if live_spot is not None and live_spot != cached.spot:
+                # Live spot only overrides for the live (non-as_of) snapshot.
+                if live_spot is not None and as_of_utc is None and live_spot != cached.spot:
                     from dataclasses import replace as dc_replace
                     return dc_replace(cached, spot=live_spot)
                 return cached
-            result = await self._compute(timeframe, expiry, symbol, anchor, live_spot)
+            result = await self._compute(timeframe, expiry, symbol, anchor, live_spot, as_of_utc)
             self._cache[cache_key] = result
             return result
 
@@ -467,10 +478,12 @@ class OIChangeEngine:
         symbol: str,
         anchor_from_db: datetime | None,
         live_spot: float | None = None,
+        as_of_utc: datetime | None = None,
     ) -> OIChangeResponse:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
-        anchor = anchor_from_db or now_utc
+        # "now" reference: an explicit historical instant, else the DB anchor, else wall clock.
+        anchor = as_of_utc or anchor_from_db or now_utc
         session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
@@ -494,9 +507,18 @@ class OIChangeEngine:
             floored_then = True
 
         async with AsyncSessionLocal() as s:
-            now_rows = (
-                await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
-            ).mappings().all()
+            # NOW snapshot: the live latest, or the last row at/before a historical as_of.
+            if as_of_utc is None:
+                now_rows = (
+                    await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+                ).mappings().all()
+            else:
+                now_rows = (
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                        {**params, "cutoff": as_of_utc, "floor": session_floor},
+                    )
+                ).mappings().all()
             then_rows = list((await s.execute(then_sql, then_params)).mappings().all())
             # Per-strike baseline clamp (mirrors ``_compute_range``): a now-strike
             # with no floored ``then`` row (it entered the window mid-session) is
@@ -520,11 +542,15 @@ class OIChangeEngine:
                     ]
 
         # Sub-minute timeframes: hold the last OI move where the exact window is flat.
-        if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None:
+        # Live only — a historical as_of reads the exact stored snapshot at that instant.
+        if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None and as_of_utc is None:
             then_rows = await self._merge_hold_last(symbol, expiry, anchor, now_rows, then_rows)
 
-        asof_override = anchor if anchor_from_db is not None else None
-        return _assemble(timeframe, expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
+        # asof = the historical instant, else the live DB anchor (None when neither).
+        asof_override = as_of_utc if as_of_utc is not None else (anchor_from_db if anchor_from_db is not None else None)
+        # Live spot only applies to the live snapshot; historical uses the stored underlying.
+        eff_live_spot = live_spot if as_of_utc is None else None
+        return _assemble(timeframe, expiry, now_rows, then_rows, asof_override, now_utc, eff_live_spot)
 
     async def get_multi(
         self,

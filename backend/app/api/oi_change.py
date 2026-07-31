@@ -31,6 +31,7 @@ async def oi_change(
     timeframe: str = Query(default="5m", description="One of " + ",".join(TIMEFRAME_TO_DELTA.keys())),
     expiry: str | None = Query(default=None, description="ISO date (YYYY-MM-DD)"),
     symbol: str | None = Query(default=None),
+    as_of: str | None = Query(default=None, description="Compute the timeframe as of this ISO-8601 instant (historical, e.g. a past date's close). Omit for the live latest snapshot. Ignored when from_ts is set."),
     from_ts: str | None = Query(default=None, description="Custom window start (ISO-8601). When set, overrides timeframe."),
     to_ts: str | None = Query(default=None, description="Custom window end (ISO-8601). Omit for 'up to latest' (live)."),
 ) -> OIChangeResponseOut:
@@ -54,7 +55,8 @@ async def oi_change(
     else:
         if timeframe not in TIMEFRAME_TO_DELTA:
             raise HTTPException(400, f"Unsupported timeframe '{timeframe}'.")
-        res = await engine.get(timeframe, e, symbol=entry.symbol, live_spot=live_spot)
+        as_of_dt = _parse_ts(as_of, "as_of") if as_of is not None else None
+        res = await engine.get(timeframe, e, symbol=entry.symbol, live_spot=live_spot, as_of=as_of_dt)
     return OIChangeResponseOut(
         timeframe=res.timeframe,
         expiry=res.expiry,

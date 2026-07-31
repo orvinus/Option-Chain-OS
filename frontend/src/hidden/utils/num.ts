@@ -1,4 +1,5 @@
-/** Compact Indian-market number formatting (lakh / crore) for OI values. */
+/** Compact Indian-market number formatting (lakh / crore) for OI values.
+ *  Hidden-dashboard copy — keep in sync with `frontend/src/utils/num.ts`. */
 export function compact(n: number | null | undefined): string {
   if (n == null || Number.isNaN(n)) return "—";
   const a = Math.abs(n);

@@ -1,6 +1,8 @@
 import type { OIChangeResponse } from "../types";
-import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
+import { atmRound, filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import { callPutRatio } from "../utils/ratio";
+import { compact, signedCompact } from "../utils/num";
+import { changeColor } from "../utils/ui";
 import type { OIMode } from "./OIChangeChart";
 
 interface Props {
@@ -13,16 +15,6 @@ interface Props {
   strikeStep?: number | null;
 }
 
-/** Indian compact notation matching Sensibull's display */
-function compact(n: number, showSign = false): string {
-  const sign = n < 0 ? "-" : showSign && n > 0 ? "+" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${sign}${(abs / 1e7).toFixed(2)} Cr`;
-  if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)} L`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)} K`;
-  return `${sign}${abs === 0 ? "0" : abs.toLocaleString()}`;
-}
-
 export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   const rows = data?.rows ?? [];
   const spot = liveSpot ?? data?.spot ?? null;
@@ -32,21 +24,23 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
   // Absolute OI totals (in contracts, same unit Sensibull uses)
   const totalCeOI = windowRows.reduce((s, r) => s + r.call_oi, 0);
   const totalPeOI = windowRows.reduce((s, r) => s + r.put_oi, 0);
+  // Single canonical PCR = Put OI ÷ Call OI on LEVELS (matches the backend and
+  // the Multi-TF header `pcr`). Shown in both absolute and change modes so the
+  // OI-Change tab and Multi-TF never report a different PCR for the same window.
   const pcr = totalCeOI > 0 ? totalPeOI / totalCeOI : 0;
 
   // OI Change totals (match chart window; full-chain API totals only equal sums when atmWindow === 0)
   const ceChg = windowRows.reduce((s, r) => s + r.call_oi_change, 0);
   const peChg = windowRows.reduce((s, r) => s + r.put_oi_change, 0);
-  const pcrChg = ceChg !== 0 ? Math.abs(peChg / ceChg) : 0;
 
   const isChange = mode === "change";
   const ceVal = isChange ? ceChg : totalCeOI;
   const peVal = isChange ? peChg : totalPeOI;
-  const pcrVal = isChange ? pcrChg : pcr;
+  const pcrVal = pcr;
 
-  // Standardized normalized Call : Put ratio (shared across MTF / Ratio / Change-in-OI).
-  // Ratio is shown in Call : Put order with the smaller side pinned to 1; Side is the
-  // dominant (larger |OI Δ|) side. Computed on the windowed change totals.
+  // Standardized normalized Call : Put ratio + dominant Side (shared across MTF /
+  // Replay / Change-in-OI). Ratio text is magnitude-normalized with the smaller
+  // side pinned to 1; Side = the SMALLER signed OI Δ side. On the windowed change totals.
   const cpr = callPutRatio(ceChg, peChg);
 
   // Absolute-OI mode keeps the legacy CE ÷ PE OI ratio (the primary dashboard
@@ -75,11 +69,9 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
           {isChange ? "Call OI Change" : "Total Call OI"}
         </span>
         <span className={`text-xl font-mono font-bold ${
-          isChange
-            ? ceChg > 0 ? "text-red-400" : ceChg < 0 ? "text-green-400" : "text-muted"
-            : "text-red-400"
+          isChange ? changeColor(ceChg) : "text-red-400"
         }`}>
-          {compact(ceVal, isChange)}
+          {isChange ? signedCompact(ceVal) : compact(ceVal)}
         </span>
         <span className="text-[10px] text-muted/60">contracts</span>
       </div>
@@ -90,11 +82,9 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
           {isChange ? "Put OI Change" : "Total Put OI"}
         </span>
         <span className={`text-xl font-mono font-bold ${
-          isChange
-            ? peChg > 0 ? "text-green-400" : peChg < 0 ? "text-red-400" : "text-muted"
-            : "text-green-400"
+          isChange ? changeColor(peChg) : "text-green-400"
         }`}>
-          {compact(peVal, isChange)}
+          {isChange ? signedCompact(peVal) : compact(peVal)}
         </span>
         <span className="text-[10px] text-muted/60">contracts</span>
       </div>
@@ -135,7 +125,7 @@ export function KPIBar({ data, mode, atmWindow, liveSpot, strikeStep }: Props) {
         </span>
         {spot != null && (
           <span className="text-[10px] text-muted/60">
-            ATM: {Math.round(spot / step) * step}
+            ATM: {atmRound(spot, step)}
           </span>
         )}
       </div>

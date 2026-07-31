@@ -7,17 +7,13 @@ import type { MarketContextValue } from "../hooks/useMarketContext";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
 import type { MtfRow } from "../types";
-import { signedCompact, compact } from "../utils/num";
+import { signedCompact, compact, fmt2 } from "../utils/num";
+import { changeColor, sideColor, sideLabel } from "../utils/ui";
 import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
-import { callPutRatio, type DominantSide } from "../utils/ratio";
+import { callPutRatio } from "../utils/ratio";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
-const fmt2 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
-const changeColor = (v: number) => (v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-muted");
-const sideColor = (s: DominantSide) =>
-  s === "CALL" ? "text-emerald-400" : s === "PUT" ? "text-red-400" : "text-muted";
-const sideLabel = (s: DominantSide) => (s === "CALL" ? "Call" : s === "PUT" ? "Put" : "Neutral");
 
 const TF_LABEL: Record<string, string> = {
   "1m": "1 Min", "3m": "3 Min", "5m": "5 Min", "10m": "10 Min", "15m": "15 Min",
@@ -49,7 +45,10 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
     symbol: fnoEligible ? symbol : null,
     expiry,
     asOf,
-    atmWindow,
+    // Send the EFFECTIVE window (ATM ± (N−1)) so the summed strikes match the
+    // footer label and the Charts/Ratio/OI-Change windows. Sentinels pass
+    // through: 0 → ATM only, <0 → full chain.
+    atmWindow: effectiveAtmWindow(atmWindow),
     enabled: authenticated && fnoEligible && !!expiry,
   });
 

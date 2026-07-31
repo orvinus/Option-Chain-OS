@@ -1,0 +1,453 @@
+<title>OI Analytics — Data Consistency Audit</title>
+<style>
+  :root {
+    /* cool slate neutrals with a faint blue bias — chosen, not defaulted */
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --surface-2: #eef1f7;
+    --border: #dbe1ec;
+    --ink: #1a2230;
+    --muted: #5c6879;
+    --faint: #8592a6;
+    --accent: #0e7ac4;      /* structural sky-blue */
+    --accent-soft: #e3f0fb;
+    --good: #0f9d6b;        /* fixed / building */
+    --good-soft: #e2f5ec;
+    --crit: #d93a5c;        /* real divergence */
+    --crit-soft: #fce4e9;
+    --warn: #b9791a;        /* by-design / caution */
+    --warn-soft: #fbeed6;
+    --defer: #6b6f9c;       /* deferred */
+    --defer-soft: #ebecf6;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --shadow: 0 1px 2px rgba(20,30,50,.06), 0 4px 16px rgba(20,30,50,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1017;
+      --surface: #151a23;
+      --surface-2: #1b222d;
+      --border: #283142;
+      --ink: #d7deea;
+      --muted: #93a0b4;
+      --faint: #6c7789;
+      --accent: #45b0f0;
+      --accent-soft: #12293b;
+      --good: #34d39e;
+      --good-soft: #122c25;
+      --crit: #fb7185;
+      --crit-soft: #34161f;
+      --warn: #f0b64a;
+      --warn-soft: #322611;
+      --defer: #a9adde;
+      --defer-soft: #20222f;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f7fb; --surface: #ffffff; --surface-2: #eef1f7; --border: #dbe1ec;
+    --ink: #1a2230; --muted: #5c6879; --faint: #8592a6;
+    --accent: #0e7ac4; --accent-soft: #e3f0fb;
+    --good: #0f9d6b; --good-soft: #e2f5ec; --crit: #d93a5c; --crit-soft: #fce4e9;
+    --warn: #b9791a; --warn-soft: #fbeed6; --defer: #6b6f9c; --defer-soft: #ebecf6;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1017; --surface: #151a23; --surface-2: #1b222d; --border: #283142;
+    --ink: #d7deea; --muted: #93a0b4; --faint: #6c7789;
+    --accent: #45b0f0; --accent-soft: #12293b;
+    --good: #34d39e; --good-soft: #122c25; --crit: #fb7185; --crit-soft: #34161f;
+    --warn: #f0b64a; --warn-soft: #322611; --defer: #a9adde; --defer-soft: #20222f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  /* ---- header ---- */
+  header { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(28px, 4.5vw, 42px); line-height: 1.1; margin: 0 0 14px;
+    letter-spacing: -.02em; text-wrap: balance; font-weight: 700;
+  }
+  .lede { font-size: 18px; color: var(--muted); max-width: 68ch; margin: 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 22px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--faint);
+  }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---- scorecard ---- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 0 0 44px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 18px 16px; box-shadow: var(--shadow); position: relative; overflow: hidden;
+  }
+  .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tone, var(--accent)); }
+  .card .n { font-family: var(--mono); font-size: 34px; font-weight: 700; line-height: 1; color: var(--tone, var(--accent)); font-variant-numeric: tabular-nums; }
+  .card .k { display: block; margin-top: 9px; font-size: 13px; color: var(--muted); }
+  .card.good { --tone: var(--good); } .card.crit { --tone: var(--crit); }
+  .card.warn { --tone: var(--warn); } .card.defer { --tone: var(--defer); }
+
+  /* ---- sections ---- */
+  section { margin: 0 0 52px; }
+  h2 {
+    font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .12em;
+    color: var(--accent); margin: 0 0 6px; display: flex; align-items: baseline; gap: 10px;
+  }
+  h2 .idx { color: var(--faint); }
+  .h2sub { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 18px; color: var(--ink); }
+  p { max-width: 72ch; }
+  p.tight { margin: 0 0 14px; }
+
+  /* ---- legend chips ---- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono);
+    font-size: 11.5px; font-weight: 600; letter-spacing: .02em; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .chip.fixed { color: var(--good); background: var(--good-soft); }
+  .chip.div  { color: var(--crit); background: var(--crit-soft); }
+  .chip.bd   { color: var(--warn); background: var(--warn-soft); }
+  .chip.def  { color: var(--defer); background: var(--defer-soft); }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 26px; }
+
+  /* ---- diagram ---- */
+  .diagram {
+    background: #fbfcfe; border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; overflow-x: auto; box-shadow: var(--shadow);
+  }
+  .diagram pre.mermaid { margin: 0; background: transparent; min-width: 720px; text-align: center; }
+  .caption { font-size: 13px; color: var(--faint); margin: 12px 2px 0; font-style: italic; }
+
+  /* ---- callout ---- */
+  .callout {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden; margin: 22px 0 0; box-shadow: var(--shadow);
+  }
+  .callout > div { padding: 18px 20px; background: var(--surface); }
+  .callout > div + div { border-left: 1px solid var(--border); }
+  .callout h4 { margin: 0 0 8px; font-family: var(--mono); font-size: 13px; letter-spacing: .04em; }
+  .callout .A h4 { color: var(--accent); } .callout .B h4 { color: var(--warn); }
+  .callout code { font-size: 12px; }
+  .callout ul { margin: 8px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--muted); }
+  .callout li { margin: 3px 0; }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; background: var(--surface); }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th {
+    background: var(--surface-2); font-family: var(--mono); font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); font-weight: 600; position: sticky; top: 0;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--surface-2); }
+  td.q { font-weight: 600; color: var(--ink); white-space: nowrap; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+  td code { background: var(--surface-2); padding: 1px 5px; border-radius: 5px; color: var(--ink); }
+  .tag { font-family: var(--mono); font-size: 10.5px; font-weight: 700; padding: 2px 6px; border-radius: 5px; letter-spacing: .04em; }
+  .tag.A { color: var(--accent); background: var(--accent-soft); }
+  .tag.B { color: var(--warn); background: var(--warn-soft); }
+  .cell-div { color: var(--crit); font-weight: 600; }
+  .cell-ok  { color: var(--good); font-weight: 600; }
+
+  /* ---- fix list ---- */
+  .fixes { display: grid; gap: 14px; }
+  .fix {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--good);
+    border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .fix h4 { margin: 0 0 4px; font-size: 15.5px; display: flex; align-items: center; gap: 10px; }
+  .fix .code-tag { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--good); background: var(--good-soft); padding: 2px 8px; border-radius: 6px; }
+  .fix p { margin: 6px 0 0; font-size: 14px; color: var(--muted); max-width: none; }
+  .ba { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; margin-top: 12px; font-family: var(--mono); font-size: 12.5px; }
+  .ba .before { color: var(--crit); background: var(--crit-soft); padding: 8px 11px; border-radius: 7px; }
+  .ba .after  { color: var(--good); background: var(--good-soft); padding: 8px 11px; border-radius: 7px; }
+  .ba .arr { color: var(--faint); font-size: 16px; }
+  .fix .files { margin-top: 10px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .panel.def { border-top: 3px solid var(--defer); }
+  .panel.bd { border-top: 3px solid var(--warn); }
+  .panel h3 { margin: 0 0 12px; font-size: 16px; }
+  .panel ul { margin: 0; padding-left: 18px; }
+  .panel li { margin: 9px 0; font-size: 14px; color: var(--muted); }
+  .panel li b { color: var(--ink); font-weight: 600; }
+
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+  @media (max-width: 720px) {
+    .callout, .split { grid-template-columns: 1fr; }
+    .callout > div + div { border-left: 0; border-top: 1px solid var(--border); }
+    .ba { grid-template-columns: 1fr; } .ba .arr { transform: rotate(90deg); justify-self: center; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Engineering audit · main dashboard</p>
+    <h1>OI Analytics — Data Consistency Audit</h1>
+    <p class="lede">Where the same market number is computed more than one way across the five dashboard tabs — which gaps are real bugs, which are correct-by-design, and what this pass fixed.</p>
+    <div class="meta">
+      <span>branch <b>ayush-bhai-v2</b></span>
+      <span>scope <b>OI Change · Charts · Multi-TF · Ratio · Replay</b></span>
+      <span>method <b>full frontend + backend trace</b></span>
+      <span>build <b>tsc + vite green</b></span>
+    </div>
+  </header>
+
+  <div class="cards">
+    <div class="card good"><span class="n">6</span><span class="k">Fixes shipped this pass (Side rule + F1–F5)</span></div>
+    <div class="card crit"><span class="n">5</span><span class="k">Real divergences found (windows, PCR, ATM, colour, formatters)</span></div>
+    <div class="card defer"><span class="n">3</span><span class="k">Deferred — architectural, documented only</span></div>
+    <div class="card warn"><span class="n">4</span><span class="k">By-design differences (documented so they aren't mistaken for bugs)</span></div>
+  </div>
+
+  <div class="legend">
+    <span class="chip fixed">Fixed this pass</span>
+    <span class="chip div">Real divergence</span>
+    <span class="chip bd">By design</span>
+    <span class="chip def">Deferred</span>
+  </div>
+
+  <section>
+    <h2><span class="idx">01</span> How the data flows</h2>
+    <p class="h2sub">Five tabs, two SQL engines, one table</p>
+    <p class="tight">Every page ultimately reads the same <code>option_oi_snapshots</code> hypertable, but through <b>two fundamentally different query engines</b>. That single fork is the root of most cross-page number differences.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart LR
+  subgraph pages["Dashboard tabs"]
+    P1["OI Change"]
+    P2["Charts"]
+    P3["Multi-TF"]
+    P4["Ratio"]
+    P5["Replay"]
+  end
+  subgraph api["FastAPI endpoints"]
+    E1["/api/oi-change"]
+    E2["/api/multi-timeframe"]
+    E3["/api/oi-timeseries"]
+    E4["/api/ratio-timeseries"]
+    E5["/api/replay"]
+  end
+  EA["Engine A — latest-snapshot DISTINCT ON, session-floored, NO gapfill"]
+  EB["Engine B — time_bucket_gapfill + locf(last oi)"]
+  DB[("option_oi_snapshots")]
+
+  P1 --> E1
+  P2 --> E3
+  P2 -.spot.-> E2
+  P3 --> E2
+  P4 --> E4
+  P4 -.atm.-> E2
+  P5 --> E5
+
+  E1 --> EA
+  E2 --> EA
+  E5 --> EA
+  E3 --> EB
+  E4 --> EB
+  EA --> DB
+  EB --> DB
+      </pre>
+    </div>
+    <p class="caption">Dotted edges are secondary lookups (spot / ATM only). Replay reads one frames payload and derives everything client-side.</p>
+
+    <div class="callout">
+      <div class="A">
+        <h4>Engine A · latest snapshot</h4>
+        <p class="tight" style="font-size:13.5px;color:var(--muted)">Takes the single most-recent row per <code>(strike, option_type)</code> with <code>ts ≥ 09:15 today</code>; change = now − a session-floored baseline (per-strike clamp). Emits per-strike changes + level totals.</p>
+        <ul><li>/api/oi-change · /api/multi-timeframe</li><li>/api/option-chain-full · /api/replay</li></ul>
+      </div>
+      <div class="B">
+        <h4>Engine B · bucketed levels</h4>
+        <p class="tight" style="font-size:13.5px;color:var(--muted)">Buckets with gap-fill and carries the last-known OI forward (<code>locf</code>). Emits absolute levels per bucket only — "change since open" is computed on the frontend from the first returned bucket.</p>
+        <ul><li>/api/oi-timeseries · /api/ratio-timeseries</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="idx">02</span> Per-quantity consistency matrix</h2>
+    <p class="h2sub">Same word, sometimes a different number</p>
+    <p class="tight">How each displayed quantity is computed on each surface. Cells flagged <span class="cell-div">red</span> were inconsistent before this pass; <span class="cell-ok">green</span> are now unified.</p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Quantity</th><th>OI Change / Replay (KPIBar)</th><th>Multi-TF</th><th>Ratio</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="q">Total Call / Put OI<br><span class="mono" style="color:var(--faint)">levels</span></td>
+            <td>Σ over ATM±(N−1) window · <span class="tag A">A</span></td>
+            <td>Σ over window · <span class="tag A">A</span> — <span class="cell-ok">was raw ATM±N, now ATM±(N−1)</span></td>
+            <td>Σ bucket levels · <span class="tag B">B</span> (full stored range unless bounds passed)</td>
+            <td><span class="chip fixed">F1</span></td>
+          </tr>
+          <tr>
+            <td class="q">Ratio (C÷P)<br><span class="mono" style="color:var(--faint)">level</span></td>
+            <td>absolute mode: CE÷PE level</td>
+            <td>header: server call÷put level · <span class="tag A">A</span></td>
+            <td>per-bucket call÷put level · <span class="tag B">B</span></td>
+            <td><span class="chip bd">by design</span></td>
+          </tr>
+          <tr>
+            <td class="q">PCR (P÷C)</td>
+            <td><span class="cell-div">was |ΔPE/ΔCE| (change, abs)</span> → <span class="cell-ok">now PE/CE level</span></td>
+            <td>server PE/CE level · <span class="tag A">A</span></td>
+            <td>server PE/CE level · <span class="tag B">B</span></td>
+            <td><span class="chip fixed">F2</span></td>
+          </tr>
+          <tr>
+            <td class="q">OI change (Δ)</td>
+            <td>server Δ vs session-floored baseline + clamp · <span class="tag A">A</span></td>
+            <td>same · <span class="tag A">A</span></td>
+            <td>client Δ vs first bucket <code>points[0]</code> · <span class="tag B">B</span></td>
+            <td><span class="chip bd">by design</span></td>
+          </tr>
+          <tr>
+            <td class="q">Ratio 1:N + Side<br><span class="mono" style="color:var(--faint)">of changes</span></td>
+            <td>client <code>callPutRatio(ΔCE,ΔPE)</code></td>
+            <td>client <code>callPutRatio</code></td>
+            <td class="mono" style="color:var(--faint)">— not shown —</td>
+            <td><span class="chip fixed">Side rule</span></td>
+          </tr>
+          <tr>
+            <td class="q">ATM strike</td>
+            <td><span class="cell-div">label round() vs window nearest-actual</span> → <span class="cell-ok">now round(spot/step)·step</span></td>
+            <td>server <code>atm_strike</code> = round(spot/step)·step</td>
+            <td>centres on server <code>atm_strike</code></td>
+            <td><span class="chip fixed">F3</span></td>
+          </tr>
+          <tr>
+            <td class="q">Full Day baseline</td>
+            <td class="mono" style="color:var(--faint)">n/a</td>
+            <td>server earliest row ≥ 09:15 · <span class="tag A">A</span></td>
+            <td>client cumulative from <code>points[0]</code></td>
+            <td><span class="chip bd">by design</span></td>
+          </tr>
+          <tr>
+            <td class="q">Cr / L formatting</td>
+            <td><span class="cell-div">3 local <code>compact</code> copies</span> → <span class="cell-ok">one <code>utils/num.ts</code></span></td>
+            <td>uses <code>utils/num.ts</code></td>
+            <td>uses <code>utils/num.ts</code></td>
+            <td><span class="chip fixed">F4</span></td>
+          </tr>
+          <tr>
+            <td class="q">Δ colour</td>
+            <td><span class="cell-div">+Call = red, +Put = green</span> → <span class="cell-ok">+ = green, − = red</span></td>
+            <td>+ = green, − = red</td>
+            <td class="mono" style="color:var(--faint)">n/a</td>
+            <td><span class="chip fixed">F5</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="idx">03</span> Root causes</h2>
+    <p class="h2sub">Why the numbers drifted</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Cause</th><th>Effect</th><th>Disposition</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">1</td><td class="q">Two query engines (A vs B)</td><td>Illiquid strikes total differently between Multi-TF/OI-Change and Ratio/Charts.</td><td><span class="chip def">deferred</span></td></tr>
+          <tr><td class="mono">2</td><td class="q">Three strike windows</td><td>Multi-TF summed <b>raw ATM±N</b> (mis-labelled ATM±(N−1)); Charts/Ratio/KPIBar use ATM±(N−1); ratio-timeseries defaults to the full stored range.</td><td><span class="chip fixed">F1</span> <span class="chip def">ratio-ts deferred</span></td></tr>
+          <tr><td class="mono">3</td><td class="q">PCR computed 3 ways</td><td>OI-Change tab showed a change-based <code>|ΔPE/ΔCE|</code>; Multi-TF showed level PE/CE — different PCR for one window.</td><td><span class="chip fixed">F2</span></td></tr>
+          <tr><td class="mono">4</td><td class="q">ATM derived 3 ways</td><td>Arithmetic round vs nearest-actual-strike centred windows differently at ladder edges.</td><td><span class="chip fixed">F3</span></td></tr>
+          <tr><td class="mono">5</td><td class="q">Δ colour inverted</td><td>A "+" on Call OI Δ read red on one tab, green on another.</td><td><span class="chip fixed">F5</span></td></tr>
+          <tr><td class="mono">6</td><td class="q">Duplicate formatters</td><td>"5.75 Cr" vs "5.75Cr" vs "5.75L" across tabs.</td><td><span class="chip fixed">F4</span></td></tr>
+          <tr><td class="mono">7</td><td class="q"><code>asof</code> semantics</td><td>Engine A pins to DB <code>MAX(ts)</code>; /spot &amp; /health use wall-clock — "as of" labels can disagree after hours.</td><td><span class="chip bd">by design</span></td></tr>
+          <tr><td class="mono">8</td><td class="q">Hidden dashboard is a separate app</td><td><code>frontend/src/hidden/**</code> has its own KPIBar/formatters/ratio (signed, no Side).</td><td><span class="chip def">deferred</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="idx">04</span> Fixed this pass</h2>
+    <p class="h2sub">The Side rule + five consolidations</p>
+    <div class="fixes">
+      <div class="fix">
+        <h4><span class="code-tag">Side</span> Dominant-side rule → smaller signed value</h4>
+        <p>The finalized spec: <b>Side = the side whose signed OI change is the SMALLER (lower) value; Neutral on a tie.</b> The magnitude-normalized ratio text is unchanged. Because <code>callPutRatio()</code> is the single source, this propagates to Multi-TF, the OI Change hint, and Replay at once.</p>
+        <div class="ba">
+          <span class="before">side = |ΔCall| &gt; |ΔPut| ? CALL : PUT</span>
+          <span class="arr">→</span>
+          <span class="after">side = ΔCall &lt; ΔPut ? CALL : PUT</span>
+        </div>
+        <div class="files">frontend/src/utils/ratio.ts · e.g. Full Day +45.90L / +1.56Cr now reads Call (was Put)</div>
+      </div>
+
+      <div class="fix">
+        <h4><span class="code-tag">F1</span> One strike window</h4>
+        <p>Multi-TF now sends the <b>effective</b> window (ATM±(N−1)) to the backend, so its summed strikes match its own footer label and the Charts / Ratio / OI-Change windows. Sentinels pass through (0 → ATM only, "All" → full chain).</p>
+        <div class="files">frontend/src/pages/MultiTimeframePage.tsx → effectiveAtmWindow(atmWindow)</div>
+      </div>
+
+      <div class="fix">
+        <h4><span class="code-tag">F2</span> One PCR</h4>
+        <p>PCR is now <b>Put OI ÷ Call OI on levels</b> everywhere (matches the backend). The change-based directional read still lives in the "Ratio" tile + dominant Side, so nothing is lost.</p>
+        <div class="files">frontend/src/components/KPIBar.tsx</div>
+      </div>
+
+      <div class="fix">
+        <h4><span class="code-tag">F3</span> One ATM</h4>
+        <p>A single <code>atmRound(spot, step) = round(spot/step)·step</code> — identical to the backend <code>atm_strike</code> — now centres every client window and every ATM label.</p>
+        <div class="files">frontend/src/utils/oiStrikeWindow.ts · KPIBar · ChartsPage</div>
+      </div>
+
+      <div class="fix">
+        <h4><span class="code-tag">F4</span> One formatter set</h4>
+        <p>Three local <code>compact</code>/<code>compactNum</code> copies (and two inline <code>fmt2</code>) collapse into <code>utils/num.ts</code>. Cr / L / k renders identically on every tab.</p>
+        <div class="files">num.ts ← KPIBar · OICandleChart · OIChangeChart · MultiTimeframePage · RatioChartPage</div>
+      </div>
+
+      <div class="fix">
+        <h4><span class="code-tag">F5</span> One Δ colour convention</h4>
+        <p>Positive change = green, negative = red, the same for Call and Put — shared from <code>utils/ui.ts</code> (<code>changeColor</code>, plus <code>sideColor</code>/<code>sideLabel</code>). The inverted KPIBar branch is gone. <em>Chosen to match the Multi-TF page already in production; flip if the "call-writing = red" convention is preferred instead.</em></p>
+        <div class="files">frontend/src/utils/ui.ts ← KPIBar · MultiTimeframePage · ReplayPage</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="idx">05</span> Not touched — on purpose</h2>
+    <div class="split">
+      <div class="panel def">
+        <h3>Deferred (architectural)</h3>
+        <ul>
+          <li><b>Unify the two query engines.</b> Making Ratio/Charts and Multi-TF/OI-Change read OI through one engine is a backend rewrite with real regression risk — worth doing deliberately, not folded into this pass.</li>
+          <li><b>Ratio-timeseries default window.</b> Defaulting to the full <em>stored</em> strike range (which can include stale prior-day strikes) should become ATM±N — but that shifts existing Ratio-page numbers, so it needs sign-off.</li>
+          <li><b>Hidden-dashboard parity.</b> The isolated <code>/hidden</code> app keeps its own signed ratio + formatters; bringing it onto the shared helpers is a separate task.</li>
+        </ul>
+      </div>
+      <div class="panel bd">
+        <h3>By design (documented, not bugs)</h3>
+        <ul>
+          <li><b>Multi-TF "Ratio" means two things.</b> The header ratio is of <em>levels</em>; the per-row ratio is of <em>changes</em>. Same word, deliberately different metric.</li>
+          <li><b>Intraday vs Full Day Δ.</b> Intraday change is incremental against a timeframe baseline; Full Day is cumulative from 09:15.</li>
+          <li><b>/api/spot returns null off-symbol.</b> Spot is served only for the active symbol — expected, not a data gap.</li>
+          <li><b>Ratio text vs Side can look opposite.</b> A row may read Ratio <code>1 : 3.41</code> yet Side <code>Call</code> — an intentional consequence of the new signed-value rule.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    OI Analytics data-consistency audit · frontend-only changes · verified with <b>tsc -b --force</b> and <b>vite build</b> (both green).
+  </footer>
+</div>
