@@ -2,10 +2,16 @@ services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
     environment:
-      POSTGRES_PASSWORD: postgres
+      # Set POSTGRES_PASSWORD in the repo-root .env. The old hardcoded "postgres"
+      # default is a superuser credential, and a Postgres superuser can run
+      # COPY ... TO PROGRAM — i.e. arbitrary commands on the host.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: oi
     ports:
-      - "5432:5432"
+      # Bound to LOCALHOST ONLY. The backend reaches the DB over the internal compose
+      # network (host "timescaledb"), so nothing needs this published externally.
+      # Publishing it as "5432:5432" exposed the database to the whole internet.
+      - "127.0.0.1:5432:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -22,15 +28,19 @@ services:
     env_file:
       - ../.env
     environment:
-      DB_URL: postgresql+psycopg://postgres:postgres@timescaledb:5432/oi
-      DB_URL_SYNC: postgresql+psycopg://postgres:postgres@timescaledb:5432/oi
+      DB_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@timescaledb:5432/oi
+      DB_URL_SYNC: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@timescaledb:5432/oi
       # Override in repo-root `.env` for VPS (e.g. http://203.0.113.10,https://oi.example.com).
       API_CORS_ORIGINS: ${API_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1}
     depends_on:
       timescaledb:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # Bound to LOCALHOST ONLY. The frontend container proxies /api and /ws to
+      # "backend:8000" over the internal network, so this never needs to be public.
+      # Published externally it let anyone read every endpoint and hammer
+      # /api/auth/login, completely bypassing the dashboard password gate.
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
     command: >
       sh -c "alembic upgrade head &&
