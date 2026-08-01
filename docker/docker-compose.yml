@@ -53,7 +53,12 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      # Where the SPA is published on the host. Default is the public :80 for a
+      # standalone box. A host already running its own reverse proxy on 80/443 must
+      # NOT also bind :80 here — set FRONTEND_BIND=127.0.0.1:8080 in .env instead.
+      # Configurable on purpose: editing this file on a server makes every future
+      # `git pull` abort with "your local changes would be overwritten".
+      - "${FRONTEND_BIND:-0.0.0.0:80}:80"
     restart: unless-stopped
 
 volumes:
