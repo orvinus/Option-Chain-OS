@@ -95,8 +95,25 @@ async def fetch_strike_bounds(symbol: str, expiry: date) -> tuple[int, int] | No
 # bucket, not just buckets it happened to tick in. Without it, buckets missing a
 # strike's tick (the in-progress minute, or any quiet minute on less-liquid
 # chains like SENSEX) sum only the strikes that ticked — the "total" dipped by
-# whatever fraction of the chain stayed silent. Leading buckets before a
-# strike's first tick stay NULL and are excluded from the sums.
+# whatever fraction of the chain stayed silent.
+#
+# The strike SET must also stay constant across buckets. Leading buckets (before a
+# strike's first tick) used to be dropped, so a strike that started ticking mid-session
+# ENTERED the sum partway through and its whole OI appeared as a step up — which the
+# client's change-since-open then reported as a large fake buildup. Seeding those
+# leading buckets with the strike's first observed OI keeps membership constant, so a
+# late-arriving strike contributes 0 *change* instead of its entire OI.
+_MAX_TS_IN_WINDOW_SQL = text(
+    """
+    SELECT MAX(ts) FROM option_oi_snapshots
+    WHERE symbol = :symbol
+      AND expiry = :expiry
+      AND strike BETWEEN :strike_min AND :strike_max
+      AND ts >= :from_ts
+      AND ts <= :to_ts
+    """
+)
+
 _TIMESERIES_SQL = text(
     """
     WITH per_strike AS (
@@ -112,15 +129,28 @@ _TIMESERIES_SQL = text(
           AND ts >= :from_ts
           AND ts <= :to_ts
         GROUP BY 1, 2, 3
+    ),
+    -- First OI each strike is ever observed with inside the window. Used to seed its
+    -- LEADING buckets (before its first tick), which locf cannot fill because there is
+    -- nothing earlier to carry forward.
+    first_seen AS (
+        SELECT
+            strike,
+            option_type,
+            (array_agg(oi ORDER BY bucket) FILTER (WHERE oi IS NOT NULL))[1] AS oi0
+        FROM per_strike
+        GROUP BY strike, option_type
     )
     SELECT
-        bucket,
-        COALESCE(SUM(oi) FILTER (WHERE option_type = 'CE'), 0) AS total_call_oi,
-        COALESCE(SUM(oi) FILTER (WHERE option_type = 'PE'), 0) AS total_put_oi
-    FROM per_strike
-    WHERE oi IS NOT NULL
-    GROUP BY bucket
-    ORDER BY bucket
+        p.bucket,
+        COALESCE(SUM(COALESCE(p.oi, f.oi0)) FILTER (WHERE p.option_type = 'CE'), 0) AS total_call_oi,
+        COALESCE(SUM(COALESCE(p.oi, f.oi0)) FILTER (WHERE p.option_type = 'PE'), 0) AS total_put_oi
+    FROM per_strike p
+    JOIN first_seen f
+      ON f.strike = p.strike AND f.option_type = p.option_type
+    WHERE COALESCE(p.oi, f.oi0) IS NOT NULL
+    GROUP BY p.bucket
+    ORDER BY p.bucket
     """
 )
 
@@ -158,6 +188,29 @@ async def fetch_oi_timeseries(
 
         from_utc = from_ts.astimezone(timezone.utc)
         to_utc = to_ts.astimezone(timezone.utc)
+
+        # Clamp the window end to the last tick that actually exists inside it.
+        # gapfill+locf happily manufacture buckets all the way to :to_ts, carrying the
+        # last known OI forward — so a feed outage (or a client asking for the full
+        # session while data stopped at 11:40) rendered as a complete, flat, healthy
+        # session instead of a series that visibly stops.
+        real_end = (
+            await s.execute(
+                _MAX_TS_IN_WINDOW_SQL,
+                {
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "strike_min": strike_min,
+                    "strike_max": strike_max,
+                    "from_ts": from_utc,
+                    "to_ts": to_utc,
+                },
+            )
+        ).scalar()
+        if real_end is not None:
+            if getattr(real_end, "tzinfo", None) is None:
+                real_end = real_end.replace(tzinfo=timezone.utc)
+            to_utc = min(to_utc, real_end.astimezone(timezone.utc))
 
         rows = (
             await s.execute(

@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..runtime import get_runtime
 
 log = get_logger("expiry_utils")
@@ -33,13 +34,21 @@ async def resolve_expiry(s: str | None, symbol: str | None = None) -> date:
         return rt.expiries[0]
 
     # DB fallback — works even when the runtime cache is still empty.
+    # Prefer the nearest expiry that has NOT yet settled: a bare MIN(expiry) returns the
+    # OLDEST expiry ever stored, so a symbol with history would default to a long-dead
+    # contract and still render a full, plausible-looking chain (with fabricated IV).
+    # Fall back to the most recent stored expiry only when nothing current exists.
     try:
         async with AsyncSessionLocal() as sess:
             row = await sess.execute(
                 text(
-                    "SELECT MIN(expiry) FROM option_oi_snapshots WHERE symbol = :sym"
+                    "SELECT COALESCE("
+                    "  (SELECT MIN(expiry) FROM option_oi_snapshots"
+                    "     WHERE symbol = :sym AND expiry >= :today),"
+                    "  (SELECT MAX(expiry) FROM option_oi_snapshots WHERE symbol = :sym)"
+                    ")"
                 ),
-                {"sym": sym},
+                {"sym": sym, "today": now_ist().date()},
             )
             val = row.scalar()
         if val:

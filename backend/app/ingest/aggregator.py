@@ -67,29 +67,59 @@ class MinuteAggregator:
         self._task = asyncio.create_task(self._run(), name="aggregator")
 
     async def stop(self) -> None:
+        """Stop the loop, giving it a chance to persist what it is holding.
+
+        Cancelling the task outright (the previous behaviour) killed it inside its
+        `await`, so the "final flush on shutdown" at the end of ``_run`` was
+        unreachable and the in-progress bucket was silently dropped on EVERY restart.
+        """
         self._stopping.set()
         if self._task:
-            self._task.cancel()
             try:
-                await self._task
+                await asyncio.wait_for(
+                    self._task, timeout=self._bucket.total_seconds() + 5.0
+                )
+            except asyncio.TimeoutError:
+                log.warning("aggregator.stop.timeout_cancelling")
+                self._task.cancel()
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
             except (asyncio.CancelledError, Exception):
                 pass
 
     async def _run(self) -> None:
         log.info("aggregator.started", bucket=settings.persist_bucket)
-        last_check = datetime.now(timezone.utc)
+        last_bucket = _floor_to_bucket(datetime.now(timezone.utc), self._bucket)
         while not self._stopping.is_set():
-            timeout = max(0.5, self._bucket.total_seconds() / 4)
+            # Poll often enough to notice a bucket boundary promptly; the wait is
+            # cheap (it is just the queue read).
+            timeout = max(0.5, min(5.0, self._bucket.total_seconds() / 4))
             try:
                 tick = await asyncio.wait_for(self._queue.get(), timeout=timeout)
                 self._absorb(tick)
             except asyncio.TimeoutError:
                 pass
+            # Flush when the clock CROSSES a bucket boundary, not after "one bucket of
+            # elapsed time". The old elapsed-time rule drifted: a bucket that closed at
+            # T could sit unwritten until the next check, so rows routinely landed
+            # 60-120s late and the dashboard lagged the market by up to two minutes.
             now = datetime.now(timezone.utc)
-            if (now - last_check).total_seconds() >= self._bucket.total_seconds():
+            cur_bucket = _floor_to_bucket(now, self._bucket)
+            if cur_bucket != last_bucket:
                 await self._flush_closed(now)
-                last_check = now
-        # Final flush on shutdown
+                last_bucket = cur_bucket
+        # Graceful shutdown: absorb whatever is still queued, then persist everything
+        # including the in-progress bucket.
+        drained = 0
+        while True:
+            try:
+                self._absorb(self._queue.get_nowait())
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        log.info("aggregator.stopping.final_flush", drained=drained, open_buckets=len(self._open_buckets))
         await self._flush_closed(datetime.now(timezone.utc), force_all=True)
 
     def _absorb(self, tick: Tick) -> None:
@@ -141,9 +171,11 @@ class MinuteAggregator:
                              :oi, :ltp, :volume, :underlying)
                         ON CONFLICT (ts, token) DO UPDATE SET
                             oi = EXCLUDED.oi,
-                            ltp = EXCLUDED.ltp,
-                            volume = EXCLUDED.volume,
-                            underlying = EXCLUDED.underlying
+                            -- COALESCE so a later "price unknown" (NULL) tick can never
+                            -- erase a price we already knew for this bucket.
+                            ltp = COALESCE(EXCLUDED.ltp, option_oi_snapshots.ltp),
+                            volume = GREATEST(EXCLUDED.volume, option_oi_snapshots.volume),
+                            underlying = COALESCE(EXCLUDED.underlying, option_oi_snapshots.underlying)
                         """
                     ),
                     rows,

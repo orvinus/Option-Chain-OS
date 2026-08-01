@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 
 from cachetools import TTLCache
@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from ..core.config import settings
 from ..core.db import AsyncSessionLocal
-from ..core.time_utils import IST, market_open_today, parse_timeframe
+from ..core.time_utils import IST, market_open_today, parse_timeframe, session_floor_for
 from ..market.symbols import get_registry
 from .greeks import calc_greeks, synthetic_future
 from .iv_calculator import calc_iv
@@ -19,14 +19,31 @@ from .iv_calculator import calc_iv
 CACHE_TTL_SECONDS = 30
 
 
-def _years_to_expiry(expiry: date, ref_utc: datetime) -> float:
-    """Fraction of a year until expiry (calendar-based, floored at ~1 hour)."""
-    ref_local = ref_utc.astimezone(IST).date()
-    days = (expiry - ref_local).days
-    # Include expiry day as partial year minimum
-    d = max(days, 0)
-    frac = max(d / 365.25, 1.0 / (365.25 * 24))  # at least ~1 hour as year fraction
-    return frac
+# NSE/BSE F&O contracts settle at 15:30 IST on the expiry date.
+EXPIRY_SETTLE_TIME = time(15, 30)
+YEAR_SECONDS = 365.25 * 24 * 3600
+# Numerical floor (one minute) so the final seconds before settlement cannot blow up
+# the Black-Scholes math. Deliberately tiny — it must never distort a real T.
+MIN_T_YEARS = 60.0 / YEAR_SECONDS
+
+
+def _years_to_expiry(expiry: date, ref_utc: datetime) -> float | None:
+    """Fraction of a year until the expiry SETTLEMENT INSTANT (15:30 IST).
+
+    Returns ``None`` once the contract has settled, so callers emit a null IV/greek
+    rather than a fabricated one.
+
+    Previously this was derived from the calendar DATE alone and floored at ~1 hour,
+    so the ENTIRE expiry-day session solved against T ~= 1h: 09:15 and 15:25 got the
+    same T. Because an ATM premium ~ 0.4*S*sigma*sqrt(T), a T that is ~6x too small
+    forces the solved sigma ~2.5x too high (and overstates theta ~6x). It also masked
+    an already-expired expiry as "1 hour to go" instead of reporting no time value.
+    """
+    settle = IST.localize(datetime.combine(expiry, EXPIRY_SETTLE_TIME))
+    secs = (settle - ref_utc.astimezone(IST)).total_seconds()
+    if secs <= 0:
+        return None
+    return max(secs / YEAR_SECONDS, MIN_T_YEARS)
 
 
 def _classify_trend(oi_chg: int, ltp_chg: float | None) -> str:
@@ -217,7 +234,7 @@ class OptionChainFullEngine:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
         anchor = anchor_from_db or now_utc
-        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        session_floor = session_floor_for(anchor).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
             then_sql = _SNAPSHOT_AT_OR_AFTER_SQL
@@ -265,12 +282,20 @@ class OptionChainFullEngine:
         strikes = sorted({k[0] for k in now_map.keys()})
         rows: list[OptionChainFullRow] = []
         max_ts: Optional[datetime] = None
+        # Spot must come from the FRESHEST row, not the first one in strike order.
+        # now_rows is ordered by strike, so the old "first non-null underlying" picked
+        # the LOWEST strike — typically a quiet deep-ITM contract whose locf-carried
+        # underlying can be minutes stale, and that stale S then priced the whole chain.
         spot: Optional[float] = None
-        for r in now_rows:
-            if r.get("underlying") is not None:
-                spot = float(r["underlying"])
-                break
+        _spot_row = max(
+            (r for r in now_rows if r.get("underlying") is not None),
+            key=lambda r: r["ts"],
+            default=None,
+        )
+        if _spot_row is not None:
+            spot = float(_spot_row["underlying"])
 
+        # None once the contract has settled -> IV/greeks are emitted as null.
         T_year = _years_to_expiry(expiry, now_utc)
         # Commodity options are options-on-FUTURES: approximate Black-76 by using a
         # zero cost-of-carry (r=0) on the forward, since iv_spot is the near-future

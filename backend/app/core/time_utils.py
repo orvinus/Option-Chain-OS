@@ -24,6 +24,22 @@ def market_close_today(ts: datetime | None = None) -> datetime:
     return IST.localize(datetime.combine(ts.date(), MARKET_CLOSE))
 
 
+def session_floor_for(ts: datetime) -> datetime:
+    """Most recent session open at or before *ts*.
+
+    ``market_open_today(ts)`` returns 09:15 on *ts*'s own calendar date, which is in
+    the FUTURE whenever *ts* falls between midnight and 09:15 IST. Used as a query
+    floor (``WHERE ts >= floor``) that silently matched nothing, so every panel went
+    blank for any data anchored in those hours — e.g. rows written overnight by the
+    poller, or a session viewed just after midnight. Roll back a day in that case.
+    """
+    ts_ist = ts.astimezone(IST)
+    floor = market_open_today(ts_ist)
+    if floor > ts_ist:
+        floor = market_open_today(ts_ist - timedelta(days=1))
+    return floor
+
+
 def is_nse_regular_session_open(ts: datetime | None = None) -> bool:
     """Weekday NSE cash/F&O regular session 09:15–15:30 IST (holidays not checked)."""
     ts_ist = (ts or now_ist()).astimezone(IST)

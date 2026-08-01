@@ -52,7 +52,7 @@ log = get_logger("main")
 STARTUP_SMARTAPI_LOGIN_TIMEOUT_S = 30.0
 
 
-async def _initial_spot() -> float:
+async def _initial_spot() -> float | None:
     """Fetch a starting spot for the active symbol via an XTS REST quote.
 
     Required because we need the spot to resolve the strike window *before* the
@@ -91,13 +91,25 @@ async def _initial_spot() -> float:
     if db_spot:
         log.info("initial_spot.db_fallback", symbol=rt.active_symbol, spot=db_spot)
         return db_spot
-    return 24000.0
+    # Last-resort constant. It is a NIFTY-level number, so applying it to any other
+    # symbol (SENSEX ~80k, a stock ~500, an MCX future) would centre the strike window
+    # on a price that instrument never trades at and resolve a garbage/empty universe.
+    # Only use it for NIFTY; otherwise report "no spot" and let the caller retry.
+    if rt.active_symbol == "NIFTY":
+        return 24000.0
+    log.warning("initial_spot.unresolved", symbol=rt.active_symbol)
+    return None
 
 
-async def _resubscribe_provider() -> tuple[list, float]:
+async def _resubscribe_provider() -> tuple[list, float | None]:
     """Resolve (tokens, spot) for the WS client to subscribe."""
     rt = get_runtime()
     spot = rt.latest_spot or await _initial_spot()
+    if spot is None:
+        # No trustworthy spot for this symbol yet — subscribing a window centred on a
+        # guess would pull the wrong strikes. Return empty so the caller retries.
+        log.warning("resubscribe.no_spot", symbol=rt.active_symbol)
+        return [], None
     tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
     if not tokens:
         # rt.latest_spot can belong to the PREVIOUS symbol after a failed

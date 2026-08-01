@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 import httpx
@@ -43,6 +43,11 @@ from .symbol_controller import _is_commodity, _resolve_spot_token, _spot_segment
 from .types import Tick
 
 log = get_logger("universe_poller")
+
+# Longest a previously-seen LTP may be re-stamped onto a new row when this sweep's
+# touchline data is missing. Past this the price is written as NULL ("unknown")
+# instead of being presented as a current quote.
+_LTP_CARRY_MAX = timedelta(minutes=5)
 
 # Per-tier delay before the first sweep, so the three tiers don't all fire on the
 # same second and burst the broker at startup.
@@ -71,7 +76,14 @@ class UniversePoller:
         self._client: httpx.AsyncClient | None = None
         self._sem = asyncio.Semaphore(max(1, settings.poller_max_concurrency))
         # Last-known LTP per token, to carry forward across a missed touchline chunk.
-        self._last_ltp: dict[str, float] = {}
+        # token -> (last good price, when it was observed). The timestamp bounds the
+        # carry-forward: an unbounded carry re-stamped a price from an arbitrarily
+        # earlier sweep (or a previous session) onto a brand-new minute row, which then
+        # looked like a fresh quote.
+        self._last_ltp: dict[str, tuple[float, datetime]] = {}
+        # Cumulative volume never decreases within a session, so the last known value
+        # is a safe floor when a sweep's touchline chunk is missing.
+        self._last_volume: dict[str, int] = {}
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -220,14 +232,24 @@ class UniversePoller:
                 ltp, vol = xts_client.quote_ltp_volume(ltp_q.get(iid, {}))
                 # Carry forward the last known LTP if this sweep's touchline chunk
                 # missed this instrument (a transient 1501 failure while 1510 has OI),
-                # so we never stamp a false ltp=0 over a strike with valid OI. Skip
-                # only if we have never seen a price for it.
+                # so we never stamp a false ltp=0 over a strike with valid OI.
+                # BOUNDED: only reuse a recent, same-session price. Beyond that we
+                # persist NULL ("price unknown") rather than dressing an old price as
+                # current — and we still write the row, because dropping it would
+                # silently remove that strike's real OI from every total.
                 if ltp is None:
-                    ltp = self._last_ltp.get(tok.token)
-                    if ltp is None:
-                        continue
+                    prev = self._last_ltp.get(tok.token)
+                    if prev is not None and (now - prev[1]) <= _LTP_CARRY_MAX:
+                        ltp = prev[0]
+                    else:
+                        ltp = None
                 else:
-                    self._last_ltp[tok.token] = float(ltp)
+                    self._last_ltp[tok.token] = (float(ltp), now)
+                if vol is None:
+                    vol = self._last_volume.get(tok.token, 0)
+                else:
+                    vol = max(int(vol), self._last_volume.get(tok.token, 0))
+                self._last_volume[tok.token] = int(vol)
                 tick = Tick(
                     ts=now,
                     token=tok.token,
@@ -235,7 +257,7 @@ class UniversePoller:
                     expiry=tok.expiry,
                     strike=tok.strike,
                     option_type=tok.option_type,
-                    ltp=float(ltp),
+                    ltp=float(ltp) if ltp is not None else None,
                     oi=int(oi),
                     volume=int(vol or 0),
                     underlying=float(spot),
