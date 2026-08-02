@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { SymbolSelect } from "../components/SymbolSelect";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import { useAvailableDates } from "../hooks/useAvailableDates";
@@ -22,7 +23,7 @@ const TF_LABEL: Record<string, string> = {
 
 export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    authenticated, dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError, fnoEligible, symbolDisplay,
     atmWindow, setAtmWindow,
   } = mc;
@@ -32,7 +33,7 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
 
   // A past date reads the grid "as of" that session's close (one fetch); today/null stays live.
@@ -49,11 +50,12 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
     // footer label and the Charts/Ratio/OI-Change windows. Sentinels pass
     // through: 0 → ATM only, <0 → full chain.
     atmWindow: effectiveAtmWindow(atmWindow),
-    enabled: authenticated && fnoEligible && !!expiry,
+    enabled: dataReady && fnoEligible && !!expiry,
   });
 
   return (
     <div className="min-h-screen w-full max-w-[1500px] mx-auto px-4 md:px-6 py-3">
+      {!authenticated && <FeedOfflineBanner />}
       <div className="panel px-4 py-3 flex flex-wrap items-center gap-3 mb-4">
         <SymbolSelect
           groups={symbolGroups}

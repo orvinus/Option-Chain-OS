@@ -4,6 +4,7 @@ import { ChartIntervalBar } from "../components/ChartIntervalBar";
 import { ConnectBanner } from "../components/ConnectBanner";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { OICandleChart } from "../components/OICandleChart";
 import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
@@ -20,7 +21,7 @@ const ATM_MAX_WINDOW = 50;
 
 export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, authChecked, health, handleAuthenticated,
+    authenticated, dataReady, authChecked, health, handleAuthenticated,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -33,7 +34,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
 
   // A past date is read as a fixed full-session window; today/null stays live.
@@ -47,7 +48,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
     symbol: historical && fnoEligible ? symbol : null,
     expiry: historical ? expiry : null,
     asOf: toTs,
-    enabled: historical && authenticated && fnoEligible && !!expiry,
+    enabled: historical && dataReady && fnoEligible && !!expiry,
   });
 
   // Resolve the ATM ± N strike window from the spot + the symbol's strike step
@@ -136,10 +137,12 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
       />
 
       <main className="flex flex-col gap-4">
-        {!authenticated ? (
+        {/* Gate on OUR backend, not the broker — stored candles need no live session. */}
+        {!dataReady ? (
           <ConnectBanner onAuthenticated={handleAuthenticated} />
         ) : (
           <>
+            {!authenticated && <FeedOfflineBanner />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

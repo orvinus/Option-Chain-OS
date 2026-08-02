@@ -11,7 +11,9 @@ services:
       # Bound to LOCALHOST ONLY. The backend reaches the DB over the internal compose
       # network (host "timescaledb"), so nothing needs this published externally.
       # Publishing it as "5432:5432" exposed the database to the whole internet.
-      - "127.0.0.1:5432:5432"
+      # Host port is configurable: a dev PC with its own PostgreSQL already owns 5432,
+      # so set e.g. DB_BIND=127.0.0.1:5434 in .env there. Keep the 127.0.0.1 prefix.
+      - "${DB_BIND:-127.0.0.1:5432}:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -40,7 +42,8 @@ services:
       # "backend:8000" over the internal network, so this never needs to be public.
       # Published externally it let anyone read every endpoint and hammer
       # /api/auth/login, completely bypassing the dashboard password gate.
-      - "127.0.0.1:8000:8000"
+      # Host port configurable for the same reason as DB_BIND. Keep 127.0.0.1.
+      - "${API_BIND:-127.0.0.1:8000}:8000"
     restart: unless-stopped
     command: >
       sh -c "alembic upgrade head &&

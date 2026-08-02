@@ -25,7 +25,9 @@ export default function App() {
 
   return (
     <>
-      {mc.authenticated && (
+      {/* Tabs available whenever the BACKEND is up — a broker outage must not hide
+          the historical views behind a "connecting" screen. */}
+      {mc.dataReady && (
         <nav className="w-full max-w-[1500px] mx-auto px-4 md:px-6 pt-3">
           <div className="flex items-center gap-2">
             {TABS.map((t) => (

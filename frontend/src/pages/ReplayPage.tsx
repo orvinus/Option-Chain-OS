@@ -37,7 +37,7 @@ const fmtGreek = (v: number | null | undefined) => (v == null ? "—" : v.toFixe
 
 export function ReplayPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError, fnoEligible, symbolDisplay, activeEntry,
     atmWindow, setAtmWindow,
   } = mc;
@@ -52,7 +52,7 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
   const date = selectedDate ?? avail.latest ?? todayIstDate(health);
 
@@ -65,7 +65,7 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
     startTs,
     endTs,
     step,
-    enabled: authenticated && fnoEligible && !!expiry && !!date,
+    enabled: dataReady && fnoEligible && !!expiry && !!date,
     withGreeks: true,
   });
 
@@ -134,7 +134,7 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
     expiry,
     asOf: mtfAsOf,
     atmWindow: effectiveAtmWindow(atmWindow),
-    enabled: authenticated && fnoEligible && !!expiry && mtfAsOf != null,
+    enabled: dataReady && fnoEligible && !!expiry && mtfAsOf != null,
   });
   const gridSpot = mtf.data?.spot ?? current?.spot ?? null;
   const gridAtm = mtf.data?.atm_strike ?? current?.atm ?? null;

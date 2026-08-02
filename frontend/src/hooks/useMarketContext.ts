@@ -28,7 +28,14 @@ function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry
  * selection (and a single health poll) is shared across tab switches.
  */
 export interface MarketContextValue {
+  /** True when the BROKER market-data session is live. Use this only for live-feed
+   *  concerns (spot ticks, "feed offline" notices) — never to gate reading data. */
   authenticated: boolean;
+  /** True when our own backend answered /api/health, regardless of broker state.
+   *  Every read endpoint serves stored history without a broker session, so this is
+   *  what data loading should be gated on. A broker outage must not hide months of
+   *  collected data. */
+  dataReady: boolean;
   authChecked: boolean;
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
@@ -84,6 +91,7 @@ export function useMarketContext(): MarketContextValue {
   const [atmWindow, setAtmWindow] = useState<number>(5);
 
   const [authenticated, setAuthenticated] = useState(false);
+  const [dataReady, setDataReady] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -102,13 +110,18 @@ export function useMarketContext(): MarketContextValue {
         if (!cancelled) {
           setHealth(h);
           setAuthenticated(h.authenticated);
+          // Our backend answered — stored data is readable even if the broker is not.
+          setDataReady(true);
           setAuthChecked(true);
           // NOTE: intentionally do NOT adopt h.active_symbol — the main dashboard is
           // pinned to NIFTY and must not follow the global active symbol (which the
           // /hidden dashboard may switch to a stock/commodity).
         }
       } catch {
-        if (!cancelled) setAuthChecked(true);
+        if (!cancelled) {
+          setDataReady(false);
+          setAuthChecked(true);
+        }
       }
     };
     void check();
@@ -149,10 +162,10 @@ export function useMarketContext(): MarketContextValue {
     return () => { cancelled = true; clearInterval(id); };
   }, [authChecked, authenticated, health?.run_mode]);
 
-  // Load the symbol registry once authenticated; retry every 3s on transient failure
-  // or when groups is empty (e.g. backend came up after frontend).
+  // Load the symbol registry once the BACKEND is reachable (not the broker); retry
+  // every 3s on transient failure or when groups is empty.
   useEffect(() => {
-    if (!authenticated) return;
+    if (!dataReady) return;
     let cancelled = false;
     const load = () => {
       api.symbols().then((res) => {
@@ -174,11 +187,11 @@ export function useMarketContext(): MarketContextValue {
       });
     }, 3_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated]);
+  }, [dataReady]);
 
   // Load expiries for the current symbol when it changes (or auth flips on).
   useEffect(() => {
-    if (!authenticated) return;
+    if (!dataReady) return;
     if (!fnoEligible) {
       setExpiries([]);
       setExpiry(null);
@@ -201,7 +214,7 @@ export function useMarketContext(): MarketContextValue {
     void tick();
     const id = setInterval(() => void tick(), EXPIRY_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated, symbol, fnoEligible]);
+  }, [dataReady, symbol, fnoEligible]);
 
   // Perform the actual symbol switch (POST /api/active-symbol + local state).
   const doSwitch = useCallback(async (next: string) => {
@@ -268,7 +281,7 @@ export function useMarketContext(): MarketContextValue {
       : null;
 
   return {
-    authenticated, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
+    authenticated, dataReady, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,

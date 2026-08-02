@@ -188,7 +188,26 @@ async def _fixed_credential_gate(
     sess = get_session_manager()
     if sess.authenticated:
         return LoginResponse(status="ok", message="Already connected.", authenticated=True)
-    return await login(LoginRequest())
+
+    # (d) The broker session is a BONUS, not a precondition. The user's dashboard
+    #     credentials were already verified in (b), and every read endpoint serves
+    #     stored history without a broker session. Previously a broker outage
+    #     propagated its 401 straight out of this gate, so a correct password was
+    #     rejected and months of collected data became unreachable — exactly when
+    #     you most want to look at history. Degrade instead: unlock the UI and
+    #     report authenticated=False so the dashboard can flag the feed as offline.
+    try:
+        return await login(LoginRequest())
+    except HTTPException as e:
+        log.warning("auth.gate.broker_unavailable", gate=gate_label, detail=str(e.detail))
+        return LoginResponse(
+            status="ok",
+            message=(
+                "Signed in. The broker feed is unavailable right now, so this is "
+                f"stored historical data only ({e.detail})"
+            ),
+            authenticated=False,
+        )
 
 
 @router.post("/hidden-login", response_model=LoginResponse)
