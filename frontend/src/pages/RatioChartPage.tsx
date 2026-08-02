@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { SymbolSelect } from "../components/SymbolSelect";
 import {
   TimeSeriesChart,
@@ -28,7 +29,7 @@ const ATM_MAX_WINDOW = 50;
 
 export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    authenticated, dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError, fnoEligible, symbolDisplay,
     atmWindow, setAtmWindow, activeEntry,
   } = mc;
@@ -46,7 +47,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
 
   // A past date is read as a fixed full-session window (one fetch); today/null stays live.
@@ -60,7 +61,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
     symbol: fnoEligible ? symbol : null,
     expiry,
     asOf: historical ? toTs : undefined,
-    enabled: authenticated && fnoEligible && !!expiry,
+    enabled: dataReady && fnoEligible && !!expiry,
   });
   const atm = mtf.data?.atm_strike ?? null;
   const { strikeMin, strikeMax } = useMemo(() => {
@@ -77,7 +78,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
     toTs,
     strikeMin,
     strikeMax,
-    enabled: authenticated && fnoEligible && !!expiry,
+    enabled: dataReady && fnoEligible && !!expiry,
   });
 
   // Build the two ratio lines plus a per-time position lookup for the tooltip.
@@ -127,6 +128,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
 
   return (
     <div className="min-h-screen w-full max-w-[1500px] mx-auto px-4 md:px-6 py-3">
+      {!authenticated && <FeedOfflineBanner />}
       <div className="panel px-4 py-3 flex flex-wrap items-center gap-3 mb-4">
         <SymbolSelect
           groups={symbolGroups}
