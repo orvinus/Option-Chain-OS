@@ -4,7 +4,14 @@ Strategy: ONE TimescaleDB ``time_bucket_gapfill + locf`` query builds the "book
 as of each bucket, carried forward" for every frame at once (replacing the old
 one-query-per-frame loop, which issued up to 5000 sequential round-trips). Frames
 are assembled in Python and enriched with totals, ATM, ratio/PCR and change-since-
-window-start — everything the frontend replay player and CSV export need.
+session-open — everything the frontend replay player and CSV export need.
+
+A frame labelled ``T`` contains ONLY observations with ``ts <= T``. That is not a
+detail: ``time_bucket`` labels a bucket with its START, so the bucket labelled
+11:00 holds the last tick in [11:00, 11:01) and the player used to display an
+11:00 clock over data observed up to 11:00:59 — one step of look-ahead into the
+future, in the one tool whose whole job is replaying a session honestly. Labels
+are therefore emitted as ``bucket + step`` (see ``fetch_replay``).
 """
 from __future__ import annotations
 
@@ -15,9 +22,9 @@ from sqlalchemy import text
 
 from ..core.config import settings
 from ..core.db import AsyncSessionLocal
-from ..core.time_utils import IST
+from ..core.time_utils import IST, session_floor_for
 from .greeks_history import fetch_greeks_series
-from .oi_change import _atm_strike, _safe_ratio
+from .oi_change import _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL, _atm_strike, _safe_ratio
 
 
 @dataclass
@@ -99,8 +106,15 @@ async def fetch_replay(
 
     ``summary=True`` omits the per-strike ``rows`` (totals/spot/atm/ratio/pcr only)
     for a lean scrubber payload. ``with_greeks=True`` joins persisted greeks/IV per
-    strike (from ``greeks_snapshots``; null until the populator has run). Changes
-    are computed vs the first frame in the window (change since replay start).
+    strike (from ``greeks_snapshots``; null until the populator has run).
+
+    Changes are computed vs the session-open baseline, the same anchor every other
+    tab uses, so a replay frame's "change today" equals what the OI Change and
+    Multi-TF tabs report for the same instant.
+
+    Frames are labelled with the END of their bucket (``bucket + step``), so a frame
+    labelled ``T`` never contains an observation later than ``T``. The first label is
+    therefore ``start + step`` and the last is ``end + step``.
     """
     symbol = (symbol or settings.underlying_symbol).upper()
     if start.tzinfo is None:
@@ -116,6 +130,24 @@ async def fetch_replay(
             await s.execute(
                 _REPLAY_SERIES_SQL,
                 {"step_iv": step_iv, "symbol": symbol, "expiry": expiry, "start": start, "end": end},
+            )
+        ).mappings().all()
+        # Session-open baseline — ONE query for the whole replay, not one per frame.
+        # Every other tab anchors "change today" on the FIRST tick at or after the
+        # session open. Deriving it from the first gapfill bucket instead took that
+        # bucket's LAST tick, which read ~3% low on put OI (puts ramp hardest in the
+        # opening minute) and made replay disagree with the Multi-TF tab. Bounded by
+        # `end` so a strike with no data this session cannot borrow a later day's
+        # first row as its baseline.
+        base_rows = (
+            await s.execute(
+                _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL,
+                {
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "cutoff": session_floor_for(start),
+                    "upper": end,
+                },
             )
         ).mappings().all()
 
@@ -148,15 +180,21 @@ async def fetch_replay(
                 spot_by_bucket[b] = float(u)
                 spot_ts_by_bucket[b] = lts
 
-    # Per-strike baseline for change-since-start. A strike absent from the FIRST frame
-    # (it entered the window later via ATM drift) previously fell back to 0, so its
-    # entire open interest was reported as "change". Use the first book each strike is
-    # actually seen with, mirroring the per-strike baseline clamp in OIChangeEngine.
+    # Per-strike baseline: each strike's FIRST tick at or after the session open. The
+    # query above already returns exactly one row per (strike, option_type), so a
+    # strike that entered mid-session (ATM drift) is baselined on its own first tick
+    # rather than on 0 — its whole open interest is not reported as "change".
     base_book: dict[int, dict[str, int]] = {}
+    for r in base_rows:
+        base_book.setdefault(r["strike"], {})[r["option_type"]] = int(r["oi"])
+    # Defensive: a leg with no session-open row at all would baseline at 0 and report
+    # its ENTIRE open interest as "change". Fall back to the first book it is actually
+    # seen with, so an unexpected gap reads as no change rather than a fake spike.
     for b in buckets:
         for strike, v in by_bucket[b].items():
-            if strike not in base_book:
-                base_book[strike] = dict(v)
+            slot = base_book.setdefault(strike, {})
+            for leg, oi in v.items():
+                slot.setdefault(leg, oi)
 
     frames: list[ReplayFrame] = []
     for b in buckets:
@@ -165,9 +203,9 @@ async def fetch_replay(
         total_ce = sum(v.get("CE", 0) for v in book.values())
         total_pe = sum(v.get("PE", 0) for v in book.values())
         # Baseline totals cover exactly the strikes PRESENT in this frame, using each
-        # one's first-seen book. This keeps the frame total change equal to the sum of
-        # the per-strike changes (a global baseline over all strikes would make early
-        # frames negative once a later strike joined).
+        # one's session-open book. This keeps the frame total change equal to the sum
+        # of the per-strike changes (a global baseline over all strikes would make
+        # early frames negative once a later strike joined).
         base_ce = sum(base_book.get(k, {}).get("CE", 0) for k in book)
         base_pe = sum(base_book.get(k, {}).get("PE", 0) for k in book)
         replay_rows: list[ReplayRow] = []
@@ -199,7 +237,10 @@ async def fetch_replay(
                 )
         frames.append(
             ReplayFrame(
-                ts=b.astimezone(IST).isoformat(),
+                # Label the frame with the bucket's END: `time_bucket` labels by START,
+                # so `b` covers [b, b+step) and labelling with `b` would advertise a
+                # clock the data is up to one step ahead of. See the module docstring.
+                ts=(b + step).astimezone(IST).isoformat(),
                 spot=spot,
                 atm=_atm_strike(symbol, spot),
                 total_call_oi=total_ce,
