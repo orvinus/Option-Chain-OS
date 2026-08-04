@@ -22,6 +22,7 @@ import httpx
 from app.auth.smartapi_session import LOGIN_DEBOUNCE_S, MarketDataSession
 from app.ingest import ws_client
 from app.ingest.ws_client import (
+    AUTO_RELOGIN_ATTEMPT_DECAY_S,
     AUTO_RELOGIN_COOLDOWN_S,
     AUTO_RELOGIN_MAX_ATTEMPTS,
     OptionFeedClient,
@@ -120,6 +121,10 @@ async def test_self_heal_relogins_and_requests_reconnect() -> None:
             login_calls["n"] += 1
             return None
 
+        # Broker-truth markers used by _self_heal_auth (see F4).
+        def mark_broker_ok(self) -> None: ...
+        def mark_broker_rejected(self, reason: str = "") -> None: ...
+
     fake = FakeSession()
     orig = ws_client.get_session_manager
     ws_client.get_session_manager = lambda: fake  # type: ignore[assignment]
@@ -142,6 +147,10 @@ async def test_self_heal_respects_cooldown() -> None:
             login_calls["n"] += 1
             return None
 
+        # Broker-truth markers used by _self_heal_auth (see F4).
+        def mark_broker_ok(self) -> None: ...
+        def mark_broker_rejected(self, reason: str = "") -> None: ...
+
     orig = ws_client.get_session_manager
     ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
     try:
@@ -161,6 +170,10 @@ async def test_self_heal_gives_up_after_cap() -> None:
             login_calls["n"] += 1
             return None
 
+        # Broker-truth markers used by _self_heal_auth (see F4).
+        def mark_broker_ok(self) -> None: ...
+        def mark_broker_rejected(self, reason: str = "") -> None: ...
+
     orig = ws_client.get_session_manager
     ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
     try:
@@ -172,6 +185,47 @@ async def test_self_heal_gives_up_after_cap() -> None:
             f"self-heal must stop after {AUTO_RELOGIN_MAX_ATTEMPTS} attempts, "
             f"got {login_calls['n']} (login storm!)"
         )
+    finally:
+        ws_client.get_session_manager = orig  # type: ignore[assignment]
+
+
+async def test_self_heal_attempt_budget_re_arms_after_quiet_period() -> None:
+    """The attempt cap must NOT be a one-way latch.
+
+    Its only other reset is a fully clean subscribe, which cannot happen while auth
+    is broken — so before this, five failures disabled auto-recovery for the entire
+    process lifetime and only a manual restart brought the feed back (the
+    2026-08-03/04 production outage). After a quiet spell the budget must re-arm.
+    """
+    feed = _make_feed()
+    login_calls = {"n": 0}
+
+    class FakeSession:
+        async def login(self, force: bool = False):
+            login_calls["n"] += 1
+            return None
+
+        # Broker-truth markers used by _self_heal_auth (see F4).
+        def mark_broker_ok(self) -> None: ...
+        def mark_broker_rejected(self, reason: str = "") -> None: ...
+
+    orig = ws_client.get_session_manager
+    ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
+    try:
+        for _ in range(AUTO_RELOGIN_MAX_ATTEMPTS + 3):
+            feed._last_auto_relogin = time.time() - (AUTO_RELOGIN_COOLDOWN_S + 1)
+            await feed._self_heal_auth()
+        assert login_calls["n"] == AUTO_RELOGIN_MAX_ATTEMPTS
+        assert feed._auto_relogin_attempts == AUTO_RELOGIN_MAX_ATTEMPTS
+
+        # Now go quiet past the decay window — the next failure must try again.
+        feed._last_auto_relogin = time.time() - (AUTO_RELOGIN_ATTEMPT_DECAY_S + 1)
+        await feed._self_heal_auth()
+        assert login_calls["n"] == AUTO_RELOGIN_MAX_ATTEMPTS + 1, (
+            "self-heal must re-arm after a quiet period instead of latching off "
+            "for the life of the process"
+        )
+        assert feed._auto_relogin_attempts == 1
     finally:
         ws_client.get_session_manager = orig  # type: ignore[assignment]
 
