@@ -1,5 +1,8 @@
-/** Presentational replay transport bar (play/pause/restart/skip/jump/scrub/speed).
+/** Presentational replay transport (play/pause/restart/skip/jump/scrub/speed).
  * All state is owned by the parent; this only renders and emits callbacks.
+ *
+ * Deliberately has NO panel/background of its own — it is one row inside the
+ * page's single pinned control bar, so the parent owns the surface.
  */
 const SPEEDS = [1, 2, 5, 10, 15] as const;
 
@@ -24,7 +27,7 @@ export function ReplayController({
   const clock = currentTs ? currentTs.slice(11, 19) : "--:--:--";
 
   return (
-    <div className="panel px-4 py-3 flex flex-col gap-2">
+    <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2 flex-wrap">
         <button type="button" className="pill" onClick={onRestart} title="Restart">⏮</button>
         <button type="button" className="pill" onClick={() => onSkip(-1)} title="Step back">◀</button>
