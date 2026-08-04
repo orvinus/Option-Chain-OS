@@ -6,7 +6,12 @@ interface Props {
   onChange: (tf: Timeframe) => void;
 }
 
-const ITEMS: { tf: Timeframe; label: string }[] = [
+/** The canonical timeframe presets, in display order. Anything that shows a
+ *  timeframe — these pills, the Multi-TF grid, the Replay grid — reads this list,
+ *  so the same window is never called "1 Hr" in one place and "1 Hour" in another.
+ *  Matches `DEFAULT_TIMEFRAMES` in `backend/app/api/multi_timeframe.py`; the
+ *  sub-minute codes in the `Timeframe` union are deliberately absent (live-only). */
+export const TIMEFRAME_ITEMS: { tf: Timeframe; label: string }[] = [
   { tf: "1m", label: "1 Min" },
   { tf: "3m", label: "3 Min" },
   { tf: "5m", label: "5 Min" },
@@ -19,10 +24,15 @@ const ITEMS: { tf: Timeframe; label: string }[] = [
   { tf: "full_day", label: "Full Day" },
 ];
 
+/** Timeframe code → display label, for tables that render backend-supplied codes. */
+export const TF_LABEL: Record<string, string> = Object.fromEntries(
+  TIMEFRAME_ITEMS.map(({ tf, label }) => [tf, label]),
+);
+
 export function TimeframeBar({ value, onChange }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {ITEMS.map(({ tf, label }) => (
+      {TIMEFRAME_ITEMS.map(({ tf, label }) => (
         <button
           key={tf}
           type="button"

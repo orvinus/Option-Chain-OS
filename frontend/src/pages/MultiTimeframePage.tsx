@@ -4,6 +4,7 @@ import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
 import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { SymbolSelect } from "../components/SymbolSelect";
+import { TF_LABEL } from "../components/TimeframeBar";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
@@ -15,11 +16,6 @@ import { callPutRatio } from "../utils/ratio";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
-
-const TF_LABEL: Record<string, string> = {
-  "1m": "1 Min", "3m": "3 Min", "5m": "5 Min", "10m": "10 Min", "15m": "15 Min",
-  "30m": "30 Min", "1h": "1 Hour", "2h": "2 Hour", "3h": "3 Hour", full_day: "Full Day",
-};
 
 export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
   const {
