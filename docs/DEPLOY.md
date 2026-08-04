@@ -19,7 +19,7 @@ Free-tier hosts that **scale to zero** or sleep (e.g. idle Render free tier) are
 | `XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY` | Required for startup login. |
 | `XTS_MD_BASE_URL` | Your broker's market-data host (demo host by default). |
 
-On boot, the app **first** attempts **`try_restore_session_from_db`**: if a token row in `auth_sessions` is inside its 24h TTL, it is reused. If restore fails it **logs in fresh from `.env`**. Both are unconditional when `RUN_MODE=live` and `AUTH_MODE=totp` — there is no opt-in flag. Only if both fail does the feed wait at `ws.awaiting_dashboard_login` until you run `POST /api/auth/login`.
+On boot, the app **first** attempts **`try_restore_session_from_db`**: if a token row in `auth_sessions` is inside its 24h TTL, it is reused. If restore fails it **logs in fresh from `.env`**. Both are unconditional when `RUN_MODE=live` — there is no opt-in flag. Only if both fail does the feed wait at `ws.awaiting_dashboard_login` until you run `POST /api/auth/login`.
 
 ## Health and monitoring
 

@@ -61,8 +61,8 @@ LOGIN_DEBOUNCE_S = 20.0
 class SessionTokens:
     """Holds the XTS market-data token.
 
-    Field names are kept from the previous AngelOne integration so the
-    ``auth_sessions`` persistence and any external callers keep working:
+    The ``auth_sessions`` table columns predate this integration and are reused
+    as-is (renaming them would need a migration for no functional gain):
       * ``jwt_token``     -> the XTS market-data token
       * ``client_code``   -> the XTS userID
       * ``refresh_token`` / ``feed_token`` -> mirror the token (XTS has neither)
@@ -236,8 +236,6 @@ class MarketDataSession:
         Returns True when a non-expired token was restored. On failure clears the
         in-memory token so ``login()`` can run clean.
         """
-        if settings.auth_mode != "totp":
-            return False
         try:
             async with session_scope() as s:
                 result = await s.execute(
@@ -347,9 +345,6 @@ class MarketDataSession:
                 },
             )
 
-
-# Backwards-compatible alias (old name referenced by ``auth/__init__.py``).
-SmartApiSession = MarketDataSession
 
 _singleton: MarketDataSession | None = None
 

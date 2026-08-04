@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { ChartIntervalBar } from "../components/ChartIntervalBar";
-import { ConnectBanner } from "../components/ConnectBanner";
+import { BackendOfflineNotice } from "../components/BackendOfflineNotice";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
 import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
@@ -21,7 +21,7 @@ const ATM_MAX_WINDOW = 50;
 
 export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, dataReady, feedLive, authChecked, health, handleAuthenticated,
+    authenticated, dataReady, feedLive, authChecked, health,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -139,7 +139,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
       <main className="flex flex-col gap-4">
         {/* Gate on OUR backend, not the broker — stored candles need no live session. */}
         {!dataReady ? (
-          <ConnectBanner onAuthenticated={handleAuthenticated} />
+          <BackendOfflineNotice />
         ) : (
           <>
             {!feedLive && <FeedOfflineBanner />}

@@ -1,8 +1,8 @@
 """Symphony XTS market-data feed — async Socket.IO client with reconnect + heartbeat.
 
 The Shrilakshmi Fintech / Symphony XTS market-data stream is delivered over
-Socket.IO. Unlike AngelOne's ``SmartWebSocketV2`` (a sync, thread-based client
-whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
+Socket.IO. Unlike a sync, thread-based broker SDK whose snapquote carried LTP,
+OI and volume in a single tick, XTS:
 
 * uses ``python-socketio``'s ``AsyncClient`` — so we run directly on the event
   loop with no worker-thread bridge;
@@ -14,7 +14,7 @@ whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
   ``Tick`` shape the rest of the pipeline already expects. (Indices have no OI,
   so the index/spot instrument is subscribed to 1501 only.)
 
-XTS prices are already in rupees (no ``/100`` paise scaling that Angel needed).
+XTS prices are already in rupees (no ``/100`` paise scaling).
 
 Public surface (unchanged from the previous integration):
     feed = OptionFeedClient(queue, get_tokens, index_token=..., active_symbol=...)

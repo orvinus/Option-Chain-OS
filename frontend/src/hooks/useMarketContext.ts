@@ -138,7 +138,7 @@ export function useMarketContext(): MarketContextValue {
   }, []);
 
   // Auto-connect the broker using the appKey/secretKey in .env. The XTS market-data
-  // API authenticates with the API key alone (no MPIN/TOTP/per-user login), so there
+  // API authenticates with the appKey/secretKey alone (no per-user login), so there
   // is no manual "Connect to Broker" page — establish the session automatically and
   // retry until it succeeds.
   useEffect(() => {
@@ -153,7 +153,7 @@ export function useMarketContext(): MarketContextValue {
       if (inFlight || cancelled) return;
       inFlight = true;
       try {
-        await api.login({ mpin: "" });
+        await api.login({});
         if (!cancelled) setConnectError(null);
       } catch (e) {
         if (!cancelled) setConnectError(String(e));

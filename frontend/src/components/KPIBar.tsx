@@ -9,7 +9,7 @@ interface Props {
   data: OIChangeResponse | null;
   mode: OIMode;
   atmWindow: number;
-  /** Live spot from /api/health when the Angel feed is connected — aligns ATM with the active index/stock. */
+  /** Live spot from /api/health when the broker feed is connected — aligns ATM with the active index/stock. */
   liveSpot?: number | null;
   /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
   strikeStep?: number | null;

@@ -64,7 +64,7 @@ class InstrumentToken:
 
     @property
     def exchange_type(self) -> int:
-        # XTS ExchangeSegments enum (NOT the legacy Angel codes): NSECM=1, NSEFO=2,
+        # XTS ExchangeSegments enum: NSECM=1, NSEFO=2,
         # NSECD=3, BSECM=11, BSEFO=12, MCXFO=51. SENSEX options live on BSEFO(12);
         # MCX commodity options on MCXFO(51). "MFO" is our internal short tag.
         return {"NSE": 1, "NFO": 2, "CDS": 3, "BSE": 11, "BFO": 12, "MFO": 51}[self.exchange]

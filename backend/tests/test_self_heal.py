@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from app.auth.smartapi_session import LOGIN_DEBOUNCE_S, MarketDataSession
+from app.auth.market_session import LOGIN_DEBOUNCE_S, MarketDataSession
 from app.ingest import ws_client
 from app.ingest.ws_client import (
     AUTO_RELOGIN_ATTEMPT_DECAY_S,

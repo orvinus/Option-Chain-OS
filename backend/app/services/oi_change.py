@@ -91,7 +91,7 @@ class OIChangeResponse:
     timeframe: str
     expiry: str
     spot: float | None
-    # Latest exchange timestamp on option snapshot rows (Angel exchange_feed_time → DB ts).
+    # Latest exchange timestamp on option snapshot rows (feed exchange time → DB ts).
     # After hours this often freezes at the last trade while the pipeline keeps recomputing.
     asof: str
     # Wall-clock IST when this snapshot was computed (always moves on each REST/WS push).

@@ -112,12 +112,12 @@ async def login(body: LoginRequest) -> LoginResponse:
         try:
             # force=True: an explicit dashboard login always mints a fresh token,
             # bypassing the debounce (the user clicked because they want a new session).
-            await asyncio.wait_for(sess.login(force=True), timeout=settings.smartapi_login_timeout_s)
+            await asyncio.wait_for(sess.login(force=True), timeout=settings.xts_login_timeout_s)
         except asyncio.TimeoutError:
             raise HTTPException(
                 504,
                 "The XTS market-data gateway did not respond in time. Check your "
-                f"network and XTS_MD_BASE_URL (timeout {settings.smartapi_login_timeout_s:.0f}s).",
+                f"network and XTS_MD_BASE_URL (timeout {settings.xts_login_timeout_s:.0f}s).",
             ) from None
 
         await sess.start_refresh_loop()

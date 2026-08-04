@@ -56,7 +56,7 @@ sequenceDiagram
 
 ## Startup login (automatic)
 
-Startup auth is **unconditional** whenever `RUN_MODE=live` and `AUTH_MODE=totp`.
+Startup auth is **unconditional** whenever `RUN_MODE=live`.
 There is no opt-in flag. (`XTS_LOGIN_AT_STARTUP` was documented here for a long
 time but was never read by any code — it has been removed.)
 
@@ -70,9 +70,9 @@ time but was never read by any code — it has been removed.)
    curl -X POST http://localhost:8000/api/auth/login
    ```
 
-   (The legacy form fields `client_code` / `mpin` / `totp_code` are accepted but
-   ignored — the XTS session authenticates with the `appKey` / `secretKey` from
-   `.env`.)
+   The request body is empty — the XTS session authenticates with the `appKey` /
+   `secretKey` from `.env`. (Older clients that still post `client_code` / `mpin` /
+   `totp_code` keep working; the fields are simply ignored.)
 
 **A restored token can still be dead.** The TTL is local arithmetic; XTS also expires
 tokens daily and invalidates them whenever a newer login happens on the same appKey.
@@ -86,7 +86,7 @@ Relevant timeouts (in `.env`):
 
 | Variable                  | Default | Meaning |
 |---------------------------|---------|---------|
-| `SMARTAPI_LOGIN_TIMEOUT_S` | `45`   | Max seconds `POST /api/auth/login` waits for the XTS login. |
+| `XTS_LOGIN_TIMEOUT_S`      | `45`   | Max seconds `POST /api/auth/login` waits for the XTS login. (`SMARTAPI_LOGIN_TIMEOUT_S` still accepted.) |
 | `DB_PERSIST_TIMEOUT_S`     | `20`   | Max seconds to persist the new session row. |
 
 ## The XTS socket drops every ~83 seconds
@@ -115,6 +115,8 @@ the broker dashboard; some plans default to as few as **50**). With
 two message codes (touchline `1501` + open-interest `1510`). Ensure your appKey
 allows enough subscriptions, or lower `STRIKE_WINDOW`.
 
-> **Note:** `/api/health` reports `auth_mode: "totp"` — that string is a legacy
-> field name left over from the Angel One era. The active integration is the XTS
+> **Note:** `/api/health` no longer reports `auth_mode`. That field, and the
+> `AUTH_MODE` setting behind it, were Angel One leftovers removed on 2026-08-04
+> (its "publisher" value silently skipped session restore, login and the token
+> refresh loop). The active integration is the XTS
 > appKey/secretKey flow described here.

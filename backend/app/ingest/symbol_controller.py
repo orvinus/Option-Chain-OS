@@ -1,7 +1,7 @@
 """Active-symbol controller.
 
 Coordinates the switch of the live WebSocket subscription when the dashboard
-changes the active symbol via POST /api/active-symbol. SmartAPI caps a single
+changes the active symbol via POST /api/active-symbol. The broker caps a single
 WS connection at ~1000 tokens, so we keep exactly one underlying live at a
 time and swap subscriptions in place rather than running concurrent feeds.
 

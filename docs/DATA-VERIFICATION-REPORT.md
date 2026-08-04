@@ -99,7 +99,7 @@ curl http://localhost:8000/api/verify/nifty-cross-check
 | Total Traded Volume | **1501** (touchline) | `TotalTradedQuantity` | `option_oi_snapshots.volume` |
 | Open Interest | **1510** (OI) | `OpenInterest` | `option_oi_snapshots.oi` |
 
-XTS prices are already in **rupees** (not paise — no division needed, unlike the old Angel One integration).
+XTS prices are already in **rupees** (not paise — no division needed).
 
 #### 2B. What NSE Publishes (per option contract)
 
