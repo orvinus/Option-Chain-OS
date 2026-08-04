@@ -21,6 +21,7 @@ import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import {
   SESSION_SPAN_MIN,
   clamp,
+  sessionSpan,
   isToday,
   isoForSessionMinuteOnDate,
   maxMinForDate,
@@ -124,13 +125,13 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     if (historical) {
       // Keep the historical date; reset the window to the full session.
       setFromMin(0);
-      setToMin(SESSION_SPAN_MIN);
+      setToMin(sessionSpan(health));
       setToAtLive(false);
       return;
     }
     setRangeMode(false);
     setToAtLive(true);
-  }, [historical]);
+  }, [historical, health]);
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
     // A preset timeframe shows that timeframe live, or — when a past date is
     // selected — as of that date's close. Keep the date; just exit any custom window.
@@ -148,7 +149,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
       setToAtLive(!isPast);
       if (isPast) {
         setFromMin(0);
-        setToMin(SESSION_SPAN_MIN);
+        setToMin(sessionSpan(health));
       }
     },
     [health],
@@ -370,7 +371,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                     </>
                   ) : (
                     <>
-                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
+                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:40 PM IST</b>), brokers often expose
                       static end-of-day style OI, so intraday deltas stay flat.
                     </>
                   )}

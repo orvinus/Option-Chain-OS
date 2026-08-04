@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from cachetools import TTLCache
@@ -11,7 +11,13 @@ from sqlalchemy import text
 
 from ..core.config import settings
 from ..core.db import AsyncSessionLocal
-from ..core.time_utils import IST, market_open_today, parse_timeframe, session_floor_for
+from ..core.time_utils import (
+    IST,
+    MARKET_CLOSE,
+    market_open_today,
+    parse_timeframe,
+    session_floor_for,
+)
 from ..market.symbols import get_registry
 from .greeks import calc_greeks, synthetic_future
 from .iv_calculator import calc_iv
@@ -19,8 +25,11 @@ from .iv_calculator import calc_iv
 CACHE_TTL_SECONDS = 30
 
 
-# NSE/BSE F&O contracts settle at 15:30 IST on the expiry date.
-EXPIRY_SETTLE_TIME = time(15, 30)
+# F&O contracts settle at the regular-session CLOSE on the expiry date, so this
+# follows MARKET_CLOSE rather than repeating a literal. When the exchange moved the
+# close 15:30 -> 15:40, a hardcoded copy here would have silently under-stated T for
+# the last ten minutes of every expiry day and reported already-settled contracts.
+EXPIRY_SETTLE_TIME = MARKET_CLOSE
 YEAR_SECONDS = 365.25 * 24 * 3600
 # Numerical floor (one minute) so the final seconds before settlement cannot blow up
 # the Black-Scholes math. Deliberately tiny — it must never distort a real T.
@@ -28,7 +37,7 @@ MIN_T_YEARS = 60.0 / YEAR_SECONDS
 
 
 def _years_to_expiry(expiry: date, ref_utc: datetime) -> float | None:
-    """Fraction of a year until the expiry SETTLEMENT INSTANT (15:30 IST).
+    """Fraction of a year until the expiry SETTLEMENT INSTANT (the session close).
 
     Returns ``None`` once the contract has settled, so callers emit a null IV/greek
     rather than a fabricated one.

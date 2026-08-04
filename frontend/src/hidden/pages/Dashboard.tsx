@@ -30,10 +30,10 @@ const EXPIRY_POLL_MS = 30_000;
 const ATM_MAX_WINDOW = 50;
 
 // NSE regular session in minutes-from-midnight (IST). The custom-range slider
-// spans 09:15 → 15:30 (375 minutes).
+// spans 09:15 → 15:40 (385 minutes; the close moved from 15:30 on 2026-08-04).
 const SESSION_OPEN_MIN = 9 * 60 + 15;
-const SESSION_CLOSE_MIN = 15 * 60 + 30;
-const SESSION_SPAN_MIN = SESSION_CLOSE_MIN - SESSION_OPEN_MIN; // 375
+const SESSION_CLOSE_MIN = 15 * 60 + 40;
+const SESSION_SPAN_MIN = SESSION_CLOSE_MIN - SESSION_OPEN_MIN; // 385
 const RANGE_DEFAULT_LOOKBACK_MIN = 30;
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
@@ -574,7 +574,7 @@ export function Dashboard() {
                     </>
                   ) : (
                     <>
-                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
+                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:40 PM IST</b>), brokers often expose
                       static end-of-day style OI, so intraday deltas stay flat. Switch to <b>OI Absolute</b> tab for the
                       distribution.
                     </>

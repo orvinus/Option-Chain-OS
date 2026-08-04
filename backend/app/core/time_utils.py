@@ -1,13 +1,34 @@
-"""Time helpers (IST market clock)."""
+"""Time helpers (IST market clock).
+
+Session hours are CONFIGURABLE (``MARKET_OPEN_IST`` / ``MARKET_CLOSE_IST``) because
+the exchange has changed them before and will again — they were hardcoded in six
+places, including the expiry settlement instant that drives every IV and greek.
+"""
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 
 import pytz
 
+from .config import settings
+
 IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
+
+
+def _parse_hhmm(raw: str, fallback: time) -> time:
+    """Parse "HH:MM" from config; fall back rather than crash the whole app."""
+    try:
+        hh, mm = (int(p) for p in raw.strip().split(":", 1))
+        return time(hh, mm)
+    except (ValueError, AttributeError):
+        return fallback
+
+
+MARKET_OPEN = _parse_hhmm(settings.market_open_ist, time(9, 15))
+# 15:40 since 2026-08-04 (was 15:30). Anything deriving from the close — the session
+# floor, staleness gating, and the expiry SETTLEMENT instant used for time-to-expiry —
+# must read this, never a literal.
+MARKET_CLOSE = _parse_hhmm(settings.market_close_ist, time(15, 40))
 
 
 def now_ist() -> datetime:
@@ -41,7 +62,8 @@ def session_floor_for(ts: datetime) -> datetime:
 
 
 def is_nse_regular_session_open(ts: datetime | None = None) -> bool:
-    """Weekday NSE cash/F&O regular session 09:15–15:30 IST (holidays not checked)."""
+    """Weekday NSE cash/F&O regular session, MARKET_OPEN–MARKET_CLOSE IST
+    (configurable; holidays not checked)."""
     ts_ist = (ts or now_ist()).astimezone(IST)
     if ts_ist.weekday() >= 5:
         return False
