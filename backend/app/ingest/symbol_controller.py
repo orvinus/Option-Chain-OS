@@ -17,6 +17,7 @@ from datetime import date, datetime
 
 from ..auth import get_session_manager
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..market.scripmaster import InstrumentToken, resolve_option_universe
 from ..market.symbols import SymbolEntry, get_registry
 from ..market_data import xts_client
@@ -162,7 +163,9 @@ async def _resolve_commodity_future_token(entry: SymbolEntry) -> str | None:
     except Exception as e:
         log.warning("symbol_controller.commodity_master.error", symbol=entry.symbol, error=str(e))
         return None
-    today = datetime.utcnow().date()
+    # IST, not UTC — before 05:30 IST a UTC date is yesterday, which would keep an
+    # already-expired commodity contract as the "earliest non-expired" spot token.
+    today = now_ist().date()
     best: tuple[date, str] | None = None
     for r in rows:
         uid = (r.get("underlying_id") or "").strip()
