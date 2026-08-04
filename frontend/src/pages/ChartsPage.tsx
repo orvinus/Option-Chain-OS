@@ -21,7 +21,7 @@ const ATM_MAX_WINDOW = 50;
 
 export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, dataReady, authChecked, health, handleAuthenticated,
+    authenticated, dataReady, feedLive, authChecked, health, handleAuthenticated,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -142,7 +142,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
           <ConnectBanner onAuthenticated={handleAuthenticated} />
         ) : (
           <>
-            {!authenticated && <FeedOfflineBanner />}
+            {!feedLive && <FeedOfflineBanner />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

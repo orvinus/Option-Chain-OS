@@ -36,6 +36,12 @@ export interface MarketContextValue {
    *  what data loading should be gated on. A broker outage must not hide months of
    *  collected data. */
   dataReady: boolean;
+  /** True only when ticks can actually arrive: we hold a broker session AND the
+   *  market-data socket is up. `authenticated` alone is not enough — a token can be
+   *  TTL-valid while the socket is dead, which is how production served 13-hour-old
+   *  data under a green badge with no warning at all (2026-08-04). Gate the
+   *  "feed offline" notice on this, never on `authenticated`. */
+  feedLive: boolean;
   authChecked: boolean;
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
@@ -280,8 +286,12 @@ export function useMarketContext(): MarketContextValue {
       ? health.latest_spot
       : null;
 
+  // Both halves must hold. Before the health poll lands we assume the feed is fine so
+  // the banner does not flash on every page load.
+  const feedLive = authenticated && health?.feed_connected !== false;
+
   return {
-    authenticated, dataReady, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
+    authenticated, dataReady, feedLive, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,

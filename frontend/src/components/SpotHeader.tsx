@@ -204,9 +204,24 @@ export function SpotHeader({ data, status, health, streamError, symbolDisplay, s
           health.active_symbol === symbolTicker
         ? health.latest_spot
         : data?.spot;
-  const si = statusInfo(status);
-  const offCaption = livePushOffCaption(status, health, streamError);
   const freshness = dataFreshness(health);
+  // "LIVE PUSH ON" only reports that the browser reached OUR OWN API — server pings
+  // keep it green even when the broker feed has been dead for hours. Production sat
+  // green above 13h-old data with no other warning (2026-08-04), so degrade the badge
+  // whenever the socket is open but no market data is actually arriving.
+  const brokerFeedDown = health?.feed_connected === false;
+  const noMarketData = status === "open" && (brokerFeedDown || freshness?.stale === true);
+  const si = noMarketData
+    ? {
+        dot: "bg-amber-400 animate-pulse",
+        label: "NO MARKET DATA",
+        badge: "border-amber-500/40 text-amber-300",
+        shortHint: brokerFeedDown ? "Broker feed disconnected" : "Socket open, no ticks",
+      }
+    : statusInfo(status);
+  const offCaption = noMarketData
+    ? "The push socket to your own API is open, but no market data is arriving — this badge never tracked the broker. See “XTS feed” below. Stored history is unaffected."
+    : livePushOffCaption(status, health, streamError);
 
   return (
     <header className="flex flex-col gap-2 px-2 py-4">
