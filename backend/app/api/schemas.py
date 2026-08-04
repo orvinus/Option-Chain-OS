@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 class HealthResponse(BaseModel):
     status: str
-    auth_mode: str
     authenticated: bool
     latest_spot: float | None
     tokens_subscribed: int
@@ -17,11 +16,20 @@ class HealthResponse(BaseModel):
     run_mode: str = Field(description="live | replay")
     now_ist: str = Field(description="Current server time in Asia/Kolkata (ISO-8601)")
     nse_session_open: bool = Field(
-        description="True during Mon–Fri 09:15–15:30 IST (holidays not checked)"
+        description="True on a weekday between session_open_ist and session_close_ist "
+        "(holidays not checked)"
+    )
+    session_open_ist: str = Field(
+        default="09:15", description="Regular-session open, IST 'HH:MM' (configurable)",
+    )
+    session_close_ist: str = Field(
+        default="15:40",
+        description="Regular-session close, IST 'HH:MM' (configurable). The frontend "
+        "reads this instead of hardcoding a close, so the two can never drift.",
     )
     feed_connected: bool = Field(
         default=False,
-        description="Angel option feed WebSocket is connected (live mode only)",
+        description="XTS market-data WebSocket is connected (live mode only)",
     )
     active_symbol: str = Field(
         default="NIFTY",
@@ -46,7 +54,7 @@ class SpotResponse(BaseModel):
 
 
 class NiftyCrossCheckResponse(BaseModel):
-    """Compare runtime spot (Angel SmartAPI index feed) to a public NIFTY 50 quote."""
+    """Compare runtime spot (XTS index feed) to a public NIFTY 50 quote."""
 
     our_spot: float | None
     reference_last: float | None
@@ -318,12 +326,12 @@ class AuthCallbackResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    # Accepted for backward compatibility with the existing dashboard form but
-    # ignored — the XTS market-data session authenticates with the appKey/secretKey
-    # configured in .env, not per-user credentials.
-    client_code: str = Field(default="", description="Ignored (kept for form compatibility).")
-    mpin: str = Field(default="", description="Ignored (kept for form compatibility).")
-    totp_code: str = Field(default="", description="Ignored (kept for form compatibility).")
+    """Empty by design.
+
+    The XTS market-data session authenticates with the appKey/secretKey in .env —
+    there is no client code, MPIN or TOTP. Extra keys are ignored, so an older
+    client still posting them keeps working.
+    """
 
 
 class LoginResponse(BaseModel):

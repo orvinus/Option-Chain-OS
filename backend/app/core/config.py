@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,11 +45,12 @@ class Settings(BaseSettings):
     xts_md_source: str = Field(default="WebAPI", validation_alias="XTS_MD_SOURCE")
     xts_md_broadcast_mode: str = Field(default="Full", validation_alias="XTS_MD_BROADCAST_MODE")
     xts_md_publish_format: str = Field(default="JSON", validation_alias="XTS_MD_PUBLISH_FORMAT")
-    # NOTE: there is deliberately no XTS_LOGIN_AT_STARTUP setting. It existed for a
-    # long time, was documented in five places, and was read by NO code — the real gate
-    # is `run_mode == "live" and auth_mode == "totp"` in main.py's lifespan, which
-    # always restores-or-logs-in. It was removed rather than wired up, because honouring
-    # a `false` in an existing .env would stop unattended servers from ever connecting.
+    # NOTE: there is deliberately no XTS_LOGIN_AT_STARTUP and no AUTH_MODE setting.
+    # Both existed for a long time and neither did what its name and docs claimed:
+    # XTS_LOGIN_AT_STARTUP was read by no code at all, and AUTH_MODE was an Angel One
+    # leftover whose "publisher" value silently skipped session restore, login AND the
+    # token refresh loop. The only gate now is `run_mode == "live"` in main.py's
+    # lifespan, which always restores-or-logs-in.
 
     # ---------------- Database ----------------
     db_url: str = Field(
@@ -107,17 +108,21 @@ class Settings(BaseSettings):
         validation_alias="API_CORS_ORIGINS",
     )
 
-    # ---------------- Authentication mode ----------------
-    # Retained for backward compatibility with the boot/restore branches. The XTS
-    # market-data API uses a single appKey/secretKey login; "totp" simply selects
-    # that env-credential flow (no MPIN/TOTP/OAuth is involved).
-    auth_mode: Literal["totp", "publisher"] = Field(default="totp", validation_alias="AUTH_MODE")
+    # ---------------- Market session (IST) ----------------
+    # The exchange moved the F&O close from 15:30 to 15:40 on 2026-08-04. These drive
+    # is_nse_regular_session_open(), the session floor, staleness gating AND the expiry
+    # settlement instant behind every IV/greek — so they must never be hardcoded again.
+    market_open_ist: str = Field(default="09:15", validation_alias="MARKET_OPEN_IST")
+    market_close_ist: str = Field(default="15:40", validation_alias="MARKET_CLOSE_IST")
 
     # ---------------- Behavior ----------------
     run_mode: Literal["live", "replay"] = Field(default="live", validation_alias="RUN_MODE")
     debug_ticks: bool = Field(default=False, validation_alias="DEBUG_TICKS")
     # Dashboard login: cap blocking waits so the UI never spins forever.
-    smartapi_login_timeout_s: float = Field(default=45.0, validation_alias="SMARTAPI_LOGIN_TIMEOUT_S")
+    xts_login_timeout_s: float = Field(
+        default=45.0,
+        validation_alias=AliasChoices("XTS_LOGIN_TIMEOUT_S", "SMARTAPI_LOGIN_TIMEOUT_S"),
+    )
     db_persist_timeout_s: float = Field(default=20.0, validation_alias="DB_PERSIST_TIMEOUT_S")
 
     # ---------------- Dashboard gates ----------------
