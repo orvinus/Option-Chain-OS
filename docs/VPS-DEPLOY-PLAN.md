@@ -59,7 +59,7 @@ Use a Linux path such as **`/opt/nifty-oi`** (avoid Windows-style paths with spa
 ### D. Environment file
 
 1. `cd /opt/nifty-oi && cp .env.example .env && nano .env` (or `vim`).
-2. Set **XTS** credentials (`XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY`, `XTS_MD_BASE_URL`) and **`XTS_LOGIN_AT_STARTUP=true`** for always-on ingestion after reboot (details in [`DEPLOY.md`](DEPLOY.md)).
+2. Set **XTS** credentials (`XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY`, `XTS_MD_BASE_URL`); startup login is automatic in live mode, so ingestion resumes after a reboot (details in [`DEPLOY.md`](DEPLOY.md)).
 3. **Database:** [`docker-compose.yml`](../docker/docker-compose.yml) sets `DB_URL` / `DB_URL_SYNC` to the **`timescaledb`** service for the backend container, so you do **not** need to edit `.env` for DB host on the VPS (unless you change the Postgres password in compose and match it in those URLs).
 4. **`API_CORS_ORIGINS`:** in `.env`, set origins that match how you open the UI, e.g. `http://YOUR_PUBLIC_IP` (comma-separated list). Compose passes this into the backend via `${API_CORS_ORIGINS:-…}`; add `https://your-domain` when you use TLS.
 
@@ -138,7 +138,7 @@ sudo ufw enable
 1. Clone this repository to a path **without spaces** on Linux (e.g. `/opt/nifty-oi`), or copy only `docker/`, `backend/`, `frontend/`, and needed files.
 2. Copy `.env.example` to `.env` on the server (not committed).
 3. Set at least:
-   - **XTS:** `XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY`, `XTS_MD_BASE_URL`, and `XTS_LOGIN_AT_STARTUP=true` for unattended boot (see [`DEPLOY.md`](DEPLOY.md)).
+   - **XTS:** `XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY`, `XTS_MD_BASE_URL` — unattended boot needs no extra flag (see [`DEPLOY.md`](DEPLOY.md)).
    - **DB:** The backend container uses **`timescaledb`** URLs from [`docker-compose.yml`](../docker/docker-compose.yml); change those lines only if you use external Postgres/Timescale or a non-default password.
    - **CORS:** Set `API_CORS_ORIGINS` in `.env` to your **public origin** (e.g. `http://YOUR_IP` or `https://oi.example.com`). Use **`docker compose --env-file .env -f docker/docker-compose.yml …`** from the repo root so this value is applied (see phase F).
 

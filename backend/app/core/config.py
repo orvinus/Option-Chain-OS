@@ -45,9 +45,11 @@ class Settings(BaseSettings):
     xts_md_source: str = Field(default="WebAPI", validation_alias="XTS_MD_SOURCE")
     xts_md_broadcast_mode: str = Field(default="Full", validation_alias="XTS_MD_BROADCAST_MODE")
     xts_md_publish_format: str = Field(default="JSON", validation_alias="XTS_MD_PUBLISH_FORMAT")
-    # If false (default), the XTS market-data login happens only via the dashboard —
-    # backend starts immediately. Set true to attempt env-based login on startup.
-    xts_login_at_startup: bool = Field(default=False, validation_alias="XTS_LOGIN_AT_STARTUP")
+    # NOTE: there is deliberately no XTS_LOGIN_AT_STARTUP setting. It existed for a
+    # long time, was documented in five places, and was read by NO code — the real gate
+    # is `run_mode == "live" and auth_mode == "totp"` in main.py's lifespan, which
+    # always restores-or-logs-in. It was removed rather than wired up, because honouring
+    # a `false` in an existing .env would stop unattended servers from ever connecting.
 
     # ---------------- Database ----------------
     db_url: str = Field(
