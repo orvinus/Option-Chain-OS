@@ -2,8 +2,9 @@
 
 Boot sequence (lifespan):
     1.  Configure logging.
-    2.  Restore the XTS market-data session from ``auth_sessions``, or log in with
-        appKey/secretKey when ``XTS_LOGIN_AT_STARTUP`` is set.
+    2.  Restore the XTS market-data session from ``auth_sessions``, else log in with
+        appKey/secretKey. Both happen automatically whenever ``RUN_MODE=live`` and
+        ``AUTH_MODE=totp`` — no dashboard click and no opt-in flag is involved.
     3.  Bootstrap the option universe (uses /quote LTP for an initial spot).
     4.  Start the XTS Socket.IO ingestion client and IST session-open watch.
     5.  Start the 1-minute aggregator (which feeds the WS hub on each flush).
@@ -124,6 +125,16 @@ async def _resubscribe_provider() -> tuple[list, float | None]:
             )
             spot = fresh
             tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
+    if not tokens:
+        # NEVER publish an empty universe. Assigning [] here wipes a perfectly good
+        # subscription list on one bad resolve, and it also empties /api/expiries and
+        # _expiry_utils, so the whole app reports "no contracts" while the feed spins.
+        # Keep last-known-good and let the supervisor retry.
+        log.warning(
+            "resubscribe.empty_universe_kept_previous",
+            symbol=rt.active_symbol, spot=spot, previous_tokens=len(rt.tokens),
+        )
+        return [], None
     rt.tokens = tokens
     rt.expiries = expiries
     rt.latest_spot = spot
