@@ -16,7 +16,7 @@ interface Props {
   /** Selected window, in minutes from market open (09:15). */
   fromMin: number;
   toMin: number;
-  /** Upper selectable bound — "now" while the session is live, else 375 (15:30). */
+  /** Upper selectable bound — "now" while the session is live, else the full session span (15:40 close). */
   maxMin: number;
   /** Whether custom-range mode is currently driving the chart. */
   active: boolean;

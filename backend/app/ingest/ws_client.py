@@ -1,8 +1,8 @@
 """Symphony XTS market-data feed — async Socket.IO client with reconnect + heartbeat.
 
 The Shrilakshmi Fintech / Symphony XTS market-data stream is delivered over
-Socket.IO. Unlike AngelOne's ``SmartWebSocketV2`` (a sync, thread-based client
-whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
+Socket.IO. Unlike a sync, thread-based broker SDK whose snapquote carried LTP,
+OI and volume in a single tick, XTS:
 
 * uses ``python-socketio``'s ``AsyncClient`` — so we run directly on the event
   loop with no worker-thread bridge;
@@ -14,7 +14,7 @@ whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
   ``Tick`` shape the rest of the pipeline already expects. (Indices have no OI,
   so the index/spot instrument is subscribed to 1501 only.)
 
-XTS prices are already in rupees (no ``/100`` paise scaling that Angel needed).
+XTS prices are already in rupees (no ``/100`` paise scaling).
 
 Public surface (unchanged from the previous integration):
     feed = OptionFeedClient(queue, get_tokens, index_token=..., active_symbol=...)
@@ -62,6 +62,11 @@ CONNECT_TIMEOUT_SECONDS = 15
 # (a 2nd backend, revoked creds) keeps invalidating the session.
 AUTO_RELOGIN_COOLDOWN_S = 120.0
 AUTO_RELOGIN_MAX_ATTEMPTS = 5
+# ...but the cap must not be permanent. Its only other reset is a fully clean
+# subscribe, which is impossible while auth is broken — so a transient outage used
+# to disable auto-recovery for the whole process lifetime. After this much quiet
+# (no self-heal attempt at all) the burst is considered over and the budget re-arms.
+AUTO_RELOGIN_ATTEMPT_DECAY_S = 900.0
 
 
 TokensProvider = Callable[[], Awaitable[tuple[list[InstrumentToken], float]]]
@@ -301,13 +306,33 @@ class OptionFeedClient:
     async def _connect_once(self) -> None:
         sess = get_session_manager()
         if not sess.authenticated:
-            raise RuntimeError(
-                "Not authenticated yet. Use the dashboard login form to authenticate first."
-            )
+            # Try to recover before parking. Since mark_broker_rejected() exists,
+            # `authenticated` can be false because XTS rejected the token — not only
+            # because nobody has logged in yet. Waiting for a dashboard click in that
+            # case is exactly how a feed stays dead for a whole session. Cooldown and
+            # attempt cap live inside _self_heal_auth.
+            await self._self_heal_auth()
+            self._reconnect_requested = False
+            if not sess.authenticated:
+                raise RuntimeError(
+                    "Not authenticated yet. Use the dashboard login form to authenticate first."
+                )
 
         tokens, spot = await self._tokens_provider()
         if not tokens:
-            log.warning("ws.no_tokens_to_subscribe")
+            log.warning(
+                "ws.no_tokens_to_subscribe",
+                hint="the option universe resolved empty — usually a dead token "
+                "failing the scripmaster fetch. Attempting an auth self-heal.",
+            )
+            # This state STARVES the self-heal: with no instruments we never POST
+            # /instruments/subscription, so the 'Invalid Token' 400 that is its only
+            # other trigger never happens and the feed spins here forever on a dead
+            # token (production outage 2026-08-03 19:55 -> 2026-08-04, full session).
+            await self._self_heal_auth()
+            # No socket was opened, so there is nothing for this flag to tear down;
+            # leaving it set would make the NEXT good connect drop itself immediately.
+            self._reconnect_requested = False
             await asyncio.sleep(5)
             return
         self._token_meta = {t.token: t for t in tokens}
@@ -344,6 +369,13 @@ class OptionFeedClient:
         except Exception as e:
             log.error("ws.connect.failed", error=str(e))
             await self._teardown()
+            # XTS bakes the token into the handshake query, so a dead token is
+            # rejected HERE — before _subscribe_all ever runs. Without this the
+            # supervisor would retry the same dead token forever behind a 60s
+            # backoff. Cooldown + attempt cap keep a genuine network outage from
+            # turning into a login storm.
+            await self._self_heal_auth()
+            self._reconnect_requested = False
             raise RuntimeError(f"Socket.IO failed to connect: {e}") from e
 
         # Subscribe over REST now that the socket is open. Safe to call on every
@@ -509,6 +541,9 @@ class OptionFeedClient:
                 # below can give up instead of storming re-logins.
                 if not (rejected or errors):
                     self._auto_relogin_attempts = 0
+                    # Proof the broker accepts this token — the only positive
+                    # confirmation we get, so it is what clears a prior rejection.
+                    get_session_manager().mark_broker_ok()
                 log.info(
                     "ws.subscribe.success",
                     instruments=total,
@@ -562,6 +597,16 @@ class OptionFeedClient:
         """
         now = time.time()
         since = now - self._last_auto_relogin
+        # Re-arm after a quiet spell. Without this the attempt cap is a one-way latch:
+        # the only other reset is a fully clean subscribe (_subscribe_all), which by
+        # definition cannot happen while auth is broken, so five failures killed
+        # auto-recovery until someone restarted the process.
+        if self._auto_relogin_attempts and since >= AUTO_RELOGIN_ATTEMPT_DECAY_S:
+            log.info(
+                "ws.self_heal.attempts_decayed",
+                quiet_s=round(since), previous_attempts=self._auto_relogin_attempts,
+            )
+            self._auto_relogin_attempts = 0
         if since < AUTO_RELOGIN_COOLDOWN_S:
             log.info("ws.self_heal.cooldown", since_s=round(since, 1))
             return
@@ -573,6 +618,10 @@ class OptionFeedClient:
                 "2nd backend competing for the single XTS session, or revoked "
                 "credentials. Manual intervention required.",
             )
+            # Tell the world the session is really dead so /api/health stops
+            # reporting authenticated=true — that flag is what re-arms the
+            # dashboard's 60s auto-reconnect and the login gate.
+            get_session_manager().mark_broker_rejected("self-heal exhausted")
             return
         self._last_auto_relogin = now
         self._auto_relogin_attempts += 1
@@ -599,6 +648,7 @@ class OptionFeedClient:
             log.info("ws.self_heal.relogin_ok")
         except Exception as e:
             log.error("ws.self_heal.relogin_failed", error=str(e))
+            get_session_manager().mark_broker_rejected(f"re-login failed: {e}")
 
     # ------------------------------------------------ socket handlers
 

@@ -154,8 +154,22 @@ export function SpotHeader({ data, status, health, streamError, symbolDisplay, s
     health?.latest_spot != null && health.feed_connected
       ? health.latest_spot
       : data?.spot;
-  const si = statusInfo(status);
-  const offCaption = livePushOffCaption(status, health, streamError);
+  // Same lie as the main dashboard: this badge tracks the browser -> our-own-API
+  // socket, which server pings keep green while the broker feed is dead. Degrade it
+  // so it can never read "LIVE" above data that stopped arriving hours ago.
+  const brokerFeedDown = health?.feed_connected === false;
+  const noMarketData = status === "open" && brokerFeedDown;
+  const si = noMarketData
+    ? {
+        dot: "bg-amber-400 animate-pulse",
+        label: "NO MARKET DATA",
+        badge: "border-amber-500/40 text-amber-300",
+        shortHint: "Broker feed disconnected",
+      }
+    : statusInfo(status);
+  const offCaption = noMarketData
+    ? "The push socket to your own API is open, but no market data is arriving — see “XTS feed” below. Stored history is unaffected."
+    : livePushOffCaption(status, health, streamError);
 
   return (
     <header className="flex flex-col gap-2 px-2 py-4">

@@ -5,7 +5,7 @@ from fastapi import APIRouter
 
 from ..auth import get_session_manager
 from ..core.config import settings
-from ..core.time_utils import is_nse_regular_session_open, now_ist
+from ..core.time_utils import MARKET_CLOSE, MARKET_OPEN, is_nse_regular_session_open, now_ist
 from ..runtime import get_runtime
 from .schemas import HealthResponse
 
@@ -22,7 +22,6 @@ async def health() -> HealthResponse:
     )
     return HealthResponse(
         status="ok",
-        auth_mode=settings.auth_mode,
         authenticated=sess.authenticated,
         latest_spot=rt.latest_spot,
         tokens_subscribed=len(rt.tokens),
@@ -31,6 +30,8 @@ async def health() -> HealthResponse:
         run_mode=settings.run_mode,
         now_ist=now_ist().isoformat(),
         nse_session_open=is_nse_regular_session_open(),
+        session_open_ist=MARKET_OPEN.strftime("%H:%M"),
+        session_close_ist=MARKET_CLOSE.strftime("%H:%M"),
         feed_connected=feed_connected,
         active_symbol=rt.active_symbol,
         poller_enabled=rt.universe_poller is not None,

@@ -2,7 +2,7 @@
 Binary Market Data API.
 
 This is the single owner of HTTP access to the XTS market-data gateway — the
-analog of what ``SmartConnect`` was for the old AngelOne integration. Everything
+analog of a broker SDK client. Everything
 that needs to talk REST to the broker (session login, instrument master,
 quotes, index list, socket subscription) goes through here so the base URL and
 auth header live in exactly one place.
@@ -220,7 +220,7 @@ def quote_oi(q: dict) -> int | None:
 async def quote_ltp(token: str, segment: int, instrument_id: int | str) -> float | None:
     """``POST /instruments/quotes`` for one instrument -> its LastTradedPrice (rupees).
 
-    XTS prices are already in rupees (unlike AngelOne's paise), so no scaling.
+    XTS prices are already in rupees, so no scaling.
     """
     body = {
         "instruments": [

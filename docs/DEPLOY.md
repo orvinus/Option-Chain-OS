@@ -6,7 +6,7 @@ This document complements [`RUNBOOK.md`](RUNBOOK.md) with hosting choices, healt
 
 1. **One long-running backend** process (`uvicorn` or the `backend` Docker service) with `RUN_MODE=live`.
 2. **Authenticated XTS market-data session** before the WebSocket can subscribe:
-   - **Preferred:** restore the token from DB after a previous login, or **`XTS_LOGIN_AT_STARTUP=true`** with `XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY` in `.env` (see below).
+   - Established automatically at startup: the token is restored from DB, else minted from `XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY` in `.env` (see below).
 3. **TimescaleDB reachable** via `DB_URL` / `DB_URL_SYNC`.
 4. **Single replica** for the ingest worker: do not run multiple instances against the same XTS appKey.
 
@@ -16,11 +16,10 @@ Free-tier hosts that **scale to zero** or sleep (e.g. idle Render free tier) are
 
 | Variable | Purpose |
 |----------|---------|
-| `XTS_LOGIN_AT_STARTUP` | Set to **`true`** so the backend logs in to the XTS market-data API on startup (no dashboard click). |
 | `XTS_MD_APP_KEY`, `XTS_MD_SECRET_KEY` | Required for startup login. |
 | `XTS_MD_BASE_URL` | Your broker's market-data host (demo host by default). |
 
-On boot, the app **first** attempts **`try_restore_session_from_db`**: if a valid token row exists in `auth_sessions`, it reuses it and startup login is skipped. If restore fails and **`XTS_LOGIN_AT_STARTUP=true`**, it logs in fresh from `.env`. If the flag is `false` and restore fails, the feed waits at `ws.awaiting_dashboard_login` until you trigger `POST /api/auth/login`.
+On boot, the app **first** attempts **`try_restore_session_from_db`**: if a token row in `auth_sessions` is inside its 24h TTL, it is reused. If restore fails it **logs in fresh from `.env`**. Both are unconditional when `RUN_MODE=live` — there is no opt-in flag. Only if both fail does the feed wait at `ws.awaiting_dashboard_login` until you run `POST /api/auth/login`.
 
 ## Health and monitoring
 

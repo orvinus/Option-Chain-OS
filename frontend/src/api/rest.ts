@@ -80,7 +80,7 @@ async function postJSON<T>(path: string, body: unknown, opts?: PostOpts): Promis
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
       throw new Error(
-        `Request timed out after ${opts?.timeoutMs ?? 0} ms — Angel One or the database may be slow or unreachable.`
+        `Request timed out after ${opts?.timeoutMs ?? 0} ms — the backend or database may be slow or unreachable.`
       );
     }
     throw e;
@@ -186,12 +186,12 @@ export const api = {
       with_greeks: withGreeks ? "true" : undefined,
     }),
   symbols: () => getJSON<SymbolsResponse>("/api/symbols"),
-  /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — Angel resubscribe can be slow. */
+  /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — a broker resubscribe can be slow. */
   setActiveSymbol: (symbol: string) =>
     postJSON<ActiveSymbolResponse>("/api/active-symbol", { symbol }, { timeoutMs: 45_000 }),
   authStart: () =>
     getJSON<{ login_url: string; state: string }>("/api/auth/publisher/start"),
-  /** ~55s client cap vs backend SMARTAPI_LOGIN_TIMEOUT_S (45s default) + persist margin */
+  /** ~55s client cap vs backend XTS_LOGIN_TIMEOUT_S (45s default) + persist margin */
   login: (req: LoginRequest) =>
     postJSON<LoginResponse>("/api/auth/login", req, { timeoutMs: 55_000 }),
   /**

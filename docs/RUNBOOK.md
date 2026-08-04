@@ -47,13 +47,13 @@ Visit <http://your-host>.
 
 To persist OI into TimescaleDB during **09:15–15:30 IST** without opening the dashboard each day:
 
-1. Set **`XTS_LOGIN_AT_STARTUP=true`** and fill **`XTS_MD_APP_KEY`** + **`XTS_MD_SECRET_KEY`** (and **`XTS_MD_BASE_URL`** for a non-demo host) in `.env`.
+1. Fill **`XTS_MD_APP_KEY`** + **`XTS_MD_SECRET_KEY`** (and **`XTS_MD_BASE_URL`** for a non-demo host) in `.env`. Startup login is automatic when `RUN_MODE=live`.
 2. Keep **one** backend process always running (`restart: unless-stopped` in Compose, or systemd on a VPS). The WebSocket and bucket flusher run inside that process.
 3. After a successful login once, the backend can **restore the last token from `auth_sessions`** on the next restart before falling back to a fresh appKey/secretKey login.
 
 **Single replica:** do not run multiple backend replicas on the same XTS appKey.
 
-> **Default is manual login.** With `XTS_LOGIN_AT_STARTUP=false` (the default), after any backend (re)start you must trigger login once via the dashboard **Connect** button or `POST /api/auth/login`, otherwise the feed parks at `ws.awaiting_dashboard_login`.
+> **Login is automatic**, not manual — the backend restores or mints a token on every start. If both fail the feed parks at `ws.awaiting_dashboard_login`; run `POST /api/auth/login` to recover. Note a *dashboard* sign-in does not force a fresh token — only that endpoint does.
 
 **Health:** poll **`GET /api/health`** (`authenticated`, `feed_connected`, `last_flush_at`).
 
@@ -97,7 +97,6 @@ serve the last known book, but no new ticks will arrive (no live updates,
 | `PERSIST_BUCKET` | `1s`                   | `1s`, `5s`, or `1min`. **Use `1s`** for the sub-minute timeframes (`1s/15s/30s/45s`) — see note below. |
 | `RUN_MODE`       | `live`                 | `live` connects to the XTS feed; `replay` skips ingestion (REST only) |
 | `DEBUG_TICKS`    | `false`                | Verbose tick logging |
-| `XTS_LOGIN_AT_STARTUP` | `false`          | Set **`true`** for unattended appKey/secretKey login when the backend starts |
 | `XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY` | (empty) | Binary Marketdata credentials; required for any login |
 | `NIFTY_INDEX_TOKEN` | `26000`             | XTS NSECM instrument id for the NIFTY 50 spot |
 
@@ -118,8 +117,9 @@ Open `.env` and fill `XTS_MD_APP_KEY` + `XTS_MD_SECRET_KEY` (and `XTS_MD_BASE_UR
 if not on the demo host). Restart the backend.
 
 ### Feed stuck at `ws.awaiting_dashboard_login`
-Expected when `XTS_LOGIN_AT_STARTUP=false` after a (re)start. Click **Connect**
-on the dashboard or run `curl -X POST http://localhost:8000/api/auth/login`.
+The startup login failed (bad credentials, or the broker was unreachable). Run
+`curl -X POST http://localhost:8000/api/auth/login` — the only path that forces a
+fresh token.
 
 ### `401 / Invalid appKey or secretKey`
 Wrong or blank `XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY`, or `XTS_MD_BASE_URL`

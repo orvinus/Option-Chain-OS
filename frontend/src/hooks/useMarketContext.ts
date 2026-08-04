@@ -36,6 +36,12 @@ export interface MarketContextValue {
    *  what data loading should be gated on. A broker outage must not hide months of
    *  collected data. */
   dataReady: boolean;
+  /** True only when ticks can actually arrive: we hold a broker session AND the
+   *  market-data socket is up. `authenticated` alone is not enough — a token can be
+   *  TTL-valid while the socket is dead, which is how production served 13-hour-old
+   *  data under a green badge with no warning at all (2026-08-04). Gate the
+   *  "feed offline" notice on this, never on `authenticated`. */
+  feedLive: boolean;
   authChecked: boolean;
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
@@ -132,7 +138,7 @@ export function useMarketContext(): MarketContextValue {
   }, []);
 
   // Auto-connect the broker using the appKey/secretKey in .env. The XTS market-data
-  // API authenticates with the API key alone (no MPIN/TOTP/per-user login), so there
+  // API authenticates with the appKey/secretKey alone (no per-user login), so there
   // is no manual "Connect to Broker" page — establish the session automatically and
   // retry until it succeeds.
   useEffect(() => {
@@ -147,7 +153,7 @@ export function useMarketContext(): MarketContextValue {
       if (inFlight || cancelled) return;
       inFlight = true;
       try {
-        await api.login({ mpin: "" });
+        await api.login({});
         if (!cancelled) setConnectError(null);
       } catch (e) {
         if (!cancelled) setConnectError(String(e));
@@ -280,8 +286,12 @@ export function useMarketContext(): MarketContextValue {
       ? health.latest_spot
       : null;
 
+  // Both halves must hold. Before the health poll lands we assume the feed is fine so
+  // the banner does not flash on every page load.
+  const feedLive = authenticated && health?.feed_connected !== false;
+
   return {
-    authenticated, dataReady, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
+    authenticated, dataReady, feedLive, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,

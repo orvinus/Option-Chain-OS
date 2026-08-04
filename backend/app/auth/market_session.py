@@ -44,6 +44,10 @@ log = get_logger("auth")
 # XTS market-data tokens are valid ~24h. Renew (re-login) every 12h for margin.
 REFRESH_EVERY = timedelta(hours=12)
 TOKEN_TTL = timedelta(hours=24)
+# A failed renewal must NOT cost a full REFRESH_EVERY of silence. The renewal is what
+# keeps the feed alive, and the timer is anchored to process start, so one failure at
+# the wrong moment used to burn an entire trading session.
+REFRESH_RETRY_AFTER_FAILURE = timedelta(minutes=5)
 
 # Debounce window for non-forced logins. XTS is single-session per appKey — every
 # login invalidates the prior token — so a manual login + post-login feed bootstrap
@@ -57,8 +61,8 @@ LOGIN_DEBOUNCE_S = 20.0
 class SessionTokens:
     """Holds the XTS market-data token.
 
-    Field names are kept from the previous AngelOne integration so the
-    ``auth_sessions`` persistence and any external callers keep working:
+    The ``auth_sessions`` table columns predate this integration and are reused
+    as-is (renaming them would need a migration for no functional gain):
       * ``jwt_token``     -> the XTS market-data token
       * ``client_code``   -> the XTS userID
       * ``refresh_token`` / ``feed_token`` -> mirror the token (XTS has neither)
@@ -87,6 +91,9 @@ class MarketDataSession:
         # refresh) so only one /auth/login round-trip runs at a time.
         self._login_lock = asyncio.Lock()
         self._last_login_mono: float = 0.0
+        # Set when XTS itself rejected our token (see mark_broker_rejected). Kept
+        # separate from the TTL so `authenticated` can reflect broker reality.
+        self._broker_rejected_at: Optional[datetime] = None
 
     # ---------------------------------------------------------- properties
 
@@ -108,8 +115,36 @@ class MarketDataSession:
 
     @property
     def authenticated(self) -> bool:
+        """TTL-valid AND not known-rejected by the broker.
+
+        The TTL alone is pure local arithmetic (``issued_at + 24h``) that never asks
+        XTS, so a token the broker killed overnight still reported True — which
+        silently disabled BOTH unattended recovery paths: the dashboard's 60s
+        auto-reconnect (gated on ``!authenticated``) and ``_fixed_credential_gate``'s
+        "Already connected." short-circuit. Production ran a full session on a dead
+        token that way (2026-08-03/04).
+        """
         with self._lock:
-            return self._tokens is not None and self._tokens.expires_at > datetime.now(timezone.utc)
+            if self._tokens is None or self._tokens.expires_at <= datetime.now(timezone.utc):
+                return False
+            return self._broker_rejected_at is None
+
+    def mark_broker_ok(self) -> None:
+        """Record that XTS accepted this token (clears a prior rejection)."""
+        with self._lock:
+            self._broker_rejected_at = None
+
+    def mark_broker_rejected(self, reason: str = "") -> None:
+        """Record that XTS rejected this token and auto-recovery is not winning.
+
+        Call this only once the feed's own self-heal has failed or exhausted its
+        budget — a transient blip should not flip the dashboard to "disconnected".
+        """
+        with self._lock:
+            if self._broker_rejected_at is not None:
+                return
+            self._broker_rejected_at = datetime.now(timezone.utc)
+        log.warning("xts.session.broker_rejected", reason=reason)
 
     # ---------------------------------------------------------- public API
 
@@ -140,6 +175,8 @@ class MarketDataSession:
             await self._persist(tokens)
             with self._lock:
                 self._tokens = tokens
+                # A freshly minted token is by definition not yet rejected.
+                self._broker_rejected_at = None
             self._last_login_mono = time.monotonic()
             log.info("xts.login.success", user_id=tokens.client_code, forced=force)
             return tokens
@@ -199,8 +236,6 @@ class MarketDataSession:
         Returns True when a non-expired token was restored. On failure clears the
         in-memory token so ``login()`` can run clean.
         """
-        if settings.auth_mode != "totp":
-            return False
         try:
             async with session_scope() as s:
                 result = await s.execute(
@@ -247,9 +282,10 @@ class MarketDataSession:
 
     async def _refresh_loop(self) -> None:
         log.info("xts.refresh_loop.started", interval_seconds=REFRESH_EVERY.total_seconds())
+        wait_s = REFRESH_EVERY.total_seconds()
         while not self._stopping.is_set():
             try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=REFRESH_EVERY.total_seconds())
+                await asyncio.wait_for(self._stopping.wait(), timeout=wait_s)
                 if self._stopping.is_set():
                     break
             except asyncio.TimeoutError:
@@ -269,8 +305,11 @@ class MarketDataSession:
                 # under the fresh token — otherwise the 12h refresh silently stops
                 # all ticks until the next manual login.
                 self._nudge_feed_reconnect()
+                wait_s = REFRESH_EVERY.total_seconds()
             except Exception as e:
-                log.error("xts.refresh.exhausted", error=str(e))
+                # Come back in minutes, not another REFRESH_EVERY.
+                wait_s = REFRESH_RETRY_AFTER_FAILURE.total_seconds()
+                log.error("xts.refresh.exhausted", error=str(e), retry_in_s=wait_s)
 
     def _nudge_feed_reconnect(self) -> None:
         """Ask the live feed (if any) to reconnect so it re-handshakes with the
@@ -306,9 +345,6 @@ class MarketDataSession:
                 },
             )
 
-
-# Backwards-compatible alias (old name referenced by ``auth/__init__.py``).
-SmartApiSession = MarketDataSession
 
 _singleton: MarketDataSession | None = None
 

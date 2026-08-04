@@ -21,6 +21,7 @@ import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import {
   SESSION_SPAN_MIN,
   clamp,
+  sessionSpan,
   isToday,
   isoForSessionMinuteOnDate,
   maxMinForDate,
@@ -32,7 +33,7 @@ const RANGE_DEFAULT_LOOKBACK_MIN = 30;
 
 export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, dataReady, authChecked, health, connectError,
+    dataReady, feedLive, authChecked, health, connectError,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -124,13 +125,13 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     if (historical) {
       // Keep the historical date; reset the window to the full session.
       setFromMin(0);
-      setToMin(SESSION_SPAN_MIN);
+      setToMin(sessionSpan(health));
       setToAtLive(false);
       return;
     }
     setRangeMode(false);
     setToAtLive(true);
-  }, [historical]);
+  }, [historical, health]);
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
     // A preset timeframe shows that timeframe live, or — when a past date is
     // selected — as of that date's close. Keep the date; just exit any custom window.
@@ -148,7 +149,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
       setToAtLive(!isPast);
       if (isPast) {
         setFromMin(0);
-        setToMin(SESSION_SPAN_MIN);
+        setToMin(sessionSpan(health));
       }
     },
     [health],
@@ -236,7 +237,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
           </div>
         ) : (
           <>
-            {!authenticated && <FeedOfflineBanner connectError={connectError} />}
+            {!feedLive && <FeedOfflineBanner connectError={connectError} />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -370,7 +371,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                     </>
                   ) : (
                     <>
-                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
+                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:40 PM IST</b>), brokers often expose
                       static end-of-day style OI, so intraday deltas stay flat.
                     </>
                   )}

@@ -23,7 +23,7 @@ _reresolve_lock = asyncio.Lock()
 async def _reresolve_active_universe(symbol: str) -> None:
     """Re-run the active-symbol switch so a throttled-empty first fetch recovers.
 
-    The initial option fetch can come back empty if Angel throttled it; the
+    The initial option fetch can come back empty if the broker throttled it; the
     frontend then polls ``/api/expiries`` every 30s but that only reads runtime /
     DB and never re-triggers resolution. Re-running ``switch_active_symbol``
     re-resolves the option universe *and* re-subscribes the live feed, so the

@@ -63,7 +63,8 @@ export interface NiftyCrossCheckResponse {
 
 export interface HealthResponse {
   status: string;
-  auth_mode: string;
+  session_open_ist?: string;
+  session_close_ist?: string;
   authenticated: boolean;
   latest_spot: number | null;
   tokens_subscribed: number;
@@ -110,11 +111,9 @@ export interface InterpretationRow {
   put: string;
 }
 
-export interface LoginRequest {
-  client_code?: string;
-  mpin: string;
-  totp_code?: string;
-}
+/** Empty by design — the XTS market-data session authenticates with the
+ *  appKey/secretKey in the backend's .env, not per-user credentials. */
+export type LoginRequest = Record<string, never>;
 
 export interface LoginResponse {
   status: string;

@@ -184,7 +184,6 @@ Set these (copy the secret values from the working `.env` on your PC):
 | `XTS_MD_APP_KEY` | *your key* | Broker market-data login |
 | `XTS_MD_SECRET_KEY` | *your secret* | Broker market-data login |
 | `XTS_MD_BASE_URL` | `https://trades.lakshmishree.com/apimarketdata` | Your broker host (not the demo default) |
-| `XTS_LOGIN_AT_STARTUP` | `true` | Log in automatically on every boot/restart |
 | `API_CORS_ORIGINS` | `http://YOUR_IP` | So the browser origin is accepted by the API |
 | `UNDERLYING_SYMBOL` | `NIFTY` | Symbol the feed starts on |
 | `NIFTY_LOT_SIZE` | `65` | Current NIFTY lot |
@@ -339,7 +338,7 @@ Once launched, it's meant to be hands-off:
 
 - **Auto-restart:** all three containers use `restart: unless-stopped`, and Docker
   starts on boot — a reboot brings the whole stack back by itself.
-- **Auto-login:** `XTS_LOGIN_AT_STARTUP=true` + a 12h refresh loop keep the token
+- **Auto-login:** startup login (automatic in live mode) + a 12h refresh loop keep the token
   fresh; the feed self-heals from "Invalid Token" and the 50-instrument
   subscription-limit wedge (both fixed in this branch).
 - **If the feed ever looks dead:** re-mint the token —

@@ -23,7 +23,7 @@ const TF_LABEL: Record<string, string> = {
 
 export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    feedLive, dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError, fnoEligible, symbolDisplay,
     atmWindow, setAtmWindow,
   } = mc;
@@ -55,7 +55,7 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
 
   return (
     <div className="min-h-screen w-full max-w-[1500px] mx-auto px-4 md:px-6 py-3">
-      {!authenticated && <FeedOfflineBanner />}
+      {!feedLive && <FeedOfflineBanner />}
       <div className="panel px-4 py-3 flex flex-wrap items-center gap-3 mb-4">
         <SymbolSelect
           groups={symbolGroups}
