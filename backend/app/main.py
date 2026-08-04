@@ -34,6 +34,7 @@ from .core.db import AsyncSessionLocal
 from .core.logging import configure_logging, get_logger
 from .ingest.aggregator import MinuteAggregator
 from .ingest.atm_drift_watch import run_atm_drift_watch
+from .ingest.feed_watchdog import run_feed_watchdog
 from .ingest.market_session_watch import run_nse_session_open_watch
 from .ingest.symbol_controller import _resolve_spot_token, _spot_segment
 from .ingest.universe_poller import UniversePoller
@@ -48,9 +49,9 @@ from .ws import get_hub, ws_router
 
 log = get_logger("main")
 
-# Startup `sess.login()` calls Angel over the network; without a cap, a stalled
-# SmartAPI keeps lifespan from reaching `yield` and nothing listens on :8000.
-STARTUP_SMARTAPI_LOGIN_TIMEOUT_S = 30.0
+# Startup `sess.login()` is a network call to the broker; without a cap, a stalled
+# response keeps lifespan from reaching `yield` and nothing listens on :8000.
+STARTUP_LOGIN_TIMEOUT_S = 30.0
 
 
 async def _initial_spot() -> float | None:
@@ -148,19 +149,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rt = get_runtime()
     sess = get_session_manager()
 
-    # 1) Restore last persisted Angel session (refresh JWT/feed) when possible.
-    # 2) Else optional MPIN+TOTP login when ANGEL_LOGIN_AT_STARTUP=true.
-    if settings.run_mode == "live" and settings.auth_mode == "totp":
+    # 1) Restore the last persisted XTS session when possible.
+    # 2) Else log in fresh from the appKey/secretKey in .env.
+    if settings.run_mode == "live":
         restored = False
         try:
             restored = await asyncio.wait_for(
                 sess.try_restore_session_from_db(),
-                timeout=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                timeout=STARTUP_LOGIN_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
             log.warning(
                 "app.startup.restore_session_timeout",
-                seconds=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                seconds=STARTUP_LOGIN_TIMEOUT_S,
             )
         except Exception as e:
             log.warning("app.startup.restore_session_error", error=str(e))
@@ -177,14 +178,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             try:
                 await asyncio.wait_for(
                     sess.login(force=True),
-                    timeout=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                    timeout=STARTUP_LOGIN_TIMEOUT_S,
                 )
                 await sess.start_refresh_loop()
                 log.info("app.startup.auto_login_ok")
             except asyncio.TimeoutError:
                 log.warning(
                     "app.startup.login_timeout",
-                    seconds=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                    seconds=STARTUP_LOGIN_TIMEOUT_S,
                     hint="XTS market-data login did not respond; authenticate via the dashboard.",
                 )
             except Exception as e:
@@ -195,6 +196,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     aggregator: MinuteAggregator | None = None
     session_watch: asyncio.Task[None] | None = None
     atm_watch: asyncio.Task[None] | None = None
+    feed_watch: asyncio.Task[None] | None = None
     poller: UniversePoller | None = None
 
     try:
@@ -249,6 +251,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 run_atm_drift_watch(),
                 name="atm-drift-watch",
             )
+            # Outcome-based recovery: escalates until rows land again. Every other
+            # recovery path needs a specific event to fire; this one only asks
+            # whether data is still arriving.
+            feed_watch = asyncio.create_task(
+                run_feed_watchdog(feed),
+                name="feed-watchdog",
+            )
 
             # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
             # aggregator → option_oi_snapshots path as the live feed.
@@ -266,7 +275,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     finally:
         log.info("app.shutdown")
-        for task in (session_watch, atm_watch):
+        for task in (session_watch, atm_watch, feed_watch):
             if task is not None:
                 task.cancel()
                 try:
