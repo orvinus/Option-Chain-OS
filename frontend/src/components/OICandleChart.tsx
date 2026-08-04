@@ -8,7 +8,6 @@ import {
   bucketToCandles,
   toChangeSinceOpen,
   toLineSeries,
-  type ChartInterval,
   type OISide,
 } from "../utils/oiCandles";
 import { compact as compactNum } from "../utils/num";
@@ -16,7 +15,11 @@ import { compact as compactNum } from "../utils/num";
 interface Props {
   points: OITimeseriesPoint[] | null;
   side: OISide;
-  interval: ChartInterval;
+  /** Bar width in minutes; 1 renders a line. Widened from `ChartInterval` (1|5|10|15|30)
+   *  so the Replay page can drive it from the shared 10 timeframe presets (3/60/120/180)
+   *  — the value is only compared to 1 and handed to `bucketToCandles`, which is generic
+   *  over minutes. `ChartIntervalBar` and the Charts tab still use `ChartInterval`. */
+  interval: number;
   title: string;
   isLoading?: boolean;
   /** Real-time total OI (absolute, summed across the selected strikes) for this side. */

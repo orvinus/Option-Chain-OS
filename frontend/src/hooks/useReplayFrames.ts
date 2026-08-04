@@ -31,6 +31,14 @@ export function useReplayFrames({
       setFrames([]);
       return;
     }
+    // Before 09:15 on today's date `maxMinForDate` returns 0, so start === end and
+    // /api/replay 400s with "start must be < end". Treat an empty window as "nothing
+    // to replay yet" rather than showing the user a server error.
+    if (Date.parse(endTs) <= Date.parse(startTs)) {
+      setFrames([]);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     api
