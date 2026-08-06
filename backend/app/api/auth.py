@@ -26,56 +26,18 @@ log = get_logger("auth.api")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-async def _bootstrap_live_ingestion_if_needed() -> None:
-    """Start aggregator + feed if startup did not already (non-blocking)."""
-    # Replay instances NEVER contact the broker (single-session-per-appKey safety):
-    # a live feed here would compete with the one production session on the same key.
-    if settings.run_mode != "live":
-        log.info("auth.login.ingestion_skipped_replay")
-        return
+async def _bootstrap_live_ingestion_if_needed(fresh_token_minted: bool = True) -> None:
+    """Start (or reconnect) live ingestion after a login — via the ONE factory path.
+
+    The previous inline construction here dropped index_token/index_segment
+    (silently defaulting a SENSEX/MCX active symbol back to NIFTY-on-NSECM) and
+    nudged the feed on EVERY login response even when the rotation floor had
+    merely reused the existing token — dropping a healthy socket for nothing.
+    """
     try:
-        from ..main import _resubscribe_provider, _spot_refresher
-        from ..runtime import get_runtime
-        from ..ingest.aggregator import MinuteAggregator
-        from ..ingest.ws_client import OptionFeedClient
-        from ..services import get_oi_engine
-        from ..ws import get_hub
+        from ..ingest.feed_factory import ensure_live_ingestion
 
-        rt = get_runtime()
-        if rt.feed_client is not None:
-            # A feed is already running, but its live Socket.IO connection was
-            # opened with the PREVIOUS token. XTS market-data allows only ONE
-            # valid token per appKey — every fresh login invalidates the prior
-            # one — so the existing socket (and its subscriptions) are now bound
-            # to a dead token and every subscribe returns 'Invalid Token' with no
-            # ticks flowing. Drop the socket so the supervisor reconnects via
-            # _connect_once(), which re-reads the FRESH token from the session
-            # manager and re-subscribes under it. Without this nudge, a "successful"
-            # login leaves the feed silently dead.
-            log.info("auth.login.reconnecting_feed_with_fresh_token")
-            rt.feed_client.nudge_reconnect()
-            return
-
-        engine = get_oi_engine()
-        hub = get_hub()
-
-        async def _on_flush(bucket: datetime, rows: int, ws_rows: int) -> None:
-            rt.last_flush_at = bucket
-            rt.last_flush_rows = rows
-            if ws_rows > 0:
-                rt.last_ws_flush_at = bucket
-            engine.on_aggregator_flush(bucket)
-            await hub.publish_flush(bucket, rows)
-
-        aggregator = MinuteAggregator(rt.tick_queue, on_flush=_on_flush)
-        await aggregator.start()
-        rt.aggregator = aggregator
-
-        feed = OptionFeedClient(rt.tick_queue, _resubscribe_provider)
-        await feed.start()
-        rt.feed_client = feed
-        asyncio.create_task(_spot_refresher(feed), name="spot-refresher-after-login")
-        log.info("auth.login.ingestion_started")
+        await ensure_live_ingestion(fresh_token_minted=fresh_token_minted)
     except Exception as e:
         log.error("auth.login.ingestion_bootstrap.failed", error=str(e))
 

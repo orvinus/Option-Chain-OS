@@ -99,7 +99,7 @@ async def test_empty_payload_is_never_fresh() -> None:
 # --------------------------------------------------------------------------- 2
 async def test_resubscribe_keeps_last_good_universe_on_empty_resolve() -> None:
     """An empty resolve must not wipe a working runtime universe."""
-    import app.main as main_mod
+    import app.ingest.feed_factory as main_mod  # provider moved out of app.main
     from app.runtime import get_runtime
 
     rt = get_runtime()
