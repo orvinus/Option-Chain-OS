@@ -87,7 +87,25 @@ class Settings(BaseSettings):
     # This background poller REST-quotes every other F&O symbol's chain on a tiered
     # cadence into the same DB (option_oi_snapshots), so all symbols accrue OI in
     # parallel. It NEVER logs in (single-session-per-appKey) — it reuses the live
-    # session's token and, on a 401, waits for the feed's own self-heal to refresh it.
+    # session's token and, on a 401, waits for the session steward to refresh it.
+    #
+    # POLLER_MODE supersedes the legacy POLLER_ENABLED boolean:
+    #   off      — no poller at all.
+    #   failover — poll ONLY the active symbol, ONLY while the WS feed is unhealthy,
+    #              so a dead socket degrades the dashboard to ~15s REST updates
+    #              instead of going dark. Zero load while the feed is healthy.
+    #   full     — the original all-symbol tiered snapshotter (plus the failover
+    #              behavior for the active symbol when the feed is down).
+    # Legacy POLLER_ENABLED=true maps to "full" via effective_poller_mode.
+    poller_mode: Literal["off", "failover", "full"] = Field(
+        default="failover", validation_alias="POLLER_MODE"
+    )
+    poller_failover_interval_s: float = Field(
+        default=15.0, validation_alias="POLLER_FAILOVER_INTERVAL_S"
+    )
+    poller_failover_linger_s: float = Field(
+        default=120.0, validation_alias="POLLER_FAILOVER_LINGER_S"
+    )
     poller_enabled: bool = Field(default=False, validation_alias="POLLER_ENABLED")
     poller_strike_window: int = Field(default=7, validation_alias="POLLER_STRIKE_WINDOW")
     poller_expiries: str = Field(default="current_weekly", validation_alias="POLLER_EXPIRIES")
@@ -135,6 +153,32 @@ class Settings(BaseSettings):
     main_user: str = Field(default="", validation_alias="MAIN_USER")
     main_password: str = Field(default="", validation_alias="MAIN_PASSWORD")
 
+    # ---------------- Alerting (Telegram) ----------------
+    # Both blank => alerting is a no-op everywhere (dev default). On the VPS, set
+    # both so the session steward and the oi-sentinel can page the operator.
+    telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
+    alert_min_interval_s: float = Field(default=300.0, validation_alias="ALERT_MIN_INTERVAL_S")
+    # "pretty" for dev terminals, "json" for production (machine-parseable).
+    log_format: Literal["pretty", "json"] = Field(default="pretty", validation_alias="LOG_FORMAT")
+
+    # ---------------- Broker session rotation policy ----------------
+    # XTS is single-session-per-appKey: EVERY login invalidates the previous token,
+    # killing the socket that token carried. Two production outages (2026-08-04,
+    # 2026-08-06) were login storms where independent recovery actors rotated the
+    # session out from under each other every ~6 seconds. These knobs are the
+    # mechanical policy enforced inside MarketDataSession.login() — no caller can
+    # rotate faster than the floor, and a burst opens the recovery circuit.
+    login_floor_s: float = Field(default=90.0, validation_alias="LOGIN_FLOOR_S")
+    login_burst_max: int = Field(default=5, validation_alias="LOGIN_BURST_MAX")
+    login_burst_window_s: float = Field(default=600.0, validation_alias="LOGIN_BURST_WINDOW_S")
+    # Daily pre-open token rotation instant (IST HH:MM). Chosen pre-open so a
+    # rotation can never fire in the evening and leave the socket dead overnight —
+    # the trigger of both outages.
+    daily_token_refresh_ist: str = Field(default="08:35", validation_alias="DAILY_TOKEN_REFRESH_IST")
+    # Strict-health staleness threshold (any-origin data age during an open session).
+    strict_stale_after_s: float = Field(default=300.0, validation_alias="STRICT_STALE_AFTER_S")
+
     # ---------------- IV scanner / HV ----------------
     iv_scanner_max_symbols: int = Field(default=50, validation_alias="IV_SCANNER_MAX_SYMBOLS")
     yahoo_hv_enabled: bool = Field(default=True, validation_alias="YAHOO_HV_ENABLED")
@@ -157,6 +201,18 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [s.strip() for s in self.api_cors_origins.split(",") if s.strip()]
+
+    @property
+    def effective_poller_mode(self) -> str:
+        """POLLER_MODE, honoring the legacy POLLER_ENABLED=true as "full".
+
+        An .env that opted into the all-symbol poller via the old boolean keeps
+        its meaning when POLLER_MODE is untouched (still at its "failover"
+        default). An explicit POLLER_MODE=off or =full always wins.
+        """
+        if self.poller_enabled and self.poller_mode == "failover":
+            return "full"
+        return self.poller_mode
 
     @field_validator("strike_window")
     @classmethod
