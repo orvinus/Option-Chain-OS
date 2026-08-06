@@ -11,17 +11,23 @@ live ticks — no aggregator or read-API change is needed.
 Design invariants (see the approved plan / xts-broker-gotchas):
   * NEVER call ``login()``. XTS is single-session-per-appKey; a second login would
     kill the live feed's token. The poller only reads ``get_session_manager().token``
-    and, on a 401, raises ``TokenStale`` to abort the sweep and waits for the feed's
-    own self-heal to mint a fresh token (picked up on the next cycle).
+    and, on a 401, raises ``TokenStale`` to abort the sweep — the SessionSteward
+    mints a fresh token, picked up on the next cycle.
   * Set ``underlying`` on every Tick (the aggregator copies it through; it does not
     fill it) so ``/api/option-chain`` shows spot for polled symbols.
   * Skip ``oi <= 0`` (mirror the live feed's OI-zero guard) so a throttled read
     never writes a false "OI crashed to 0" row.
-  * Skip the active symbol (the live feed already covers it, fresher).
+  * Skip the active symbol ONLY while the WS feed is delivering — when the socket
+    is dead, the poller is the failover that keeps the dashboard alive.
   * Route ATM math through ``resolve_option_universe`` (per-symbol strike step) —
     the poller does not inherit the global-step ``atm_drift_watch`` bug.
 
-Cadence is tiered by liquidity via ``SymbolEntry.poll_tier`` (fast/mid/slow).
+Modes (``POLLER_MODE``):
+  * ``failover`` — ONE task polling ONLY the active symbol, ONLY while the steward
+    reports the WS feed unhealthy (plus a linger). Zero requests in normal
+    operation; ~15s REST updates instead of a dark dashboard during an outage.
+  * ``full`` — the original all-symbol tiered snapshotter (fast/mid/slow via
+    ``SymbolEntry.poll_tier``), plus the same conditional active-symbol coverage.
 """
 from __future__ import annotations
 
@@ -105,18 +111,37 @@ class UniversePoller:
     async def start(self) -> None:
         self._stopping.clear()
         self._client = httpx.AsyncClient(timeout=30.0)
+        mode = settings.effective_poller_mode
+        if mode == "failover":
+            # One lightweight task; no tiers, no prewarm — it does nothing at all
+            # until the steward declares the WS feed unhealthy.
+            self._tasks.append(
+                asyncio.create_task(self._run_failover(), name="poller-failover")
+            )
+            log.info(
+                "poller.started",
+                mode="failover",
+                interval_s=settings.poller_failover_interval_s,
+                window=settings.poller_strike_window,
+            )
+            return
         tiers = self._build_tiers()
         # Best-effort master pre-warm so many per-symbol resolves don't each trigger
         # the full FO dump. Safe to skip if not yet authenticated (first sweep warms it).
         try:
-            if get_session_manager().authenticated:
+            if get_session_manager().has_usable_token:
                 await get_scripmaster(settings.underlying_symbol)
         except Exception as e:  # pragma: no cover - warmup is best-effort
             log.debug("poller.prewarm.skip", error=str(e))
         for tier in tiers:
             self._tasks.append(asyncio.create_task(self._run_tier(tier), name=f"poller-{tier.name}"))
+        # Full mode ALSO gets the failover behavior for the active symbol.
+        self._tasks.append(
+            asyncio.create_task(self._run_failover(), name="poller-failover")
+        )
         log.info(
             "poller.started",
+            mode="full",
             tiers={t.name: {"n": len(t.symbols), "interval_s": t.interval_s} for t in tiers},
             window=settings.poller_strike_window,
             expiries=settings.poller_expiry_policies,
@@ -138,6 +163,56 @@ class UniversePoller:
 
     # ------------------------------------------------------------------ scheduler
 
+    @staticmethod
+    def _ws_feed_delivering() -> bool:
+        """Is the live socket healthy AND stably so? (steward's lingered verdict).
+
+        Fail-safe True when the steward does not exist yet (startup) — behave
+        like the old unconditional skip rather than double-covering.
+        """
+        try:
+            from .session_steward import get_steward
+
+            steward = get_steward()
+            if steward is None:
+                return True
+            return steward.ws_feed_stable
+        except Exception:  # pragma: no cover
+            return True
+
+    async def _run_failover(self) -> None:
+        """Cover the ACTIVE symbol over REST while the WS feed is down.
+
+        The whole reason a dead socket used to mean a dark dashboard: the poller
+        skipped the active symbol unconditionally ("the live feed already covers
+        it, fresher") — an assumption stated as fact even when the feed was dead
+        for 14 hours. This loop is that assumption made conditional.
+        """
+        was_covering = False
+        while not self._stopping.is_set():
+            try:
+                if self._ws_feed_delivering():
+                    if was_covering:
+                        was_covering = False
+                        log.info("poller.failover_stop", hint="WS feed recovered")
+                else:
+                    if not was_covering:
+                        was_covering = True
+                        log.warning("poller.failover_start", symbol=get_runtime().active_symbol)
+                    await self._poll_symbols(
+                        [get_runtime().active_symbol], force_include_active=True
+                    )
+            except TokenStale:
+                log.warning("poller.token_stale", tier="failover")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log.warning("poller.tier_error", tier="failover", error=str(e))
+            try:
+                await asyncio.sleep(max(5.0, settings.poller_failover_interval_s))
+            except asyncio.CancelledError:
+                return
+
     async def _run_tier(self, tier: _PollTier) -> None:
         await asyncio.sleep(_TIER_START_STAGGER.get(tier.name, 0.0))
         while not self._stopping.is_set():
@@ -158,9 +233,13 @@ class UniversePoller:
 
     # ------------------------------------------------------------------ one sweep
 
-    async def _poll_symbols(self, symbols: list[str]) -> None:
+    async def _poll_symbols(self, symbols: list[str], force_include_active: bool = False) -> None:
         sess = get_session_manager()
-        if not sess.authenticated:
+        # has_usable_token, NOT authenticated: mid-recovery the broker-rejected
+        # flag is often set while the token still answers REST quotes — the one
+        # failover data path must not be disarmed by exactly the state it covers.
+        # A genuinely dead token fails the first quote (TokenStale) cheaply.
+        if not sess.has_usable_token:
             log.info("poller.no_session")
             return
         token = sess.token
@@ -172,7 +251,12 @@ class UniversePoller:
             e = reg.get(s)
             if e is None or not e.fno_eligible:
                 continue
-            if settings.poller_skip_active_symbol and e.symbol == active:
+            if (
+                settings.poller_skip_active_symbol
+                and e.symbol == active
+                and not force_include_active
+                and self._ws_feed_delivering()
+            ):
                 continue
             entries.append(e)
         if not entries:
@@ -261,6 +345,9 @@ class UniversePoller:
                     oi=int(oi),
                     volume=int(vol or 0),
                     underlying=float(spot),
+                    # REST rows advance overall freshness but never WS freshness —
+                    # failover data must not mask a dead socket from the steward.
+                    origin="poller",
                 )
                 try:
                     self._queue.put_nowait(tick)

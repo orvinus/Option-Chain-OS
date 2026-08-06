@@ -117,9 +117,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             rt.steward = steward
             spawn_supervised(steward.run, "session-steward")
 
-            # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
-            # aggregator → option_oi_snapshots path as the live feed.
-            if settings.poller_enabled:
+            # REST snapshotter: "failover" covers the active symbol while the WS
+            # feed is down; "full" additionally polls the whole F&O universe.
+            if settings.effective_poller_mode != "off":
                 poller = UniversePoller(rt.tick_queue)
                 await poller.start()
                 rt.universe_poller = poller
