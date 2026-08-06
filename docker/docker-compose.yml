@@ -1,6 +1,19 @@
+# Bounded container logs. Docker's default json-file driver has NO size cap —
+# production had unbounded logs competing with the DB for one disk, AND every
+# rebuild deleted them (the 08-05 outage evidence died in a deploy). 50MB x 5
+# files per service keeps days of history that survive until rotation, not
+# until the next `up -d --build`. NOTE: applies on container RECREATION only —
+# the first deploy after this change recreates all three (do it market-closed).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
+    logging: *default-logging
     environment:
       # Set POSTGRES_PASSWORD in the repo-root .env. The old hardcoded "postgres"
       # default is a superuser credential, and a Postgres superuser can run
@@ -27,6 +40,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+    logging: *default-logging
     env_file:
       - ../.env
     environment:
@@ -53,6 +67,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
+    logging: *default-logging
     depends_on:
       - backend
     ports:
