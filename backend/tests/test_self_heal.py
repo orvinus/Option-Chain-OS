@@ -6,8 +6,9 @@ These guard the "feed must never silently die" behaviour added 2026-06-17:
   * ``MarketDataSession.login`` enforces the rotation floor (LOGIN_FLOOR_S):
     within it every non-manual login — forced or not — reuses the token, so
     the single-session token cannot be thrashed by racing recovery actors.
-  * ``OptionFeedClient._self_heal_auth`` re-logins + requests a reconnect on an
-    auth failure, but respects the cooldown and the attempt cap (no login storm).
+  * ``OptionFeedClient._request_auth_recovery`` REPORTS auth trouble to the
+    SessionSteward (throttled) and never rotates the token itself — the feed
+    client is a demoted actor under the single-rotation-authority design.
 
 Runnable without pytest:  python -m tests.test_self_heal   (exit 0 = all passed)
 Also collectable by pytest (each ``test_*`` is an async function).
@@ -22,9 +23,8 @@ import httpx
 from app.auth.market_session import MarketDataSession
 from app.ingest import ws_client
 from app.ingest.ws_client import (
-    AUTO_RELOGIN_ATTEMPT_DECAY_S,
-    AUTO_RELOGIN_COOLDOWN_S,
-    AUTO_RELOGIN_MAX_ATTEMPTS,
+    AUTH_RECOVERY_REQUEST_COOLDOWN_S,
+    AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED,
     OptionFeedClient,
     _classify_400,
 )
@@ -125,122 +125,103 @@ def _make_feed() -> OptionFeedClient:
     return OptionFeedClient(q, _provider)
 
 
-async def test_self_heal_relogins_and_requests_reconnect() -> None:
+async def test_auth_trouble_requests_recovery_never_logs_in() -> None:
+    """DEMOTION regression: the feed client must never rotate the token itself.
+    During outage #2 its self-heal was one of five independent rotation actors;
+    now it only reports to the steward."""
     feed = _make_feed()
     login_calls = {"n": 0}
+    requests: list[str] = []
 
     class FakeSession:
-        async def login(self, force: bool = False):
+        async def login(self, force: bool = False, manual: bool = False, actor: str = ""):
             login_calls["n"] += 1
             return None
 
-        # Broker-truth markers used by _self_heal_auth (see F4).
         def mark_broker_ok(self) -> None: ...
         def mark_broker_rejected(self, reason: str = "") -> None: ...
 
-    fake = FakeSession()
-    orig = ws_client.get_session_manager
-    ws_client.get_session_manager = lambda: fake  # type: ignore[assignment]
-    try:
-        assert feed._reconnect_requested is False
-        await feed._self_heal_auth()
-        assert login_calls["n"] == 1, "first auth failure must trigger a re-login"
-        assert feed._reconnect_requested is True, "self-heal must request a socket reconnect"
-        assert feed._auto_relogin_attempts == 1
-    finally:
-        ws_client.get_session_manager = orig  # type: ignore[assignment]
+    class FakeSteward:
+        def request_recovery(self, reason: str) -> None:
+            requests.append(reason)
 
+    from app.ingest import session_steward as st_mod
 
-async def test_self_heal_respects_cooldown() -> None:
-    feed = _make_feed()
-    login_calls = {"n": 0}
-
-    class FakeSession:
-        async def login(self, force: bool = False):
-            login_calls["n"] += 1
-            return None
-
-        # Broker-truth markers used by _self_heal_auth (see F4).
-        def mark_broker_ok(self) -> None: ...
-        def mark_broker_rejected(self, reason: str = "") -> None: ...
-
-    orig = ws_client.get_session_manager
+    orig_sess = ws_client.get_session_manager
+    orig_steward = st_mod._steward
     ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
+    st_mod._steward = FakeSteward()  # type: ignore[assignment]
     try:
-        await feed._self_heal_auth()  # attempt 1 (logs in)
-        await feed._self_heal_auth()  # immediate retry -> blocked by cooldown
-        assert login_calls["n"] == 1, "second self-heal within cooldown must NOT re-login"
-    finally:
-        ws_client.get_session_manager = orig  # type: ignore[assignment]
-
-
-async def test_self_heal_gives_up_after_cap() -> None:
-    feed = _make_feed()
-    login_calls = {"n": 0}
-
-    class FakeSession:
-        async def login(self, force: bool = False):
-            login_calls["n"] += 1
-            return None
-
-        # Broker-truth markers used by _self_heal_auth (see F4).
-        def mark_broker_ok(self) -> None: ...
-        def mark_broker_rejected(self, reason: str = "") -> None: ...
-
-    orig = ws_client.get_session_manager
-    ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
-    try:
-        # Drive past the cap, defeating the cooldown each round by rewinding the clock.
-        for _ in range(AUTO_RELOGIN_MAX_ATTEMPTS + 3):
-            feed._last_auto_relogin = time.time() - (AUTO_RELOGIN_COOLDOWN_S + 1)
-            await feed._self_heal_auth()
-        assert login_calls["n"] == AUTO_RELOGIN_MAX_ATTEMPTS, (
-            f"self-heal must stop after {AUTO_RELOGIN_MAX_ATTEMPTS} attempts, "
-            f"got {login_calls['n']} (login storm!)"
+        await feed._request_auth_recovery("test failure")
+        assert login_calls["n"] == 0, (
+            "the feed client logged in directly — the single-rotation-authority "
+            "invariant is broken and the login storm can return"
         )
+        assert len(requests) == 1 and "test failure" in requests[0]
     finally:
-        ws_client.get_session_manager = orig  # type: ignore[assignment]
+        ws_client.get_session_manager = orig_sess  # type: ignore[assignment]
+        st_mod._steward = orig_steward
 
 
-async def test_self_heal_attempt_budget_re_arms_after_quiet_period() -> None:
-    """The attempt cap must NOT be a one-way latch.
-
-    Its only other reset is a fully clean subscribe, which cannot happen while auth
-    is broken — so before this, five failures disabled auto-recovery for the entire
-    process lifetime and only a manual restart brought the feed back (the
-    2026-08-03/04 production outage). After a quiet spell the budget must re-arm.
-    """
+async def test_auth_recovery_requests_are_throttled() -> None:
     feed = _make_feed()
-    login_calls = {"n": 0}
+    requests: list[str] = []
 
     class FakeSession:
-        async def login(self, force: bool = False):
-            login_calls["n"] += 1
-            return None
-
-        # Broker-truth markers used by _self_heal_auth (see F4).
         def mark_broker_ok(self) -> None: ...
         def mark_broker_rejected(self, reason: str = "") -> None: ...
 
-    orig = ws_client.get_session_manager
-    ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
-    try:
-        for _ in range(AUTO_RELOGIN_MAX_ATTEMPTS + 3):
-            feed._last_auto_relogin = time.time() - (AUTO_RELOGIN_COOLDOWN_S + 1)
-            await feed._self_heal_auth()
-        assert login_calls["n"] == AUTO_RELOGIN_MAX_ATTEMPTS
-        assert feed._auto_relogin_attempts == AUTO_RELOGIN_MAX_ATTEMPTS
+    class FakeSteward:
+        def request_recovery(self, reason: str) -> None:
+            requests.append(reason)
 
-        # Now go quiet past the decay window — the next failure must try again.
-        feed._last_auto_relogin = time.time() - (AUTO_RELOGIN_ATTEMPT_DECAY_S + 1)
-        await feed._self_heal_auth()
-        assert login_calls["n"] == AUTO_RELOGIN_MAX_ATTEMPTS + 1, (
-            "self-heal must re-arm after a quiet period instead of latching off "
-            "for the life of the process"
-        )
-        assert feed._auto_relogin_attempts == 1
+    from app.ingest import session_steward as st_mod
+
+    orig_sess = ws_client.get_session_manager
+    orig_steward = st_mod._steward
+    ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
+    st_mod._steward = FakeSteward()  # type: ignore[assignment]
+    try:
+        await feed._request_auth_recovery("a")
+        await feed._request_auth_recovery("b")  # inside the cooldown -> dropped
+        assert len(requests) == 1, "a tight reconnect loop must not spam the steward"
+        feed._last_auth_request = time.time() - (AUTH_RECOVERY_REQUEST_COOLDOWN_S + 1)
+        await feed._request_auth_recovery("c")
+        assert len(requests) == 2
     finally:
-        ws_client.get_session_manager = orig  # type: ignore[assignment]
+        ws_client.get_session_manager = orig_sess  # type: ignore[assignment]
+        st_mod._steward = orig_steward
+
+
+async def test_repeated_unanswered_requests_mark_broker_rejected() -> None:
+    """Health honesty: after N unanswered recovery requests, authenticated must
+    stop reading true — but WITHOUT any actor auto-rotating off that flag."""
+    feed = _make_feed()
+    rejected: list[str] = []
+
+    class FakeSession:
+        def mark_broker_ok(self) -> None: ...
+
+        def mark_broker_rejected(self, reason: str = "") -> None:
+            rejected.append(reason)
+
+    class FakeSteward:
+        def request_recovery(self, reason: str) -> None: ...
+
+    from app.ingest import session_steward as st_mod
+
+    orig_sess = ws_client.get_session_manager
+    orig_steward = st_mod._steward
+    ws_client.get_session_manager = lambda: FakeSession()  # type: ignore[assignment]
+    st_mod._steward = FakeSteward()  # type: ignore[assignment]
+    try:
+        for _ in range(AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED):
+            feed._last_auth_request = time.time() - (AUTH_RECOVERY_REQUEST_COOLDOWN_S + 1)
+            await feed._request_auth_recovery("still broken")
+        assert rejected, "health must be told the session is not answering"
+    finally:
+        ws_client.get_session_manager = orig_sess  # type: ignore[assignment]
+        st_mod._steward = orig_steward
 
 
 # --------------------------------------------------------------------------- runner

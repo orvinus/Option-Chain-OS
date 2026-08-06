@@ -44,16 +44,24 @@ async def _bootstrap_live_ingestion_if_needed(fresh_token_minted: bool = True) -
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest) -> LoginResponse:
-    """Establish the XTS market-data session using env appKey/secretKey.
+    """Establish (or coalesce onto) the XTS market-data session.
 
-    Responds as soon as login + DB persist succeed; live ingestion starts in the
-    background so the browser does not hang on network latency.
+    COALESCING by default: this endpoint no longer rotates the token on every
+    call. During the 2026-08-06 outage the frontend hit it with force=True every
+    ~6 seconds, each rotation killing the socket the previous one had enabled.
+    Now:
+
+    * session healthy → 200 "reused", ZERO broker calls. This also defuses any
+      old cached frontend bundle still running the removed auto-login loop —
+      success flips its `authenticated` gate and ends its retry cycle.
+    * session unhealthy → a recovery REQUEST to the steward + a short wait; the
+      response honestly reports where things stand.
+    * ``force_new_token=true`` → the one manual path that truly mints (a human
+      explicitly asked for a new broker session).
     """
     # Hard gate: a replay instance must NEVER log into the broker. The broker allows
     # ONE market-data session per appKey, so a login here would steal the single
-    # production session (the recurring "data goes wrong every few days" bug). The
-    # frontend also skips auto-connect in replay, but this is the authoritative
-    # backstop — no caller can coax a replay backend into a broker session.
+    # production session (the recurring "data goes wrong every few days" bug).
     if settings.run_mode != "live":
         raise HTTPException(
             409,
@@ -72,40 +80,79 @@ async def login(body: LoginRequest) -> LoginResponse:
             "XTS_MD_SECRET_KEY in your .env file.",
         )
 
-    try:
+    from ..ingest.session_steward import get_steward
+
+    steward = get_steward()
+
+    if body.force_new_token:
+        # The explicit human override — the only path that demands a rotation.
         try:
-            # force=True: an explicit dashboard login always mints a fresh token,
-            # bypassing the debounce (the user clicked because they want a new session).
-            await asyncio.wait_for(sess.login(force=True), timeout=settings.xts_login_timeout_s)
-        except asyncio.TimeoutError:
+            try:
+                await asyncio.wait_for(
+                    sess.login(force=True, manual=True, actor="api-manual"),
+                    timeout=settings.xts_login_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    504,
+                    "The XTS market-data gateway did not respond in time. Check your "
+                    f"network and XTS_MD_BASE_URL (timeout {settings.xts_login_timeout_s:.0f}s).",
+                ) from None
+            log.info("auth.login.manual_rotation", user_id=sess.user_id)
+            asyncio.create_task(
+                _bootstrap_live_ingestion_if_needed(fresh_token_minted=True),
+                name="bootstrap-ingestion",
+            )
+        except HTTPException:
+            raise
+        except SQLAlchemyError as e:
+            log.error("auth.login.db_error", error=str(e))
             raise HTTPException(
-                504,
-                "The XTS market-data gateway did not respond in time. Check your "
-                f"network and XTS_MD_BASE_URL (timeout {settings.xts_login_timeout_s:.0f}s).",
-            ) from None
+                503,
+                "Could not save your session to PostgreSQL. Start TimescaleDB "
+                "(Docker Desktop + scripts/start-timescale.ps1) and confirm DB_URL in .env. "
+                f"Database error: {e}",
+            ) from e
+        except Exception as e:
+            log.warning("auth.login.failed", error=str(e))
+            raise HTTPException(401, f"XTS market-data login failed: {e}") from e
+        return LoginResponse(
+            status="ok",
+            message="Fresh broker session minted. Live ingestion is reconnecting.",
+            authenticated=True,
+        )
 
-        log.info("auth.login.success", user_id=sess.user_id)
-        asyncio.create_task(_bootstrap_live_ingestion_if_needed(), name="bootstrap-ingestion")
-
-    except HTTPException:
-        raise
-    except SQLAlchemyError as e:
-        log.error("auth.login.db_error", error=str(e))
-        raise HTTPException(
-            503,
-            "Could not save your session to PostgreSQL. Start TimescaleDB "
-            "(Docker Desktop + scripts/start-timescale.ps1) and confirm DB_URL in .env. "
-            f"Database error: {e}",
-        ) from e
-    except Exception as e:
-        log.warning("auth.login.failed", error=str(e))
-        raise HTTPException(401, f"XTS market-data login failed: {e}") from e
-
-    return LoginResponse(
-        status="ok",
-        message="Logged in. Live ingestion is starting in the background.",
-        authenticated=True,
-    )
+    # Default path: coalesce or request recovery — never rotate from here.
+    feed_healthy = steward is not None and steward.ws_feed_healthy
+    if sess.authenticated and feed_healthy:
+        # Make sure ingestion exists (first login after a deferred startup).
+        asyncio.create_task(
+            _bootstrap_live_ingestion_if_needed(fresh_token_minted=False),
+            name="bootstrap-ingestion",
+        )
+        return LoginResponse(
+            status="ok", message="Already connected — session reused.", authenticated=True
+        )
+    if steward is None:
+        # Live mode before the lifespan finished (or tests) — nothing to ask yet.
+        return LoginResponse(
+            status="ok",
+            message="Backend still starting; recovery will run automatically.",
+            authenticated=sess.authenticated,
+        )
+    recovered = await steward.request_recovery_and_wait("api-login", timeout_s=15.0)
+    if recovered:
+        msg = "Reconnected."
+    elif sess.circuit_state == "open":
+        msg = (
+            "Recovery is parked (rotation circuit open: "
+            f"{sess.circuit_reason or 'repeated failures'}). It retries every few "
+            "minutes; to force a fresh broker session POST force_new_token=true."
+        )
+    else:
+        msg = "Recovery requested — the steward is escalating in the background."
+    log.info("auth.login.recovery_requested", recovered=recovered)
+    return LoginResponse(status="ok", message=msg, authenticated=sess.authenticated)
 
 
 async def _fixed_credential_gate(
@@ -152,25 +199,27 @@ async def _fixed_credential_gate(
     if sess.authenticated:
         return LoginResponse(status="ok", message="Already connected.", authenticated=True)
 
-    # (d) The broker session is a BONUS, not a precondition. The user's dashboard
-    #     credentials were already verified in (b), and every read endpoint serves
-    #     stored history without a broker session. Previously a broker outage
-    #     propagated its 401 straight out of this gate, so a correct password was
-    #     rejected and months of collected data became unreachable — exactly when
-    #     you most want to look at history. Degrade instead: unlock the UI and
-    #     report authenticated=False so the dashboard can flag the feed as offline.
-    try:
-        return await login(LoginRequest())
-    except HTTPException as e:
-        log.warning("auth.gate.broker_unavailable", gate=gate_label, detail=str(e.detail))
-        return LoginResponse(
-            status="ok",
-            message=(
-                "Signed in. The broker feed is unavailable right now, so this is "
-                f"stored historical data only ({e.detail})"
-            ),
-            authenticated=False,
-        )
+    # (d) The broker session is a BONUS, not a precondition — and a sign-in must
+    #     NEVER rotate the token. This gate used to call the login flow with
+    #     force=True, which meant every dashboard sign-in during an outage
+    #     invalidated the socket's token and fed the login storm. Ask the steward
+    #     to recover, wait briefly, and report honestly either way.
+    from ..ingest.session_steward import get_steward
+
+    steward = get_steward()
+    if steward is not None:
+        recovered = await steward.request_recovery_and_wait(f"gate:{gate_label}", timeout_s=10.0)
+        if recovered:
+            return LoginResponse(status="ok", message="Signed in — feed connected.", authenticated=True)
+    log.info("auth.gate.feed_recovering", gate=gate_label)
+    return LoginResponse(
+        status="ok",
+        message=(
+            "Signed in. The broker feed is recovering in the background — "
+            "stored historical data is fully available meanwhile."
+        ),
+        authenticated=False,
+    )
 
 
 @router.post("/hidden-login", response_model=LoginResponse)

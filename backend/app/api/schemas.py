@@ -326,12 +326,19 @@ class AuthCallbackResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """Empty by design.
+    """Near-empty by design.
 
     The XTS market-data session authenticates with the appKey/secretKey in .env —
     there is no client code, MPIN or TOTP. Extra keys are ignored, so an older
     client still posting them keeps working.
+
+    ``force_new_token=true`` is the ONLY way a caller can demand an actual token
+    rotation (a human clicking "Force new broker session"). Every other login
+    request coalesces onto the existing session or becomes a recovery request to
+    the steward — rotations are single-authority now.
     """
+
+    force_new_token: bool = False
 
 
 class LoginResponse(BaseModel):
