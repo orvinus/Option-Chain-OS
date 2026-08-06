@@ -1,0 +1,8 @@
+[Unit]
+Description=Nightly OI database backup (pg_dump, verified, retention-pruned)
+OnFailure=oi-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oi-backup
+TimeoutStartSec=1800

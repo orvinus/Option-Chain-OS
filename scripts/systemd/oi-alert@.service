@@ -1,0 +1,6 @@
+[Unit]
+Description=Page the operator when a supervised OI unit fails (%i)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oi-sentinel alert "systemd unit %i FAILED on this VPS — journalctl -u %i -n 50"

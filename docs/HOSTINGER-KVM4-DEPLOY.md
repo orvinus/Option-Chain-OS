@@ -220,7 +220,7 @@ both servers' auto-heal loops fight forever.
 
 From the repo root on the VPS:
 ```bash
-cd /opt/nifty-oi
+cd /root/nifty-oi
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 docker compose --env-file .env -f docker/docker-compose.yml logs -f backend
 ```
@@ -346,7 +346,7 @@ Once launched, it's meant to be hands-off:
   in the dashboard.
 - **Deploy updates:**
   ```bash
-  cd /opt/nifty-oi && git pull
+  cd /root/nifty-oi && git pull
   docker compose --env-file .env -f docker/docker-compose.yml up -d --build
   ```
   (~30s feed gap; the session restores itself.)
@@ -364,7 +364,7 @@ Once launched, it's meant to be hands-off:
 **On the VPS (nightly logical dump).** `mkdir -p /root/backups`, then `crontab -e`
 and add (16:30 IST, weekdays):
 ```cron
-30 16 * * 1-5 cd /opt/nifty-oi && docker compose --env-file .env -f docker/docker-compose.yml exec -T timescaledb sh -c 'pg_dump -U postgres -Fc oi > /tmp/oi.dump' && docker compose --env-file .env -f docker/docker-compose.yml cp timescaledb:/tmp/oi.dump /root/backups/oi_$(date +\%F).dump
+30 16 * * 1-5 cd /root/nifty-oi && docker compose --env-file .env -f docker/docker-compose.yml exec -T timescaledb sh -c 'pg_dump -U postgres -Fc oi > /tmp/oi.dump' && docker compose --env-file .env -f docker/docker-compose.yml cp timescaledb:/tmp/oi.dump /root/backups/oi_$(date +\%F).dump
 ```
 
 **Pull copies down to your PC** with the committed script (already tested):

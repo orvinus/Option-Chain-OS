@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Nightly TimescaleDB dump with retention. Safe to re-run; designed for cron.
+# Nightly TimescaleDB dump with retention. Safe to re-run.
 #
-# Install (runs 02:30 IST daily, before the pre-open window):
-#   sudo cp scripts/backup-db.sh /usr/local/bin/oi-backup && sudo chmod +x /usr/local/bin/oi-backup
-#   ( crontab -l 2>/dev/null; echo "30 2 * * * /usr/local/bin/oi-backup >>/var/log/oi-backup.log 2>&1" ) | crontab -
+# Install: scripts/install-sentinel.sh puts this at /usr/local/bin/oi-backup and
+# enables oi-backup.timer (02:30 IST daily, OnFailure pages via Telegram). The
+# oi-sentinel additionally alerts when the newest dump is >26h old.
 #
 # A dump ON THE SAME BOX only protects against bad deploys and accidental
-# deletes, not disk loss or ransomware. Copy DEST off-box as well (see the
-# note at the end of this file).
+# deletes, not disk loss or ransomware. Set OI_BACKUP_REMOTE in the repo .env
+# (an rsync target, e.g. user@host:/backups/nifty-oi/) for the off-box copy.
 set -euo pipefail
 
 REPO="${OI_REPO:-/root/nifty-oi}"
@@ -50,6 +50,20 @@ fi
 # Retention — only delete AFTER a good dump exists, never before.
 find "$DEST" -name 'oi_*.sql.gz' -mtime "+$KEEP_DAYS" -print -delete
 echo "$(date -Is) done. $(ls -1 "$DEST"/oi_*.sql.gz 2>/dev/null | wc -l) backup(s) retained."
+
+# Off-box copy — a local-only backup dies with the disk. Warn-but-succeed: the
+# local dump above is good, and the sentinel's backup-age check + this unit's
+# OnFailure pager cover the alerting.
+REMOTE=$(grep -E '^OI_BACKUP_REMOTE=' "$REPO/.env" 2>/dev/null | cut -d= -f2- || true)
+if [[ -n "$REMOTE" ]]; then
+  if rsync -az "$DEST/" "$REMOTE" 2>/dev/null; then
+    echo "$(date -Is) off-box copy OK -> $REMOTE"
+  else
+    echo "$(date -Is) WARN: off-box copy to $REMOTE failed (local dump is fine)"
+  fi
+else
+  echo "$(date -Is) NOTE: OI_BACKUP_REMOTE unset — no off-box copy (dies with this disk)"
+fi
 
 # Restore:
 #   gunzip -c /var/backups/nifty-oi/oi_YYYY-MM-DD_HHMM.sql.gz \
