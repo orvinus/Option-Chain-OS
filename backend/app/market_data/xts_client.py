@@ -297,7 +297,9 @@ def _subscription_body(instruments: list[dict], xts_message_code: int) -> dict:
     return {"instruments": instruments, "xtsMessageCode": int(xts_message_code)}
 
 
-async def subscribe(token: str, instruments: list[dict], xts_message_code: int) -> dict:
+async def subscribe(
+    token: str, instruments: list[dict], xts_message_code: int, timeout: float = DEFAULT_TIMEOUT
+) -> dict:
     """Subscribe instruments to one message code's stream (``POST /instruments/subscription``).
 
     NOTE: the broker doc lists PUT for both subscribe and unsubscribe (which
@@ -305,7 +307,7 @@ async def subscribe(token: str, instruments: list[dict], xts_message_code: int) 
     convention of POST=subscribe / PUT=unsubscribe. If your broker differs,
     flip the HTTP verbs here.
     """
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             f"{base_url()}/instruments/subscription",
             json=_subscription_body(instruments, xts_message_code),
@@ -315,9 +317,11 @@ async def subscribe(token: str, instruments: list[dict], xts_message_code: int) 
         return resp.json()
 
 
-async def unsubscribe(token: str, instruments: list[dict], xts_message_code: int) -> dict:
+async def unsubscribe(
+    token: str, instruments: list[dict], xts_message_code: int, timeout: float = DEFAULT_TIMEOUT
+) -> dict:
     """Unsubscribe instruments from one message code's stream (``PUT /instruments/subscription``)."""
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.put(
             f"{base_url()}/instruments/subscription",
             json=_subscription_body(instruments, xts_message_code),
@@ -325,3 +329,34 @@ async def unsubscribe(token: str, instruments: list[dict], xts_message_code: int
         )
         resp.raise_for_status()
         return resp.json()
+
+
+async def validate_token(token: str) -> bool | None:
+    """Cheap authenticated probe: is this token alive at the broker RIGHT NOW?
+
+    Returns True (broker accepted it), False (broker rejected it — invalid/stale
+    session), or None (network trouble — inconclusive; the caller decides).
+
+    Exists because the restore-at-boot path used to trust any <24h-old stored
+    token on pure TTL arithmetic — including one a previous shutdown had already
+    logged out at the broker — and the process then ran a whole session on a
+    corpse while /api/health said authenticated=true.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{base_url()}/instruments/indexlist",
+                params={"exchangeSegment": SEG_NSECM},
+                headers=authed_headers(token),
+            )
+    except Exception as e:
+        log.warning("xts.validate_token.inconclusive", error=str(e))
+        return None
+    if resp.status_code == 200:
+        return True
+    body = (resp.text or "").lower()
+    if resp.status_code in (400, 401) and ("invalid token" in body or "e-session" in body or resp.status_code == 401):
+        return False
+    # Unexpected status (5xx, throttle) — don't condemn the token for a gateway wobble.
+    log.warning("xts.validate_token.unexpected_status", status=resp.status_code)
+    return None

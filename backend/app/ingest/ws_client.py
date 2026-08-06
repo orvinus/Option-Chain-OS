@@ -54,6 +54,17 @@ HEARTBEAT_TIMEOUT_SECONDS = 30
 BACKOFF_INITIAL = 2.0
 BACKOFF_MAX = 60.0
 CONNECT_TIMEOUT_SECONDS = 15
+# Bounds the WHOLE sio.connect() call. python-socketio's wait_timeout only limits
+# the wait for the Socket.IO CONNECT packet after the Engine.IO transport is up —
+# the aiohttp WebSocket handshake underneath is NOT covered, so a half-open TCP
+# (NAT/conntrack drop with no RST) could park the supervisor here indefinitely.
+CONNECT_TOTAL_TIMEOUT_S = 25.0
+# Total budget for _subscribe_all. The per-instrument 400 fallback can degrade to
+# ~93 sequential POSTs; at the old 30s/request that was a worst case of ~46 minutes
+# inside _connect_once with feed_connected=false and every watchdog nudge a no-op.
+SUBSCRIBE_TOTAL_BUDGET_S = 60.0
+SUBSCRIBE_CALL_TIMEOUT_S = 10.0
+TEARDOWN_TIMEOUT_S = 5.0
 
 # Self-heal: when EVERY subscription is rejected with an auth error ('Invalid
 # Token'), the feed auto re-logins (minting a fresh XTS token) and reconnects —
@@ -110,8 +121,17 @@ class OptionFeedClient:
         self._sio: socketio.AsyncClient | None = None
         self._stopping = asyncio.Event()
         self._connected = asyncio.Event()
+        # Set by nudge_reconnect() to wake the supervisor's backoff sleep. Without
+        # it a nudge while already disconnected was a pure no-op: clearing a clear
+        # _connected changes nothing, and the backoff wait only watched _stopping —
+        # which is how every watchdog escalation during outage #2 did nothing.
+        self._kick = asyncio.Event()
         self._supervisor_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        # Outcome of the most recent _subscribe_all/swap: instruments actually
+        # delivering (newly subscribed + already-subscribed). Unlike rt.tokens
+        # (which deliberately keeps last-known-good), this is honest about NOW.
+        self._live_subs: int = 0
 
         self._token_meta: dict[str, InstrumentToken] = {}
         # Per-instrument merged state: token -> {"ltp", "volume", "oi"}.
@@ -151,6 +171,26 @@ class OptionFeedClient:
     def is_feed_connected(self) -> bool:
         return self._connected.is_set()
 
+    @property
+    def supervisor_alive(self) -> bool:
+        """True while the ws-supervisor task exists and has not finished.
+
+        A dead supervisor is otherwise invisible: the strong reference on the
+        instance suppresses even asyncio's GC-time "exception was never retrieved"
+        warning, so outage forensics found NOTHING in the logs when it died. The
+        steward polls this and rebuilds the client when it goes false.
+        """
+        return self._supervisor_task is not None and not self._supervisor_task.done()
+
+    @property
+    def last_ws_tick_at(self) -> float:
+        """time.time() of the last real tick from the socket (0.0 before the first)."""
+        return self._last_tick_at
+
+    @property
+    def live_subscription_count(self) -> int:
+        return self._live_subs
+
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._stopping.clear()
@@ -169,9 +209,16 @@ class OptionFeedClient:
         await self._teardown()
 
     def nudge_reconnect(self) -> None:
-        """Drop the live socket so the supervisor reconnects (e.g. at IST session open)."""
+        """Drop the live socket AND wake the supervisor so it reconnects now.
+
+        Both halves matter. Clearing ``_connected`` drops a live socket; setting
+        ``_kick`` wakes a supervisor parked in its backoff sleep. The old
+        implementation only cleared the flag — a no-op whenever the feed was
+        already disconnected, which is every situation a recovery nudge exists for.
+        """
         log.info("ws.nudge_reconnect_requested")
         self._connected.clear()
+        self._kick.set()
 
     async def swap_subscription(
         self,
@@ -213,7 +260,7 @@ class OptionFeedClient:
             token = get_session_manager().token
             for code, insts in old_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
-                    await xts_client.unsubscribe(token, chunk, code)
+                    await xts_client.unsubscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
             ok = 0  # newly subscribed
             already = 0  # benign "already subscribed"
             rejected = 0  # real 400 (incl. cap breach) — no data flows
@@ -222,13 +269,13 @@ class OptionFeedClient:
             for code, insts in new_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
@@ -252,6 +299,7 @@ class OptionFeedClient:
                         else:
                             raise
             self._sub_groups = new_groups
+            self._live_subs = ok + already
             log.info(
                 "ws.swap_subscription.subscribed",
                 newly_subscribed=ok, already_present=already,
@@ -284,6 +332,9 @@ class OptionFeedClient:
         backoff = BACKOFF_INITIAL
         while not self._stopping.is_set():
             try:
+                # A kick that arrived while we were connecting/connected is satisfied
+                # by the connect itself — clear it so it can't skip the NEXT backoff.
+                self._kick.clear()
                 await self._connect_once()
                 backoff = BACKOFF_INITIAL
                 while not self._stopping.is_set() and self._connected.is_set():
@@ -297,11 +348,37 @@ class OptionFeedClient:
                 else:
                     log.error("ws.supervisor.error", error=str(e))
             await self._teardown()
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=backoff)
+            if await self._sleep_or_kick(backoff):
                 return
-            except asyncio.TimeoutError:
-                backoff = min(backoff * 2, BACKOFF_MAX)
+            backoff = min(backoff * 2, BACKOFF_MAX)
+
+    async def _sleep_or_kick(self, backoff: float) -> bool:
+        """Back off, but wake early on a kick. Returns True when stopping.
+
+        The old wait watched only ``_stopping``, so a watchdog nudge could not
+        shorten a 60s backoff — recovery waited for a timer while the market moved.
+        A kick also resets the caller's backoff (we return normally and the caller
+        re-enters connect immediately with backoff untouched-for-this-round).
+        """
+        stop_wait = asyncio.create_task(self._stopping.wait())
+        kick_wait = asyncio.create_task(self._kick.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {stop_wait, kick_wait}, timeout=backoff, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_wait in done:
+                return True
+            if kick_wait in done:
+                log.info("ws.backoff_kicked")
+            return False
+        finally:
+            for t in (stop_wait, kick_wait):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
     async def _connect_once(self) -> None:
         sess = get_session_manager()
@@ -359,12 +436,18 @@ class OptionFeedClient:
         self._connected.clear()
 
         try:
-            await sio.connect(
-                f"{origin}?{query}",
-                socketio_path=sio_path.lstrip("/"),
-                transports=["websocket"],
-                wait=True,
-                wait_timeout=CONNECT_TIMEOUT_SECONDS,
+            # wait_timeout alone does NOT bound the underlying aiohttp websocket
+            # handshake (only the Socket.IO CONNECT packet after it) — the outer
+            # wait_for is what guarantees this call can never hang the supervisor.
+            await asyncio.wait_for(
+                sio.connect(
+                    f"{origin}?{query}",
+                    socketio_path=sio_path.lstrip("/"),
+                    transports=["websocket"],
+                    wait=True,
+                    wait_timeout=CONNECT_TIMEOUT_SECONDS,
+                ),
+                timeout=CONNECT_TOTAL_TIMEOUT_S,
             )
         except Exception as e:
             log.error("ws.connect.failed", error=str(e))
@@ -382,7 +465,20 @@ class OptionFeedClient:
         # (re)connect: if XTS already has these subscriptions on the appKey it
         # returns 400 "already subscribed" (tolerated below); if not, this restores
         # the stream. Either way data flows without tearing the connection down.
-        await self._subscribe_all()
+        # Budgeted: the per-instrument 400 fallback can serialize ~93 POSTs, and an
+        # unbounded run here kept feed_connected=false for tens of minutes while
+        # every recovery nudge was a no-op. On budget exhaustion we proceed with
+        # whatever subscribed — partial data now beats a perfect subscription later;
+        # the heartbeat and the steward judge the outcome.
+        try:
+            await asyncio.wait_for(self._subscribe_all(), timeout=SUBSCRIBE_TOTAL_BUDGET_S)
+        except asyncio.TimeoutError:
+            log.error(
+                "ws.subscribe.budget_exceeded",
+                budget_s=SUBSCRIBE_TOTAL_BUDGET_S,
+                hint="proceeding with the instruments that made it; the heartbeat "
+                "will drop the socket if nothing actually flows.",
+            )
 
         # Self-heal: if the subscribe found an auth failure and re-logged in, the
         # socket we just opened is bound to the now-dead token. Drop it and return
@@ -407,7 +503,9 @@ class OptionFeedClient:
         if not sio:
             return
         try:
-            await sio.disconnect()
+            # Bounded: a disconnect against a half-open TCP can hang, and this runs
+            # OUTSIDE the supervisor's try — an unbounded await here wedged the loop.
+            await asyncio.wait_for(sio.disconnect(), timeout=TEARDOWN_TIMEOUT_S)
         except Exception:
             pass
 
@@ -477,14 +575,14 @@ class OptionFeedClient:
             for code, insts in groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             # Retry one at a time so new instruments get through.
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
@@ -514,6 +612,7 @@ class OptionFeedClient:
             # (real 400) or errored, no ticks will ever arrive — surface it loudly
             # with the XTS reason instead of masking it as success.
             live = ok + already
+            self._live_subs = live
             if live == 0 and (rejected or errors):
                 log.error(
                     "ws.subscribe.all_failed",
