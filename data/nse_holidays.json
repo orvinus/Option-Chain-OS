@@ -1,0 +1,8 @@
+{
+  "_comment": "NSE trading holidays. MAINTENANCE MATTERS: a date wrongly listed here silences outage alerting for that whole day, while a missing date only causes a few capped false pages — so only add dates from the official NSE trading-holiday circular (nseindia.com > Resources > Trading holidays). The shipped list contains only certain fixed-date holidays; add the lunar-calendar ones (Holi, Ganesh Chaturthi, Dussehra, Diwali/Muhurat, Guru Nanak Jayanti, Id, Mahashivratri, Ram Navami, Good Friday...) for each year from the circular. scripts/oi-doctor.sh warns when this file looks under-maintained.",
+  "holidays": [
+    "2026-10-02",
+    "2026-12-25",
+    "2027-01-26"
+  ]
+}
