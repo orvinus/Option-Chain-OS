@@ -43,7 +43,16 @@ def _floor_to_bucket(ts: datetime, bucket: timedelta) -> datetime:
     return datetime.fromtimestamp(floored, tz=timezone.utc)
 
 
-OnFlushHook = Callable[[datetime, int], Awaitable[None]]
+# (bucket_cutoff, rows_flushed, ws_rows_flushed). ws_rows counts only ticks with
+# origin == "ws" so the caller can maintain a WS-specific freshness timestamp that
+# REST-poller rows cannot advance (a dead socket must never look healthy because
+# the failover path is writing).
+OnFlushHook = Callable[[datetime, int, int], Awaitable[None]]
+
+# A DB outage must not let open buckets accrete until the OOM killer converts it
+# into a feed outage too. At 1s buckets x ~100 tokens this is ~10 minutes of full
+# flow; beyond it the oldest buckets are dropped (counted, logged).
+MAX_OPEN_BUCKETS = 60_000
 
 
 class MinuteAggregator:
@@ -61,6 +70,10 @@ class MinuteAggregator:
         self._bucket = _bucket_size()
         # (token, bucket_start) -> Tick (latest observed)
         self._open_buckets: dict[tuple[str, datetime], Tick] = {}
+        self._dropped_buckets = 0
+        # Sample the 1/s "flushed" INFO line down to ~1/min; every flush still
+        # fires the hook, and errors are never sampled.
+        self._last_flush_log: float = 0.0
 
     async def start(self) -> None:
         self._stopping.clear()
@@ -128,8 +141,29 @@ class MinuteAggregator:
         bucket_start = _floor_to_bucket(tick.ts, self._bucket)
         key = (tick.token, bucket_start)
         prev = self._open_buckets.get(key)
-        if prev is None or tick.ts >= prev.ts:
+        # Within a bucket the newest tick wins — EXCEPT that a REST-poller tick may
+        # never displace a live WS tick: poller quotes can be tens of seconds old
+        # (429 backoff) yet carry a fresher enqueue timestamp, and right after WS
+        # recovery a lingering failover sweep would otherwise overwrite the socket's
+        # value with staler data.
+        if prev is not None and prev.origin == "ws" and tick.origin != "ws":
+            return
+        if prev is None or tick.ts >= prev.ts or (prev.origin != "ws" and tick.origin == "ws"):
             self._open_buckets[key] = tick
+        # Bounded memory under a DB outage (flush failures leave buckets in place).
+        # Drop in BATCHES down to 90% of the cap: a per-tick drop would sort the
+        # whole dict and emit a warning on every absorb once saturated.
+        if len(self._open_buckets) > MAX_OPEN_BUCKETS:
+            target = int(MAX_OPEN_BUCKETS * 0.9)
+            overflow = len(self._open_buckets) - target
+            for old_key in sorted(self._open_buckets, key=lambda k: k[1])[:overflow]:
+                self._open_buckets.pop(old_key, None)
+            self._dropped_buckets += overflow
+            log.warning(
+                "aggregator.buckets_dropped_oldest",
+                dropped=overflow, total_dropped=self._dropped_buckets,
+                hint="DB flushes are failing and the retry backlog hit its cap.",
+            )
 
     async def _flush_closed(self, now: datetime, force_all: bool = False) -> None:
         cutoff = _floor_to_bucket(now, self._bucket)
@@ -182,10 +216,17 @@ class MinuteAggregator:
                 )
             for key, _ in to_flush:
                 self._open_buckets.pop(key, None)
-            log.info("aggregator.flushed", rows=len(rows), cutoff=cutoff.isoformat())
+            # At PERSIST_BUCKET=1s this line fired every second (~86k lines/day of
+            # pure noise on the production disk) — sample it to ~1/min. The flush
+            # itself, the hook and every error path are NOT sampled.
+            now_mono = asyncio.get_running_loop().time()
+            if now_mono - self._last_flush_log >= 60.0:
+                self._last_flush_log = now_mono
+                log.info("aggregator.flushed", rows=len(rows), cutoff=cutoff.isoformat())
             if self._on_flush is not None:
+                ws_rows = sum(1 for _, tick in to_flush if tick.origin == "ws")
                 try:
-                    await self._on_flush(cutoff, len(rows))
+                    await self._on_flush(cutoff, len(rows), ws_rows)
                 except Exception as e:  # pragma: no cover - hook failure must not stop ingest
                     log.warning("aggregator.flush_hook.error", error=str(e))
         except Exception as e:

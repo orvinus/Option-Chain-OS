@@ -1,8 +1,3 @@
-interface Props {
-  /** Last error from the automatic broker connect, if any. */
-  connectError?: string | null;
-}
-
 /**
  * Non-blocking notice shown when the BROKER feed is down but our backend is fine.
  *
@@ -11,8 +6,11 @@ interface Props {
  * stored snapshot unreachable — precisely when you most want to review history.
  * Stored data does not depend on the broker, so the pages now render normally and
  * simply flag that nothing is arriving live.
+ *
+ * Recovery is entirely server-side (the SessionSteward escalates on its own —
+ * the browser no longer triggers logins), so this banner only informs.
  */
-export function FeedOfflineBanner({ connectError }: Props) {
+export function FeedOfflineBanner() {
   return (
     <div className="panel p-3 text-xs border border-amber-500/30 bg-amber-500/5 flex items-start gap-2">
       <svg className="w-4 h-4 shrink-0 mt-0.5 text-amber-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -21,10 +19,7 @@ export function FeedOfflineBanner({ connectError }: Props) {
       <span className="text-amber-200/95 leading-snug">
         <b>Live feed offline — showing stored data.</b>{" "}
         Historical charts and tables below are complete up to the last snapshot; only
-        new ticks are missing. Reconnecting automatically.
-        {connectError && (
-          <span className="block mt-1 text-[11px] text-amber-300/70 break-words">{connectError}</span>
-        )}
+        new ticks are missing. The server is recovering the feed automatically.
       </span>
     </div>
   );

@@ -34,7 +34,7 @@ Open: <http://localhost:5173>
 ## Linux / Docker Compose deployment
 
 ```bash
-cd /opt/nifty-oi   # or your clone path
+cd /root/nifty-oi   # production path
 cp .env.example .env
 # fill .env (include API_CORS_ORIGINS for your public URL when not using localhost only)
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
@@ -44,6 +44,11 @@ docker compose --env-file .env -f docker/docker-compose.yml logs -f backend
 Visit <http://your-host>.
 
 ## Unattended ingestion (production)
+
+> Reliability layers, alerting, drills and the paged-at-3am triage live in
+> **[MONITORING.md](MONITORING.md)**. Expect the daily 08:50 IST Telegram
+> heartbeat — its absence means alerting itself is broken.
+
 
 To persist OI into TimescaleDB during **09:15–15:30 IST** without opening the dashboard each day:
 

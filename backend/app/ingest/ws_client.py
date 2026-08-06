@@ -54,19 +54,28 @@ HEARTBEAT_TIMEOUT_SECONDS = 30
 BACKOFF_INITIAL = 2.0
 BACKOFF_MAX = 60.0
 CONNECT_TIMEOUT_SECONDS = 15
+# Bounds the WHOLE sio.connect() call. python-socketio's wait_timeout only limits
+# the wait for the Socket.IO CONNECT packet after the Engine.IO transport is up —
+# the aiohttp WebSocket handshake underneath is NOT covered, so a half-open TCP
+# (NAT/conntrack drop with no RST) could park the supervisor here indefinitely.
+CONNECT_TOTAL_TIMEOUT_S = 25.0
+# Total budget for _subscribe_all. The per-instrument 400 fallback can degrade to
+# ~93 sequential POSTs; at the old 30s/request that was a worst case of ~46 minutes
+# inside _connect_once with feed_connected=false and every watchdog nudge a no-op.
+SUBSCRIBE_TOTAL_BUDGET_S = 60.0
+SUBSCRIBE_CALL_TIMEOUT_S = 10.0
+TEARDOWN_TIMEOUT_S = 5.0
 
-# Self-heal: when EVERY subscription is rejected with an auth error ('Invalid
-# Token'), the feed auto re-logins (minting a fresh XTS token) and reconnects —
-# recovering from the daily token expiry / single-session invalidation with no
-# human action. Cooldown + attempt cap prevent a login storm if something else
-# (a 2nd backend, revoked creds) keeps invalidating the session.
-AUTO_RELOGIN_COOLDOWN_S = 120.0
-AUTO_RELOGIN_MAX_ATTEMPTS = 5
-# ...but the cap must not be permanent. Its only other reset is a fully clean
-# subscribe, which is impossible while auth is broken — so a transient outage used
-# to disable auto-recovery for the whole process lifetime. After this much quiet
-# (no self-heal attempt at all) the burst is considered over and the budget re-arms.
-AUTO_RELOGIN_ATTEMPT_DECAY_S = 900.0
+# Auth trouble is REPORTED, not fixed, from here: the feed client never logs in.
+# During outage #2 the in-feed self-heal was one of five independent actors
+# rotating the single-session token out from under each other every ~6 seconds.
+# All it may do now is request recovery from the SessionSteward (the one rotation
+# authority) — throttled locally so a tight reconnect loop doesn't spam requests.
+AUTH_RECOVERY_REQUEST_COOLDOWN_S = 60.0
+# After this many consecutive unanswered requests, also mark the session
+# broker-rejected so /api/health stops claiming authenticated=true (observability
+# only — nothing auto-rotates off that flag anymore).
+AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED = 3
 
 
 TokensProvider = Callable[[], Awaitable[tuple[list[InstrumentToken], float]]]
@@ -110,8 +119,17 @@ class OptionFeedClient:
         self._sio: socketio.AsyncClient | None = None
         self._stopping = asyncio.Event()
         self._connected = asyncio.Event()
+        # Set by nudge_reconnect() to wake the supervisor's backoff sleep. Without
+        # it a nudge while already disconnected was a pure no-op: clearing a clear
+        # _connected changes nothing, and the backoff wait only watched _stopping —
+        # which is how every watchdog escalation during outage #2 did nothing.
+        self._kick = asyncio.Event()
         self._supervisor_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        # Outcome of the most recent _subscribe_all/swap: instruments actually
+        # delivering (newly subscribed + already-subscribed). Unlike rt.tokens
+        # (which deliberately keeps last-known-good), this is honest about NOW.
+        self._live_subs: int = 0
 
         self._token_meta: dict[str, InstrumentToken] = {}
         # Per-instrument merged state: token -> {"ltp", "volume", "oi"}.
@@ -135,11 +153,9 @@ class OptionFeedClient:
         self._sub_groups: dict[int, list[dict]] = {}
         self._last_tick_at: float = 0.0
         self._latest_underlying: float | None = None
-        # Self-heal state: set when an auth-failure re-login asks _connect_once to
-        # drop the socket and reconnect with the fresh token.
-        self._reconnect_requested: bool = False
-        self._last_auto_relogin: float = 0.0
-        self._auto_relogin_attempts: int = 0
+        # Auth-recovery REQUEST throttle (the steward does the actual recovering).
+        self._last_auth_request: float = 0.0
+        self._auth_recovery_requests: int = 0
 
     # ------------------------------------------------ public
 
@@ -150,6 +166,26 @@ class OptionFeedClient:
     @property
     def is_feed_connected(self) -> bool:
         return self._connected.is_set()
+
+    @property
+    def supervisor_alive(self) -> bool:
+        """True while the ws-supervisor task exists and has not finished.
+
+        A dead supervisor is otherwise invisible: the strong reference on the
+        instance suppresses even asyncio's GC-time "exception was never retrieved"
+        warning, so outage forensics found NOTHING in the logs when it died. The
+        steward polls this and rebuilds the client when it goes false.
+        """
+        return self._supervisor_task is not None and not self._supervisor_task.done()
+
+    @property
+    def last_ws_tick_at(self) -> float:
+        """time.time() of the last real tick from the socket (0.0 before the first)."""
+        return self._last_tick_at
+
+    @property
+    def live_subscription_count(self) -> int:
+        return self._live_subs
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -169,9 +205,16 @@ class OptionFeedClient:
         await self._teardown()
 
     def nudge_reconnect(self) -> None:
-        """Drop the live socket so the supervisor reconnects (e.g. at IST session open)."""
+        """Drop the live socket AND wake the supervisor so it reconnects now.
+
+        Both halves matter. Clearing ``_connected`` drops a live socket; setting
+        ``_kick`` wakes a supervisor parked in its backoff sleep. The old
+        implementation only cleared the flag — a no-op whenever the feed was
+        already disconnected, which is every situation a recovery nudge exists for.
+        """
         log.info("ws.nudge_reconnect_requested")
         self._connected.clear()
+        self._kick.set()
 
     async def swap_subscription(
         self,
@@ -213,7 +256,7 @@ class OptionFeedClient:
             token = get_session_manager().token
             for code, insts in old_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
-                    await xts_client.unsubscribe(token, chunk, code)
+                    await xts_client.unsubscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
             ok = 0  # newly subscribed
             already = 0  # benign "already subscribed"
             rejected = 0  # real 400 (incl. cap breach) — no data flows
@@ -222,13 +265,13 @@ class OptionFeedClient:
             for code, insts in new_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
@@ -252,6 +295,7 @@ class OptionFeedClient:
                         else:
                             raise
             self._sub_groups = new_groups
+            self._live_subs = ok + already
             log.info(
                 "ws.swap_subscription.subscribed",
                 newly_subscribed=ok, already_present=already,
@@ -272,7 +316,7 @@ class OptionFeedClient:
                     "and will be missing from the chain until healed.",
                 )
                 if _has_cap_breach(reasons):
-                    await self._self_heal_auth()
+                    await self._request_auth_recovery("cap breach on swap")
         except Exception as e:
             log.warning("ws.swap_subscription.error", error=str(e))
         self._last_tick_at = time.time()
@@ -284,6 +328,9 @@ class OptionFeedClient:
         backoff = BACKOFF_INITIAL
         while not self._stopping.is_set():
             try:
+                # A kick that arrived while we were connecting/connected is satisfied
+                # by the connect itself — clear it so it can't skip the NEXT backoff.
+                self._kick.clear()
                 await self._connect_once()
                 backoff = BACKOFF_INITIAL
                 while not self._stopping.is_set() and self._connected.is_set():
@@ -297,22 +344,45 @@ class OptionFeedClient:
                 else:
                     log.error("ws.supervisor.error", error=str(e))
             await self._teardown()
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=backoff)
+            if await self._sleep_or_kick(backoff):
                 return
-            except asyncio.TimeoutError:
-                backoff = min(backoff * 2, BACKOFF_MAX)
+            backoff = min(backoff * 2, BACKOFF_MAX)
+
+    async def _sleep_or_kick(self, backoff: float) -> bool:
+        """Back off, but wake early on a kick. Returns True when stopping.
+
+        The old wait watched only ``_stopping``, so a watchdog nudge could not
+        shorten a 60s backoff — recovery waited for a timer while the market moved.
+        A kick also resets the caller's backoff (we return normally and the caller
+        re-enters connect immediately with backoff untouched-for-this-round).
+        """
+        stop_wait = asyncio.create_task(self._stopping.wait())
+        kick_wait = asyncio.create_task(self._kick.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {stop_wait, kick_wait}, timeout=backoff, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_wait in done:
+                return True
+            if kick_wait in done:
+                log.info("ws.backoff_kicked")
+            return False
+        finally:
+            for t in (stop_wait, kick_wait):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
     async def _connect_once(self) -> None:
         sess = get_session_manager()
         if not sess.authenticated:
-            # Try to recover before parking. Since mark_broker_rejected() exists,
             # `authenticated` can be false because XTS rejected the token — not only
-            # because nobody has logged in yet. Waiting for a dashboard click in that
-            # case is exactly how a feed stays dead for a whole session. Cooldown and
-            # attempt cap live inside _self_heal_auth.
-            await self._self_heal_auth()
-            self._reconnect_requested = False
+            # because nobody has logged in yet. Report it so the steward rotates;
+            # parking silently is how a feed stays dead for a whole session.
+            await self._request_auth_recovery("not authenticated")
             if not sess.authenticated:
                 raise RuntimeError(
                     "Not authenticated yet. Use the dashboard login form to authenticate first."
@@ -323,16 +393,13 @@ class OptionFeedClient:
             log.warning(
                 "ws.no_tokens_to_subscribe",
                 hint="the option universe resolved empty — usually a dead token "
-                "failing the scripmaster fetch. Attempting an auth self-heal.",
+                "failing the scripmaster fetch. Requesting auth recovery.",
             )
-            # This state STARVES the self-heal: with no instruments we never POST
-            # /instruments/subscription, so the 'Invalid Token' 400 that is its only
-            # other trigger never happens and the feed spins here forever on a dead
-            # token (production outage 2026-08-03 19:55 -> 2026-08-04, full session).
-            await self._self_heal_auth()
-            # No socket was opened, so there is nothing for this flag to tear down;
-            # leaving it set would make the NEXT good connect drop itself immediately.
-            self._reconnect_requested = False
+            # This state STARVES event-based recovery: with no instruments we never
+            # POST /instruments/subscription, so the 'Invalid Token' 400 that would
+            # otherwise surface the dead token never happens (production outage
+            # 2026-08-03 19:55 -> 2026-08-04, full session).
+            await self._request_auth_recovery("empty universe")
             await asyncio.sleep(5)
             return
         self._token_meta = {t.token: t for t in tokens}
@@ -359,39 +426,47 @@ class OptionFeedClient:
         self._connected.clear()
 
         try:
-            await sio.connect(
-                f"{origin}?{query}",
-                socketio_path=sio_path.lstrip("/"),
-                transports=["websocket"],
-                wait=True,
-                wait_timeout=CONNECT_TIMEOUT_SECONDS,
+            # wait_timeout alone does NOT bound the underlying aiohttp websocket
+            # handshake (only the Socket.IO CONNECT packet after it) — the outer
+            # wait_for is what guarantees this call can never hang the supervisor.
+            await asyncio.wait_for(
+                sio.connect(
+                    f"{origin}?{query}",
+                    socketio_path=sio_path.lstrip("/"),
+                    transports=["websocket"],
+                    wait=True,
+                    wait_timeout=CONNECT_TIMEOUT_SECONDS,
+                ),
+                timeout=CONNECT_TOTAL_TIMEOUT_S,
             )
         except Exception as e:
             log.error("ws.connect.failed", error=str(e))
             await self._teardown()
             # XTS bakes the token into the handshake query, so a dead token is
-            # rejected HERE — before _subscribe_all ever runs. Without this the
-            # supervisor would retry the same dead token forever behind a 60s
-            # backoff. Cooldown + attempt cap keep a genuine network outage from
-            # turning into a login storm.
-            await self._self_heal_auth()
-            self._reconnect_requested = False
+            # rejected HERE — before _subscribe_all ever runs. Report it; the
+            # steward decides whether a rotation is warranted (a genuine network
+            # outage must not become a login storm).
+            await self._request_auth_recovery(f"handshake failed: {e}")
             raise RuntimeError(f"Socket.IO failed to connect: {e}") from e
 
         # Subscribe over REST now that the socket is open. Safe to call on every
         # (re)connect: if XTS already has these subscriptions on the appKey it
         # returns 400 "already subscribed" (tolerated below); if not, this restores
         # the stream. Either way data flows without tearing the connection down.
-        await self._subscribe_all()
-
-        # Self-heal: if the subscribe found an auth failure and re-logged in, the
-        # socket we just opened is bound to the now-dead token. Drop it and return
-        # so the supervisor reconnects via _connect_once() with the fresh token.
-        if self._reconnect_requested:
-            self._reconnect_requested = False
-            log.info("ws.reconnect_after_self_heal")
-            await self._teardown()
-            return
+        # Budgeted: the per-instrument 400 fallback can serialize ~93 POSTs, and an
+        # unbounded run here kept feed_connected=false for tens of minutes while
+        # every recovery nudge was a no-op. On budget exhaustion we proceed with
+        # whatever subscribed — partial data now beats a perfect subscription later;
+        # the heartbeat and the steward judge the outcome.
+        try:
+            await asyncio.wait_for(self._subscribe_all(), timeout=SUBSCRIBE_TOTAL_BUDGET_S)
+        except asyncio.TimeoutError:
+            log.error(
+                "ws.subscribe.budget_exceeded",
+                budget_s=SUBSCRIBE_TOTAL_BUDGET_S,
+                hint="proceeding with the instruments that made it; the heartbeat "
+                "will drop the socket if nothing actually flows.",
+            )
 
         self._connected.set()
 
@@ -407,7 +482,9 @@ class OptionFeedClient:
         if not sio:
             return
         try:
-            await sio.disconnect()
+            # Bounded: a disconnect against a half-open TCP can hang, and this runs
+            # OUTSIDE the supervisor's try — an unbounded await here wedged the loop.
+            await asyncio.wait_for(sio.disconnect(), timeout=TEARDOWN_TIMEOUT_S)
         except Exception:
             pass
 
@@ -477,14 +554,14 @@ class OptionFeedClient:
             for code, insts in groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             # Retry one at a time so new instruments get through.
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
@@ -514,6 +591,7 @@ class OptionFeedClient:
             # (real 400) or errored, no ticks will ever arrive — surface it loudly
             # with the XTS reason instead of masking it as success.
             live = ok + already
+            self._live_subs = live
             if live == 0 and (rejected or errors):
                 log.error(
                     "ws.subscribe.all_failed",
@@ -525,24 +603,21 @@ class OptionFeedClient:
                     "market-data token (re-login) or a stale scripmaster. No ticks "
                     "will arrive until this is resolved.",
                 )
-                # Auth failure (every instrument 'Invalid Token') → self-heal by
-                # re-logging in and reconnecting under a fresh token. The same
-                # recovery clears 'Exceeded Instrument Subscription Limit' — a
-                # fresh session starts with 0/50 slots, releasing stale
-                # subscriptions a swap failed to free on the gateway.
+                # Auth failure (every instrument 'Invalid Token') → the steward
+                # rotates to a fresh token and reconnects. The same recovery
+                # clears 'Exceeded Instrument Subscription Limit' — a fresh
+                # session starts with 0/50 slots, releasing stale subscriptions
+                # a swap failed to free on the gateway.
                 if rejected and any(
                     "token" in r.lower() or ("limit" in r.lower() and "exceed" in r.lower())
                     for r in reasons
                 ):
-                    await self._self_heal_auth()
+                    await self._request_auth_recovery("all subscriptions rejected")
             else:
-                # Only a FULLY clean subscribe clears the self-heal attempt counter;
-                # a partial cap breach must let attempts accrue so the self-heal
-                # below can give up instead of storming re-logins.
+                # A FULLY clean subscribe is the broker's positive proof-of-life
+                # for this token: clear the rejected flag and the request streak.
                 if not (rejected or errors):
-                    self._auto_relogin_attempts = 0
-                    # Proof the broker accepts this token — the only positive
-                    # confirmation we get, so it is what clears a prior rejection.
+                    self._auth_recovery_requests = 0
                     get_session_manager().mark_broker_ok()
                 log.info(
                     "ws.subscribe.success",
@@ -575,80 +650,51 @@ class OptionFeedClient:
                         "exceeding the broker's 50-instrument cap.",
                     )
                     # If the rejection was the broker's 50-instrument cap (usually
-                    # stale gateway slots a prior ATM re-center never freed), self-
-                    # heal: a fresh session starts at 0/50 and re-subscribes the full
-                    # window. Cooldown + attempt cap in _self_heal_auth prevent a
-                    # login storm if the window genuinely exceeds the cap.
+                    # stale gateway slots a prior ATM re-center never freed), ask
+                    # for a rotation: a fresh session starts at 0/50 and
+                    # re-subscribes the full window.
                     if _has_cap_breach(reasons):
-                        await self._self_heal_auth()
+                        await self._request_auth_recovery("cap breach on subscribe")
         except Exception as e:
             # Don't drop the connection on a subscribe hiccup; if no data flows the
             # heartbeat will recover. Avoids a reconnect storm on transient errors.
             log.error("ws.subscribe.error", error=str(e))
 
-    async def _self_heal_auth(self) -> None:
-        """Auto-recover from an all-instruments 'Invalid Token' rejection.
+    async def _request_auth_recovery(self, reason: str) -> None:
+        """Report auth trouble to the SessionSteward — the ONE rotation authority.
 
-        Mints a fresh XTS token (single-flight + debounced in the session manager)
-        and requests a socket reconnect so the new token is used for both the
-        handshake and the resubscribe. Cooldown + attempt cap stop a login storm
-        when something keeps invalidating the session (e.g. a 2nd backend competing
-        for the single XTS market-data session, or revoked credentials).
+        This used to log in directly ("self-heal"). During outage #2 that made the
+        feed one of five independent actors rotating the single-session token out
+        from under each other every ~6 seconds for 14.6 hours; its give-up latch
+        then flipped ``authenticated`` false, which re-armed the frontend's
+        auto-login and closed the livelock. The feed now only ASKS; the steward
+        rotates under a global rate floor and verifies the outcome.
         """
         now = time.time()
-        since = now - self._last_auto_relogin
-        # Re-arm after a quiet spell. Without this the attempt cap is a one-way latch:
-        # the only other reset is a fully clean subscribe (_subscribe_all), which by
-        # definition cannot happen while auth is broken, so five failures killed
-        # auto-recovery until someone restarted the process.
-        if self._auto_relogin_attempts and since >= AUTO_RELOGIN_ATTEMPT_DECAY_S:
-            log.info(
-                "ws.self_heal.attempts_decayed",
-                quiet_s=round(since), previous_attempts=self._auto_relogin_attempts,
-            )
-            self._auto_relogin_attempts = 0
-        if since < AUTO_RELOGIN_COOLDOWN_S:
-            log.info("ws.self_heal.cooldown", since_s=round(since, 1))
+        since = now - self._last_auth_request
+        if since < AUTH_RECOVERY_REQUEST_COOLDOWN_S:
             return
-        if self._auto_relogin_attempts >= AUTO_RELOGIN_MAX_ATTEMPTS:
-            log.error(
-                "ws.self_heal.gave_up",
-                attempts=self._auto_relogin_attempts,
-                hint="auth still failing after repeated auto re-logins — likely a "
-                "2nd backend competing for the single XTS session, or revoked "
-                "credentials. Manual intervention required.",
-            )
-            # Tell the world the session is really dead so /api/health stops
-            # reporting authenticated=true — that flag is what re-arms the
-            # dashboard's 60s auto-reconnect and the login gate.
-            get_session_manager().mark_broker_rejected("self-heal exhausted")
-            return
-        self._last_auto_relogin = now
-        self._auto_relogin_attempts += 1
+        self._last_auth_request = now
+        self._auth_recovery_requests += 1
         log.warning(
-            "ws.self_heal.relogin",
-            attempt=self._auto_relogin_attempts,
-            max=AUTO_RELOGIN_MAX_ATTEMPTS,
+            "ws.auth_recovery_requested",
+            reason=reason, consecutive=self._auth_recovery_requests,
         )
+        if self._auth_recovery_requests >= AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED:
+            # Observability only: /api/health should stop claiming
+            # authenticated=true while recovery keeps not landing. Nothing
+            # auto-rotates off this flag anymore.
+            get_session_manager().mark_broker_rejected(
+                f"{self._auth_recovery_requests} auth-recovery requests unanswered"
+            )
         try:
-            await get_session_manager().login()
-            # Force a reconnect so the socket re-handshakes on the fresh token
-            # (a fresh session starts at 0/50 subscription slots, releasing stale
-            # ones a swap failed to free on the gateway). The trigger differs by
-            # caller context:
-            if self._connected.is_set():
-                # Live feed (ATM re-center / swap cap breach): drop the socket so
-                # the supervisor reconnects cleanly on the fresh token.
-                self._connected.clear()
-            else:
-                # During _connect_once (connect-path breach): the socket just
-                # opened is bound to the now-dead token — flag it so _connect_once
-                # tears it down and the supervisor reconnects.
-                self._reconnect_requested = True
-            log.info("ws.self_heal.relogin_ok")
-        except Exception as e:
-            log.error("ws.self_heal.relogin_failed", error=str(e))
-            get_session_manager().mark_broker_rejected(f"re-login failed: {e}")
+            from .session_steward import get_steward
+
+            steward = get_steward()
+            if steward is not None:
+                steward.request_recovery(f"ws:{reason}")
+        except Exception as e:  # pragma: no cover — reporting must never hurt
+            log.warning("ws.auth_recovery_request_failed", error=str(e))
 
     # ------------------------------------------------ socket handlers
 

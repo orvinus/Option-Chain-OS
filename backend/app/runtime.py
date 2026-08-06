@@ -27,6 +27,12 @@ class Runtime:
         self.latest_spot: Optional[float] = None
         self.last_flush_at: Optional[datetime] = None
         self.last_flush_rows: int = 0
+        # WS-origin rows only. The session steward keys feed health on THIS, so
+        # REST-failover rows (which advance last_flush_at and keep the dashboard
+        # honest) can never mask a dead socket from the recovery ladder.
+        self.last_ws_flush_at: Optional[datetime] = None
+        # The session steward (single recovery authority), set by the lifespan.
+        self.steward: Optional[object] = None
         # Active symbol = the underlying currently subscribed on the live WS.
         # Switched via /api/active-symbol; only one is live at a time.
         self.active_symbol: str = (settings.underlying_symbol or "NIFTY").upper()

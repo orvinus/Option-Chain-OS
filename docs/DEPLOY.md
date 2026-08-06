@@ -23,6 +23,12 @@ On boot, the app **first** attempts **`try_restore_session_from_db`**: if a toke
 
 ## Health and monitoring
 
+> **Superseded:** production monitoring is now the three-layer stack in
+> **[MONITORING.md](MONITORING.md)** — SessionSteward (in-process) + oi-sentinel
+> (VPS systemd timer, probing `/api/health/strict`) + Telegram/dead-man paging.
+> The notes below remain for non-VPS hosts.
+
+
 Poll **`GET /api/health`** (see [`backend/app/api/health.py`](../backend/app/api/health.py)) during market hours:
 
 - `authenticated: true`
@@ -58,7 +64,7 @@ If you **stop** Docker or the VM overnight, start it **before 09:10 IST** so log
 **Linux cron** (user that runs Docker):
 
 ```cron
-5 3 * * 1-5 cd /opt/nifty-oi && /usr/bin/docker compose --env-file .env -f docker/docker-compose.yml up -d
+5 3 * * 1-5 cd /root/nifty-oi && /usr/bin/docker compose --env-file .env -f docker/docker-compose.yml up -d
 ```
 
 The example uses **03:05 UTC** as a rough pre-open for IST; adjust for your timezone and DST.

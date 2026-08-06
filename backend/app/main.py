@@ -32,114 +32,20 @@ from .auth import get_session_manager
 from .core.config import settings
 from .core.db import AsyncSessionLocal
 from .core.logging import configure_logging, get_logger
-from .ingest.aggregator import MinuteAggregator
+from .core.tasks import cancel_supervised, spawn_supervised
 from .ingest.atm_drift_watch import run_atm_drift_watch
-from .ingest.feed_watchdog import run_feed_watchdog
+from .ingest.feed_factory import ensure_live_ingestion
 from .ingest.market_session_watch import run_nse_session_open_watch
-from .ingest.symbol_controller import _resolve_spot_token, _spot_segment
+from .ingest.session_steward import SessionSteward, set_steward
 from .ingest.universe_poller import UniversePoller
-from .ingest.ws_client import OptionFeedClient
-from .market.scripmaster import resolve_option_universe
-from .market.symbols import get_registry
-from .market_data import xts_client
 from .runtime import get_runtime
-from .services import get_oi_engine
-from .services.spot_fallback import db_last_underlying
-from .ws import get_hub, ws_router
+from .ws import ws_router
 
 log = get_logger("main")
 
 # Startup `sess.login()` is a network call to the broker; without a cap, a stalled
 # response keeps lifespan from reaching `yield` and nothing listens on :8000.
 STARTUP_LOGIN_TIMEOUT_S = 30.0
-
-
-async def _initial_spot() -> float | None:
-    """Fetch a starting spot for the active symbol via an XTS REST quote.
-
-    Required because we need the spot to resolve the strike window *before* the
-    websocket has produced any ticks. If the quote fails (throttled boot, no
-    session yet), fall back to the last stored underlying for the symbol; the
-    hardcoded constant is a last resort only. A wrong value here mis-centers
-    the subscribed strike window AND is served as ``latest_spot`` until the
-    live index tick arrives.
-    """
-    rt = get_runtime()
-    reg_entry = get_registry().get(rt.active_symbol)
-    spot_token = (reg_entry.spot_token if reg_entry else None) or (
-        settings.nifty_index_token if rt.active_symbol == "NIFTY" else None
-    )
-    # Reference-price segment: NSECM/BSECM for index/equity, MCXFO for a commodity
-    # (its "spot" is the near-month future). Centralised in symbol_controller.
-    segment = _spot_segment(reg_entry) if reg_entry is not None else xts_client.SEG_NSECM
-    sess = get_session_manager()
-    # Resolve a missing spot token (BSE index, MCX near-future, or a stock) so the
-    # boot symbol centres correctly instead of falling through to the constant.
-    if sess.authenticated and not spot_token and reg_entry is not None:
-        try:
-            spot_token = await _resolve_spot_token(reg_entry)
-        except Exception as e:
-            log.warning("initial_spot.resolve_error", symbol=rt.active_symbol, error=str(e))
-    if sess.authenticated and spot_token:
-        try:
-            ltp = await xts_client.quote_ltp(sess.token, segment, spot_token)
-            if ltp:
-                return float(ltp)
-        except Exception as e:
-            log.warning("initial_spot.fallback", symbol=rt.active_symbol, error=str(e))
-    else:
-        log.warning("initial_spot.no_session", symbol=rt.active_symbol)
-    db_spot = await db_last_underlying(rt.active_symbol)
-    if db_spot:
-        log.info("initial_spot.db_fallback", symbol=rt.active_symbol, spot=db_spot)
-        return db_spot
-    # Last-resort constant. It is a NIFTY-level number, so applying it to any other
-    # symbol (SENSEX ~80k, a stock ~500, an MCX future) would centre the strike window
-    # on a price that instrument never trades at and resolve a garbage/empty universe.
-    # Only use it for NIFTY; otherwise report "no spot" and let the caller retry.
-    if rt.active_symbol == "NIFTY":
-        return 24000.0
-    log.warning("initial_spot.unresolved", symbol=rt.active_symbol)
-    return None
-
-
-async def _resubscribe_provider() -> tuple[list, float | None]:
-    """Resolve (tokens, spot) for the WS client to subscribe."""
-    rt = get_runtime()
-    spot = rt.latest_spot or await _initial_spot()
-    if spot is None:
-        # No trustworthy spot for this symbol yet — subscribing a window centred on a
-        # guess would pull the wrong strikes. Return empty so the caller retries.
-        log.warning("resubscribe.no_spot", symbol=rt.active_symbol)
-        return [], None
-    tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
-    if not tokens:
-        # rt.latest_spot can belong to the PREVIOUS symbol after a failed
-        # switch (e.g. SENSEX window centred on NIFTY's spot -> zero
-        # contracts, endless resubscribe loop). Re-resolve with a spot
-        # fetched for the active symbol itself before giving up.
-        fresh = await _initial_spot()
-        if fresh and fresh != spot:
-            log.warning(
-                "resubscribe.empty_universe_respot",
-                symbol=rt.active_symbol, stale_spot=spot, fresh_spot=fresh,
-            )
-            spot = fresh
-            tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
-    if not tokens:
-        # NEVER publish an empty universe. Assigning [] here wipes a perfectly good
-        # subscription list on one bad resolve, and it also empties /api/expiries and
-        # _expiry_utils, so the whole app reports "no contracts" while the feed spins.
-        # Keep last-known-good and let the supervisor retry.
-        log.warning(
-            "resubscribe.empty_universe_kept_previous",
-            symbol=rt.active_symbol, spot=spot, previous_tokens=len(rt.tokens),
-        )
-        return [], None
-    rt.tokens = tokens
-    rt.expiries = expiries
-    rt.latest_spot = spot
-    return tokens, spot
 
 
 @asynccontextmanager
@@ -166,130 +72,80 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             log.warning("app.startup.restore_session_error", error=str(e))
         if restored:
-            await sess.start_refresh_loop()
+            # Token renewal is the steward's job now (daily pre-open + TTL
+            # backstop) — there is no interval refresh loop to start.
             log.info("app.startup.session_restored_from_db")
-            # A TTL-valid restored token can still be dead (XTS daily expiry /
-            # single-session invalidation). If so, the feed's self-heal will
-            # auto re-login on the first 'Invalid Token' — no manual click needed.
         elif (settings.xts_md_secret_key or "").strip() and (settings.xts_md_app_key or "").strip():
-            # No usable session restored — auto-login at startup so the feed comes
-            # up live without a human clicking the dashboard button. force=True
-            # guarantees a fresh token.
+            # No usable session restored (missing, expired, or broker-rejected on
+            # the validation probe) — log in fresh so the feed comes up unattended.
             try:
                 await asyncio.wait_for(
-                    sess.login(force=True),
+                    sess.login(force=True, actor="startup"),
                     timeout=STARTUP_LOGIN_TIMEOUT_S,
                 )
-                await sess.start_refresh_loop()
                 log.info("app.startup.auto_login_ok")
             except asyncio.TimeoutError:
                 log.warning(
                     "app.startup.login_timeout",
                     seconds=STARTUP_LOGIN_TIMEOUT_S,
-                    hint="XTS market-data login did not respond; authenticate via the dashboard.",
+                    hint="XTS market-data login did not respond; the steward keeps retrying.",
                 )
             except Exception as e:
-                # Wrong appKey/secretKey / network — backend stays up for UI login.
+                # Wrong appKey/secretKey / network / circuit parked at boot —
+                # backend stays up; the steward's ladder takes it from here.
                 log.warning("app.startup.login_deferred", reason=str(e))
+                from .core.notify import notify
 
-    feed: OptionFeedClient | None = None
-    aggregator: MinuteAggregator | None = None
-    session_watch: asyncio.Task[None] | None = None
-    atm_watch: asyncio.Task[None] | None = None
-    feed_watch: asyncio.Task[None] | None = None
+                notify("startup_login_failed", f"⚠️ Startup broker login failed: {e}")
+
     poller: UniversePoller | None = None
 
     try:
         if settings.run_mode == "live":
-            engine = get_oi_engine()
-            hub = get_hub()
+            # Aggregator + feed client + spot refresher, via the ONE factory path
+            # (shared with the login endpoint's bootstrap and the steward rebuild).
+            await ensure_live_ingestion(fresh_token_minted=False)
 
-            async def on_flush(bucket: datetime, rows: int) -> None:
-                rt.last_flush_at = bucket
-                rt.last_flush_rows = rows
-                engine.on_aggregator_flush(bucket)
-                await hub.publish_flush(bucket, rows)
+            spawn_supervised(run_nse_session_open_watch, "nse-session-watch")
+            spawn_supervised(run_atm_drift_watch, "atm-drift-watch")
 
-            aggregator = MinuteAggregator(rt.tick_queue, on_flush=on_flush)
-            await aggregator.start()
-            rt.aggregator = aggregator
+            # The single recovery authority: outcome-based feed recovery, token
+            # rotation schedule (daily pre-open + TTL backstop), alerting, and the
+            # os._exit backstop. Every other actor only REQUESTS recovery.
+            steward = SessionSteward()
+            set_steward(steward)
+            rt.steward = steward
+            spawn_supervised(steward.run, "session-steward")
 
-            # Resolve the reference-price token BEFORE building the feed so token and
-            # segment stay consistent. Falling back to the NIFTY constant paired with
-            # a non-NSE segment (e.g. a commodity/BSE-index boot symbol → 26000 on
-            # MCXFO/BSECM) is an invalid instrument and yields no spot tick.
-            reg_entry = get_registry().get(rt.active_symbol)
-            index_token = reg_entry.spot_token if reg_entry else None
-            if not index_token and reg_entry is not None and sess.authenticated:
-                try:
-                    index_token = await _resolve_spot_token(reg_entry)
-                except Exception as e:
-                    log.warning("feed.spot_resolve_error", symbol=rt.active_symbol, error=str(e))
-            if index_token and reg_entry is not None:
-                index_segment = _spot_segment(reg_entry)
-            else:
-                # Consistent valid fallback: NIFTY index token on its own cash segment.
-                index_token = settings.nifty_index_token
-                index_segment = xts_client.SEG_NSECM
-            feed = OptionFeedClient(
-                rt.tick_queue,
-                _resubscribe_provider,
-                index_token=index_token,
-                active_symbol=rt.active_symbol,
-                index_segment=index_segment,
-            )
-            await feed.start()
-            rt.feed_client = feed
-
-            # Background task: refresh latest_spot from feed every second
-            asyncio.create_task(_spot_refresher(feed), name="spot-refresher")
-            session_watch = asyncio.create_task(
-                run_nse_session_open_watch(feed),
-                name="nse-session-watch",
-            )
-            atm_watch = asyncio.create_task(
-                run_atm_drift_watch(),
-                name="atm-drift-watch",
-            )
-            # Outcome-based recovery: escalates until rows land again. Every other
-            # recovery path needs a specific event to fire; this one only asks
-            # whether data is still arriving.
-            feed_watch = asyncio.create_task(
-                run_feed_watchdog(feed),
-                name="feed-watchdog",
-            )
-
-            # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
-            # aggregator → option_oi_snapshots path as the live feed.
-            if settings.poller_enabled:
+            # REST snapshotter: "failover" covers the active symbol while the WS
+            # feed is down; "full" additionally polls the whole F&O universe.
+            if settings.effective_poller_mode != "off":
                 poller = UniversePoller(rt.tick_queue)
                 await poller.start()
                 rt.universe_poller = poller
 
             # Persist ATM IV for the active symbol so IVR/IVP accumulate over days.
-            asyncio.create_task(_iv_history_loop(), name="iv-history-snapshot")
+            spawn_supervised(_iv_history_loop, "iv-history-snapshot")
             # Persist per-strike greeks so replay/exports can show live-computed greeks.
-            asyncio.create_task(_greeks_history_loop(), name="greeks-history-snapshot")
+            spawn_supervised(_greeks_history_loop, "greeks-history-snapshot")
 
         yield
 
     finally:
         log.info("app.shutdown")
-        for task in (session_watch, atm_watch, feed_watch):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        for name in (
+            "session-steward", "nse-session-watch", "atm-drift-watch",
+            "iv-history-snapshot", "greeks-history-snapshot", "spot-refresher",
+        ):
+            cancel_supervised(name)
         # Stop producers (feed + poller) before the aggregator so no producer
         # outlives the consumer draining the queue.
         if poller is not None:
             await poller.stop()
-        if feed is not None:
-            await feed.stop()
-        if aggregator is not None:
-            await aggregator.stop()
+        if rt.feed_client is not None:
+            await rt.feed_client.stop()
+        if rt.aggregator is not None:
+            await rt.aggregator.stop()
         if settings.run_mode == "live":
             await sess.stop()
 
@@ -324,22 +180,6 @@ class _SPAStaticFiles(StaticFiles):
         if response.status_code == 404:
             return await super().get_response("index.html", scope)
         return response
-
-
-async def _spot_refresher(feed: OptionFeedClient) -> None:
-    """Mirror the feed's latest spot into runtime so REST can read it without a queue."""
-    rt = get_runtime()
-    while True:
-        try:
-            spot = feed.latest_underlying
-            if spot is not None:
-                rt.latest_spot = spot
-            await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:  # pragma: no cover
-            log.warning("spot_refresher.error", error=str(e))
-            await asyncio.sleep(5.0)
 
 
 async def _iv_history_loop() -> None:

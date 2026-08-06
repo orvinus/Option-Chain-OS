@@ -20,7 +20,7 @@ from app.core.time_utils import (
     is_nse_regular_session_open,
     session_floor_for,
 )
-from app.ingest import feed_watchdog
+from app.ingest import session_steward
 from app.services.option_chain_full import EXPIRY_SETTLE_TIME, _years_to_expiry
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -71,7 +71,7 @@ async def test_session_floor_rolls_back_before_open() -> None:
 
 
 async def test_watchdog_window_covers_warmup_and_full_session() -> None:
-    w = feed_watchdog._within_watch_window
+    w = session_steward._within_watch_window
     assert w(_ist(WEEKDAY, 8, 0)) is False, "not watching hours before the open"
     assert w(_ist(WEEKDAY, 9, 5)) is True, "warm-up so the feed is live AT the open"
     assert w(_ist(WEEKDAY, 12, 0)) is True
@@ -81,25 +81,27 @@ async def test_watchdog_window_covers_warmup_and_full_session() -> None:
 
 
 async def test_watchdog_treats_missing_and_stale_flush_as_unhealthy() -> None:
+    """The freshness signal is now WS-ORIGIN flushes only (last_ws_flush_at) —
+    poller/REST rows must never make a dead socket look alive."""
     from app.runtime import get_runtime
 
     rt = get_runtime()
-    prev = rt.last_flush_at
+    prev = rt.last_ws_flush_at
     try:
-        rt.last_flush_at = None
-        assert feed_watchdog._data_age_seconds() is None, "no flush yet must not read as fresh"
+        rt.last_ws_flush_at = None
+        assert session_steward._data_age_seconds() is None, "no flush yet must not read as fresh"
 
-        rt.last_flush_at = datetime.now(timezone.utc) - timedelta(hours=13)
-        age = feed_watchdog._data_age_seconds()
-        assert age is not None and age > feed_watchdog.STALE_AFTER_S, (
+        rt.last_ws_flush_at = datetime.now(timezone.utc) - timedelta(hours=13)
+        age = session_steward._data_age_seconds()
+        assert age is not None and age > session_steward.STALE_AFTER_S, (
             "a 13h-old flush — the exact production outage — must count as stale"
         )
 
-        rt.last_flush_at = datetime.now(timezone.utc)
-        age = feed_watchdog._data_age_seconds()
-        assert age is not None and age <= feed_watchdog.STALE_AFTER_S
+        rt.last_ws_flush_at = datetime.now(timezone.utc)
+        age = session_steward._data_age_seconds()
+        assert age is not None and age <= session_steward.STALE_AFTER_S
     finally:
-        rt.last_flush_at = prev
+        rt.last_ws_flush_at = prev
 
 
 # --------------------------------------------------------------------------- runner

@@ -45,6 +45,35 @@ class HealthResponse(BaseModel):
     poller_last_ticks: int = Field(
         default=0, description="Ticks enqueued by the most recent poller sweep",
     )
+    # ---- v2 fields (all defaulted: the pre-existing shape is unchanged) ----
+    last_ws_flush_at: str | None = Field(
+        default=None,
+        description="Last WS-ORIGIN flush (poller/REST rows never advance this) — "
+        "the steward's feed-health signal",
+    )
+    ws_last_tick_at: str | None = Field(
+        default=None, description="Last raw tick observed on the socket (pre-DB)",
+    )
+    live_subscriptions: int = Field(
+        default=0,
+        description="Instruments actually delivering per the last subscribe outcome "
+        "(unlike tokens_subscribed, which keeps last-known-good)",
+    )
+    supervisor_alive: bool = Field(
+        default=False, description="The ws-supervisor task exists and has not died",
+    )
+    watchdog_last_check_at: str | None = Field(
+        default=None, description="Last SessionSteward health-check instant",
+    )
+    last_login_at: str | None = Field(
+        default=None, description="Newest broker login (any process; DB-seeded)",
+    )
+    logins_last_hour: int = Field(default=0)
+    circuit_state: str = Field(
+        default="closed", description="Broker-rotation circuit: closed | open",
+    )
+    db_ok: bool = Field(default=True, description="SELECT 1 answered within 2s")
+    poller_mode: str = Field(default="off", description="off | failover | full")
 
 
 class SpotResponse(BaseModel):
@@ -326,12 +355,19 @@ class AuthCallbackResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """Empty by design.
+    """Near-empty by design.
 
     The XTS market-data session authenticates with the appKey/secretKey in .env —
     there is no client code, MPIN or TOTP. Extra keys are ignored, so an older
     client still posting them keeps working.
+
+    ``force_new_token=true`` is the ONLY way a caller can demand an actual token
+    rotation (a human clicking "Force new broker session"). Every other login
+    request coalesces onto the existing session or becomes a recovery request to
+    the steward — rotations are single-authority now.
     """
+
+    force_new_token: bool = False
 
 
 class LoginResponse(BaseModel):

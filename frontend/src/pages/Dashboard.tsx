@@ -33,7 +33,7 @@ const RANGE_DEFAULT_LOOKBACK_MIN = 30;
 
 export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const {
-    dataReady, feedLive, authChecked, health, connectError,
+    dataReady, feedLive, authChecked, health,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -237,7 +237,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
           </div>
         ) : (
           <>
-            {!feedLive && <FeedOfflineBanner connectError={connectError} />}
+            {!feedLive && <FeedOfflineBanner />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

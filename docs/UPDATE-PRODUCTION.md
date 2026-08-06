@@ -2,7 +2,7 @@
 
 This is the exact routine to make changes you've **pushed from your PC** go **live
 on the VPS** (`oialgo.tech`, IP `187.127.206.41`). It's tailored to this server:
-repo at `/opt/nifty-oi`, Docker Compose stack, Caddy providing HTTPS on the host.
+repo at `/root/nifty-oi`, Docker Compose stack, Caddy providing HTTPS on the host.
 
 ---
 
@@ -20,7 +20,7 @@ Your server has **one file customized for this machine**: `docker/docker-compose
 HTTPS). Tell git to leave that local file alone, so pulls never conflict with it:
 
 ```bash
-cd /opt/nifty-oi
+cd /root/nifty-oi
 git update-index --skip-worktree docker/docker-compose.yml
 ```
 
@@ -48,7 +48,7 @@ ssh root@187.127.206.41
 Then paste this **one block** — it pulls your pushed code, rebuilds the images,
 restarts only the changed containers, and auto-runs any database migrations:
 ```bash
-cd /opt/nifty-oi && \
+cd /root/nifty-oi && \
 git pull origin ayush-bhai-branch && \
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 ```
@@ -78,7 +78,7 @@ the browser cache so you actually see the new frontend).
 ## 4. If something breaks — roll back in 20 seconds
 
 ```bash
-cd /opt/nifty-oi
+cd /root/nifty-oi
 git log --oneline -5                 # find the previous good commit hash
 git reset --hard <that-hash>
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
@@ -121,7 +121,7 @@ docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 # PC:  git add -A && git commit -m "..." && git push origin ayush-bhai-branch
 # VPS:
 ssh root@187.127.206.41
-cd /opt/nifty-oi && git pull origin ayush-bhai-branch && \
+cd /root/nifty-oi && git pull origin ayush-bhai-branch && \
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 # then hard-refresh https://oialgo.tech  (Ctrl+Shift+R)
 ```
