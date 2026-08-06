@@ -204,9 +204,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             engine = get_oi_engine()
             hub = get_hub()
 
-            async def on_flush(bucket: datetime, rows: int) -> None:
+            async def on_flush(bucket: datetime, rows: int, ws_rows: int) -> None:
                 rt.last_flush_at = bucket
                 rt.last_flush_rows = rows
+                if ws_rows > 0:
+                    # WS-origin freshness — the steward's health signal. Poller
+                    # rows advance last_flush_at only.
+                    rt.last_ws_flush_at = bucket
                 engine.on_aggregator_flush(bucket)
                 await hub.publish_flush(bucket, rows)
 

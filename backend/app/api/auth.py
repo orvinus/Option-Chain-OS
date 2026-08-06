@@ -59,9 +59,11 @@ async def _bootstrap_live_ingestion_if_needed() -> None:
         engine = get_oi_engine()
         hub = get_hub()
 
-        async def _on_flush(bucket: datetime, rows: int) -> None:
+        async def _on_flush(bucket: datetime, rows: int, ws_rows: int) -> None:
             rt.last_flush_at = bucket
             rt.last_flush_rows = rows
+            if ws_rows > 0:
+                rt.last_ws_flush_at = bucket
             engine.on_aggregator_flush(bucket)
             await hub.publish_flush(bucket, rows)
 

@@ -20,3 +20,7 @@ class Tick:
     oi: int
     volume: int
     underlying: float | None = None  # filled in by aggregator from latest spot
+    # Which pipeline produced this tick: "ws" (live socket) or "poller" (REST).
+    # The session steward judges FEED health on WS-origin data only — REST
+    # failover rows keep the dashboard alive but must never mask a dead socket.
+    origin: str = "ws"
