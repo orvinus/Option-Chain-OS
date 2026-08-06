@@ -46,8 +46,6 @@ export interface MarketContextValue {
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
   handleAuthenticated: () => void;
-  /** Last error from the automatic broker connect (null while connecting/connected). */
-  connectError: string | null;
 
   symbol: string;
   symbolGroups: SymbolSectorGroup[];
@@ -100,7 +98,6 @@ export function useMarketContext(): MarketContextValue {
   const [dataReady, setDataReady] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
 
   const symbolIndex = useMemo(() => flattenSymbols(symbolGroups), [symbolGroups]);
   const activeEntry: SymbolEntry | undefined = symbolIndex[symbol];
@@ -137,36 +134,15 @@ export function useMarketContext(): MarketContextValue {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-connect the broker using the appKey/secretKey in .env. The XTS market-data
-  // API authenticates with the appKey/secretKey alone (no per-user login), so there
-  // is no manual "Connect to Broker" page — establish the session automatically and
-  // retry until it succeeds.
-  useEffect(() => {
-    if (!authChecked || authenticated) return;
-    // Replay instances never contact the broker (single-session-per-appKey safety):
-    // don't auto-connect — the backend would 409 anyway, and hammering it every 60s
-    // just shows a perpetual "connect error" on this dev/replay dashboard.
-    if (health?.run_mode === "replay") return;
-    let cancelled = false;
-    let inFlight = false;
-    const connect = async () => {
-      if (inFlight || cancelled) return;
-      inFlight = true;
-      try {
-        await api.login({});
-        if (!cancelled) setConnectError(null);
-      } catch (e) {
-        if (!cancelled) setConnectError(String(e));
-      } finally {
-        inFlight = false;
-      }
-    };
-    void connect();
-    // Gentle retry while disconnected — XTS market-data login is rate-limited and
-    // every login restarts the feed, so don't hammer it. Stops once authenticated.
-    const id = setInterval(() => void connect(), 60_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [authChecked, authenticated, health?.run_mode]);
+  // NOTE: there is deliberately NO auto-login here anymore. This hook used to
+  // POST /api/auth/login whenever `authenticated` read false — and because the
+  // effect re-ran on every `authenticated` flip, its "gentle 60s retry" actually
+  // fired within seconds of each flip. During the 2026-08-06 outage that made
+  // every open dashboard tab a login-storm actor: each forced login invalidated
+  // the token the feed's socket was using, ~6s per cycle, for 14.6 hours.
+  // Recovery is the backend SessionSteward's job now; the browser only OBSERVES
+  // via the health poll. (The server-side login endpoint is also coalescing, so
+  // even this old bundle, if cached, can no longer rotate the token.)
 
   // Load the symbol registry once the BACKEND is reachable (not the broker); retry
   // every 3s on transient failure or when groups is empty.
@@ -291,7 +267,7 @@ export function useMarketContext(): MarketContextValue {
   const feedLive = authenticated && health?.feed_connected !== false;
 
   return {
-    authenticated, dataReady, feedLive, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
+    authenticated, dataReady, feedLive, authChecked, health, setAuthenticated, handleAuthenticated,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,
