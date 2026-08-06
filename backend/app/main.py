@@ -32,11 +32,11 @@ from .auth import get_session_manager
 from .core.config import settings
 from .core.db import AsyncSessionLocal
 from .core.logging import configure_logging, get_logger
-from .core.tasks import spawn_supervised
+from .core.tasks import cancel_supervised, spawn_supervised
 from .ingest.atm_drift_watch import run_atm_drift_watch
 from .ingest.feed_factory import ensure_live_ingestion
-from .ingest.feed_watchdog import run_feed_watchdog
 from .ingest.market_session_watch import run_nse_session_open_watch
+from .ingest.session_steward import SessionSteward, set_steward
 from .ingest.universe_poller import UniversePoller
 from .runtime import get_runtime
 from .ws import ws_router
@@ -72,35 +72,32 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             log.warning("app.startup.restore_session_error", error=str(e))
         if restored:
-            await sess.start_refresh_loop()
+            # Token renewal is the steward's job now (daily pre-open + TTL
+            # backstop) — there is no interval refresh loop to start.
             log.info("app.startup.session_restored_from_db")
-            # A TTL-valid restored token can still be dead (XTS daily expiry /
-            # single-session invalidation). If so, the feed's self-heal will
-            # auto re-login on the first 'Invalid Token' — no manual click needed.
         elif (settings.xts_md_secret_key or "").strip() and (settings.xts_md_app_key or "").strip():
-            # No usable session restored — auto-login at startup so the feed comes
-            # up live without a human clicking the dashboard button. force=True
-            # guarantees a fresh token.
+            # No usable session restored (missing, expired, or broker-rejected on
+            # the validation probe) — log in fresh so the feed comes up unattended.
             try:
                 await asyncio.wait_for(
-                    sess.login(force=True),
+                    sess.login(force=True, actor="startup"),
                     timeout=STARTUP_LOGIN_TIMEOUT_S,
                 )
-                await sess.start_refresh_loop()
                 log.info("app.startup.auto_login_ok")
             except asyncio.TimeoutError:
                 log.warning(
                     "app.startup.login_timeout",
                     seconds=STARTUP_LOGIN_TIMEOUT_S,
-                    hint="XTS market-data login did not respond; authenticate via the dashboard.",
+                    hint="XTS market-data login did not respond; the steward keeps retrying.",
                 )
             except Exception as e:
-                # Wrong appKey/secretKey / network — backend stays up for UI login.
+                # Wrong appKey/secretKey / network / circuit parked at boot —
+                # backend stays up; the steward's ladder takes it from here.
                 log.warning("app.startup.login_deferred", reason=str(e))
+                from .core.notify import notify
 
-    session_watch: asyncio.Task[None] | None = None
-    atm_watch: asyncio.Task[None] | None = None
-    feed_watch: asyncio.Task[None] | None = None
+                notify("startup_login_failed", f"⚠️ Startup broker login failed: {e}")
+
     poller: UniversePoller | None = None
 
     try:
@@ -108,23 +105,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             # Aggregator + feed client + spot refresher, via the ONE factory path
             # (shared with the login endpoint's bootstrap and the steward rebuild).
             await ensure_live_ingestion(fresh_token_minted=False)
-            feed = rt.feed_client
 
-            session_watch = asyncio.create_task(
-                run_nse_session_open_watch(feed),
-                name="nse-session-watch",
-            )
-            atm_watch = asyncio.create_task(
-                run_atm_drift_watch(),
-                name="atm-drift-watch",
-            )
-            # Outcome-based recovery: escalates until rows land again. Every other
-            # recovery path needs a specific event to fire; this one only asks
-            # whether data is still arriving.
-            feed_watch = asyncio.create_task(
-                run_feed_watchdog(feed),
-                name="feed-watchdog",
-            )
+            spawn_supervised(run_nse_session_open_watch, "nse-session-watch")
+            spawn_supervised(run_atm_drift_watch, "atm-drift-watch")
+
+            # The single recovery authority: outcome-based feed recovery, token
+            # rotation schedule (daily pre-open + TTL backstop), alerting, and the
+            # os._exit backstop. Every other actor only REQUESTS recovery.
+            steward = SessionSteward()
+            set_steward(steward)
+            rt.steward = steward
+            spawn_supervised(steward.run, "session-steward")
 
             # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
             # aggregator → option_oi_snapshots path as the live feed.
@@ -142,13 +133,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     finally:
         log.info("app.shutdown")
-        for task in (session_watch, atm_watch, feed_watch):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        for name in (
+            "session-steward", "nse-session-watch", "atm-drift-watch",
+            "iv-history-snapshot", "greeks-history-snapshot", "spot-refresher",
+        ):
+            cancel_supervised(name)
         # Stop producers (feed + poller) before the aggregator so no producer
         # outlives the consumer draining the queue.
         if poller is not None:

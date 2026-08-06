@@ -84,7 +84,6 @@ async def login(body: LoginRequest) -> LoginResponse:
                 f"network and XTS_MD_BASE_URL (timeout {settings.xts_login_timeout_s:.0f}s).",
             ) from None
 
-        await sess.start_refresh_loop()
         log.info("auth.login.success", user_id=sess.user_id)
         asyncio.create_task(_bootstrap_live_ingestion_if_needed(), name="bootstrap-ingestion")
 

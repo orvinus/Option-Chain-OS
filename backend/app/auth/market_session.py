@@ -28,12 +28,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import text
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from ..core.config import settings
 from ..core.db import session_scope
@@ -43,13 +37,9 @@ from ..market_data import xts_client
 
 log = get_logger("auth")
 
-# XTS market-data tokens are valid ~24h. Renew (re-login) every 12h for margin.
-REFRESH_EVERY = timedelta(hours=12)
+# XTS market-data tokens are valid ~24h. Renewal (a fresh login) is scheduled by
+# the SessionSteward: daily at a pre-open IST instant + a >22h TTL backstop.
 TOKEN_TTL = timedelta(hours=24)
-# A failed renewal must NOT cost a full REFRESH_EVERY of silence. The renewal is what
-# keeps the feed alive, and the timer is anchored to process start, so one failure at
-# the wrong moment used to burn an entire trading session.
-REFRESH_RETRY_AFTER_FAILURE = timedelta(minutes=5)
 
 # While the circuit is open, one non-manual "probe" login may go through per this
 # interval — enough to notice the broker coming back, slow enough to never storm.
@@ -371,6 +361,11 @@ class MarketDataSession:
             "POST /api/auth/login with force_new_token=true.",
         )
 
+    def park_rotations(self, reason: str) -> None:
+        """Public circuit-open for detectors outside this module (e.g. the
+        steward's second-client signature)."""
+        self._open_circuit(reason)
+
     def mark_feed_healthy(self) -> None:
         """The steward verified rows are flowing on the current token — reset the
         storm counter and close the circuit. The ONLY way the circuit closes
@@ -405,16 +400,12 @@ class MarketDataSession:
             self._tokens = tokens
         return tokens
 
-    async def refresh(self) -> SessionTokens:
-        """XTS has no refresh endpoint — renewal is a fresh login."""
-        return await self.login()
-
-    async def start_refresh_loop(self) -> None:
-        """Spawn the background renewal task. Idempotent."""
-        if self._refresh_task and not self._refresh_task.done():
-            return
-        self._stopping.clear()
-        self._refresh_task = asyncio.create_task(self._refresh_loop(), name="xts-refresh")
+    # NOTE: there is deliberately no refresh loop here anymore. The 12h interval
+    # timer — anchored to process start, blind to the clock — fired at 19:55 on
+    # 2026-08-03 and 19:09 on 2026-08-05, each time rotating the token in the
+    # evening and killing the feed overnight with nothing watching. Token renewal
+    # now belongs to the SessionSteward: one rotation daily at a pre-open IST
+    # instant plus a >22h TTL backstop, both VERIFIED after the fact.
 
     async def stop(self) -> None:
         """Stop background work. Deliberately does NOT log the token out.
@@ -507,50 +498,6 @@ class MarketDataSession:
         return True
 
     # ---------------------------------------------------------- internals
-
-    async def _refresh_loop(self) -> None:
-        log.info("xts.refresh_loop.started", interval_seconds=REFRESH_EVERY.total_seconds())
-        wait_s = REFRESH_EVERY.total_seconds()
-        while not self._stopping.is_set():
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=wait_s)
-                if self._stopping.is_set():
-                    break
-            except asyncio.TimeoutError:
-                pass
-            try:
-                async for attempt in AsyncRetrying(
-                    stop=stop_after_attempt(3),
-                    wait=wait_exponential(multiplier=2, min=2, max=30),
-                    retry=retry_if_exception_type(Exception),
-                    reraise=True,
-                ):
-                    with attempt:
-                        await self.login()
-                # The new token invalidated the feed socket's previous token (XTS
-                # allows one valid token per appKey), so the live socket is now
-                # bound to a dead token. Drop it so the feed reconnects + re-subscribes
-                # under the fresh token — otherwise the 12h refresh silently stops
-                # all ticks until the next manual login.
-                self._nudge_feed_reconnect()
-                wait_s = REFRESH_EVERY.total_seconds()
-            except Exception as e:
-                # Come back in minutes, not another REFRESH_EVERY.
-                wait_s = REFRESH_RETRY_AFTER_FAILURE.total_seconds()
-                log.error("xts.refresh.exhausted", error=str(e), retry_in_s=wait_s)
-
-    def _nudge_feed_reconnect(self) -> None:
-        """Ask the live feed (if any) to reconnect so it re-handshakes with the
-        current token. Lazy import avoids an auth -> ingest import cycle."""
-        try:
-            from ..runtime import get_runtime
-
-            feed = get_runtime().feed_client
-            if feed is not None:
-                feed.nudge_reconnect()
-                log.info("xts.refresh.feed_reconnect_nudged")
-        except Exception as e:
-            log.warning("xts.refresh.feed_nudge_failed", error=str(e))
 
     async def _persist(self, tokens: SessionTokens) -> None:
         async with session_scope() as s:
