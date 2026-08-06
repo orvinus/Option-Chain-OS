@@ -3,9 +3,9 @@
 These guard the "feed must never silently die" behaviour added 2026-06-17:
   * ``_classify_400`` distinguishes a benign "already subscribed" 400 from a
     genuine auth rejection ('Invalid Token').
-  * ``MarketDataSession.login`` is debounced (non-forced re-logins within
-    LOGIN_DEBOUNCE_S reuse the token) but ``force=True`` always mints fresh —
-    so the single-session token is not thrashed by racing logins.
+  * ``MarketDataSession.login`` enforces the rotation floor (LOGIN_FLOOR_S):
+    within it every non-manual login — forced or not — reuses the token, so
+    the single-session token cannot be thrashed by racing recovery actors.
   * ``OptionFeedClient._self_heal_auth`` re-logins + requests a reconnect on an
     auth failure, but respects the cooldown and the attempt cap (no login storm).
 
@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from app.auth.market_session import LOGIN_DEBOUNCE_S, MarketDataSession
+from app.auth.market_session import MarketDataSession
 from app.ingest import ws_client
 from app.ingest.ws_client import (
     AUTO_RELOGIN_ATTEMPT_DECAY_S,
@@ -64,7 +64,12 @@ async def test_classify_400_subscription_limit_is_rejection() -> None:
 
 
 # --------------------------------------------------------------------------- 2
-async def test_login_debounce_reuses_token_then_force_mints_fresh() -> None:
+async def test_login_floor_reuses_token_and_only_manual_bypasses() -> None:
+    """Floor semantics replaced the old 20s debounce: within LOGIN_FLOOR_S even a
+    force=True login reuses the existing token (the 2026-08-06 storm was forced
+    logins at ~6s cadence); only manual=True mints fresh."""
+    from datetime import datetime, timedelta, timezone
+
     calls = {"n": 0}
 
     async def fake_xts_login() -> dict:
@@ -76,28 +81,36 @@ async def test_login_debounce_reuses_token_then_force_mints_fresh() -> None:
     async def noop_persist(_tokens) -> None:
         return None
 
-    # Patch the network login + DB persist on this isolated instance.
+    async def noop_seed() -> None:
+        return None
+
+    # Patch the network login + DB persist + DB floor-seed on this instance.
     sess._persist = noop_persist  # type: ignore[assignment]
+    sess._seed_floor_from_db_once = noop_seed  # type: ignore[assignment]
     ws_client_orig = ws_client  # keep linter calm
     import app.market_data.xts_client as xc
 
     orig = xc.login
     xc.login = fake_xts_login  # type: ignore[assignment]
     try:
-        t1 = await sess.login()  # first real login
-        t2 = await sess.login()  # within debounce -> reuse, no network call
-        assert calls["n"] == 1, "second non-forced login must be debounced"
+        t1 = await sess.login()  # first real login (no usable token -> proceeds)
+        t2 = await sess.login()  # within the floor -> reuse, no network call
+        assert calls["n"] == 1, "second non-forced login must be floored"
         assert t1.jwt_token == t2.jwt_token == "tok-1"
 
-        t3 = await sess.login(force=True)  # explicit -> fresh
-        assert calls["n"] == 2, "force=True must bypass debounce"
-        assert t3.jwt_token == "tok-2"
+        t3 = await sess.login(force=True)  # forced but NOT manual -> still floored
+        assert calls["n"] == 1, "force=True must NOT bypass the rotation floor"
+        assert t3.jwt_token == "tok-1"
 
-        # Simulate the debounce window elapsing -> next non-forced login mints fresh.
-        sess._last_login_mono = time.monotonic() - (LOGIN_DEBOUNCE_S + 1)
-        t4 = await sess.login()
-        assert calls["n"] == 3, "after debounce window a non-forced login mints fresh"
-        assert t4.jwt_token == "tok-3"
+        t4 = await sess.login(force=True, manual=True)  # human override -> fresh
+        assert calls["n"] == 2, "manual=True is the only sub-floor path"
+        assert t4.jwt_token == "tok-2"
+
+        # Simulate the floor elapsing -> next non-forced login mints fresh.
+        sess._last_login_wall = datetime.now(timezone.utc) - timedelta(seconds=999)
+        t5 = await sess.login()
+        assert calls["n"] == 3, "after the floor a non-forced login mints fresh"
+        assert t5.jwt_token == "tok-3"
     finally:
         xc.login = orig  # type: ignore[assignment]
 
