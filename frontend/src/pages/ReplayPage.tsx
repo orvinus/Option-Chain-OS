@@ -118,14 +118,17 @@ interface GridRow {
 
 /** Strikes within the playhead's ATM window. Centred on the PLAYHEAD's spot, never the
  *  session close, so nothing on this page is computed from data the playhead hasn't
- *  reached yet. */
+ *  reached yet. Falls back to the frame's own `atm` (backend supplies a
+ *  straddle-minimum ATM for spot-less backfilled days) — without it, spot-less
+ *  frames silently disabled the ATM±N filter and showed every strike. */
 function windowFilter(
   current: ReplayFrame | undefined,
   atmWindow: number,
   strikeStep: number,
 ): (strike: number) => boolean {
   const w = effectiveAtmWindow(atmWindow);
-  const atm = current?.spot != null ? atmRound(current.spot, strikeStep) : null;
+  const atm =
+    current?.spot != null ? atmRound(current.spot, strikeStep) : current?.atm ?? null;
   return (strike: number) => w < 0 || atm == null || Math.abs(strike - atm) <= w * strikeStep;
 }
 

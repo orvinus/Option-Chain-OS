@@ -40,12 +40,14 @@ async def resolve_expiry(s: str | None, symbol: str | None = None) -> date:
     # Fall back to the most recent stored expiry only when nothing current exists.
     try:
         async with AsyncSessionLocal() as sess:
+            # Unified view (live ∪ vendor archive) so a symbol whose only data is
+            # backfilled history (e.g. SENSEX pre-live) still resolves an expiry.
             row = await sess.execute(
                 text(
                     "SELECT COALESCE("
-                    "  (SELECT MIN(expiry) FROM option_oi_snapshots"
+                    "  (SELECT MIN(expiry) FROM oi_snapshots_unified"
                     "     WHERE symbol = :sym AND expiry >= :today),"
-                    "  (SELECT MAX(expiry) FROM option_oi_snapshots WHERE symbol = :sym)"
+                    "  (SELECT MAX(expiry) FROM oi_snapshots_unified WHERE symbol = :sym)"
                     ")"
                 ),
                 {"sym": sym, "today": now_ist().date()},

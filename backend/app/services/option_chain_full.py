@@ -126,7 +126,7 @@ _LATEST_SNAPSHOT_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
@@ -136,7 +136,7 @@ _SNAPSHOT_AT_OR_BEFORE_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff
     ORDER BY strike, option_type, ts DESC
     """
@@ -148,7 +148,7 @@ _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
@@ -158,7 +158,7 @@ _SNAPSHOT_AT_OR_AFTER_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff
     ORDER BY strike, option_type, ts ASC
     """
@@ -167,7 +167,7 @@ _SNAPSHOT_AT_OR_AFTER_SQL = text(
 _MAX_TS_SQL = text(
     """
     SELECT MAX(ts) AS max_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )
@@ -175,7 +175,7 @@ _MAX_TS_SQL = text(
 _MIN_TS_SQL = text(
     """
     SELECT MIN(ts) AS min_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )

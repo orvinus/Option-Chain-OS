@@ -67,7 +67,7 @@ class OITimeseriesResponse:
 _MAX_TS_SQL = text(
     """
     SELECT MAX(ts) AS max_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )
@@ -75,7 +75,7 @@ _MAX_TS_SQL = text(
 _STRIKE_BOUNDS_SQL = text(
     """
     SELECT MIN(strike) AS lo, MAX(strike) AS hi
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )
@@ -105,7 +105,7 @@ async def fetch_strike_bounds(symbol: str, expiry: date) -> tuple[int, int] | No
 # late-arriving strike contributes 0 *change* instead of its entire OI.
 _MAX_TS_IN_WINDOW_SQL = text(
     """
-    SELECT MAX(ts) FROM option_oi_snapshots
+    SELECT MAX(ts) FROM oi_snapshots_unified
     WHERE symbol = :symbol
       AND expiry = :expiry
       AND strike BETWEEN :strike_min AND :strike_max
@@ -122,7 +122,7 @@ _TIMESERIES_SQL = text(
             strike,
             option_type,
             locf(last(oi, ts)) AS oi
-        FROM option_oi_snapshots
+        FROM oi_snapshots_unified
         WHERE symbol = :symbol
           AND expiry = :expiry
           AND strike BETWEEN :strike_min AND :strike_max

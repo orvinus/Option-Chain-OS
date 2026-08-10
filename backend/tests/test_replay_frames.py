@@ -85,7 +85,7 @@ class _FakeSession:
         if sql is replay_mod._REPLAY_SERIES_SQL:
             self._seen["series_params"] = params
             return _FakeResult(_SERIES_ROWS)
-        if sql is replay_mod._SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL:
+        if sql is replay_mod._BASELINE_AT_OR_AFTER_SQL:
             self._seen["base_params"] = params
             return _FakeResult(_BASE_ROWS)
         raise AssertionError(f"unexpected query: {sql}")
@@ -168,7 +168,7 @@ async def test_strike_missing_from_the_open_does_not_spike() -> None:
 
     class _NoBaseSession(_FakeSession):
         async def execute(self, sql, params):
-            if sql is replay_mod._SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL:
+            if sql is replay_mod._BASELINE_AT_OR_AFTER_SQL:
                 return _FakeResult([])  # strike entered mid-session
             return await super().execute(sql, params)
 

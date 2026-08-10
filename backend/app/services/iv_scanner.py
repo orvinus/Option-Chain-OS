@@ -70,7 +70,7 @@ class IvScannerResponse:
 _EXPIRIES_SQL = text(
     """
     SELECT DISTINCT expiry
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry >= CURRENT_DATE
     ORDER BY expiry ASC
     LIMIT 6

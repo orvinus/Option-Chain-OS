@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     # token refresh loop. The only gate now is `run_mode == "live"` in main.py's
     # lifespan, which always restores-or-logs-in.
 
+    # ---------------- TrueData (historical REST backfill only) ----------------
+    # Used exclusively by scripts/truedata_backfill.py + market_data/truedata_rest.py.
+    # No TrueData WebSocket is opened anywhere — the live feed stays XTS. Bearer
+    # tokens die at a fixed wall clock (~04:00 IST), not a rolling TTL.
+    truedata_user: str = Field(default="", validation_alias="TRUEDATA_USER")
+    truedata_password: str = Field(default="", validation_alias="TRUEDATA_PASSWORD")
+    # OI unit normalization: multiply vendor OI by this per exchange. 1 = vendor
+    # already reports units (contracts × lot). If probe P-B finds lots, set the
+    # symbol's lot size here (e.g. 65 / 20) — a config flip, never a code change.
+    truedata_oi_scale_nse: int = Field(default=1, validation_alias="TRUEDATA_OI_SCALE_NSE")
+    truedata_oi_scale_bse: int = Field(default=1, validation_alias="TRUEDATA_OI_SCALE_BSE")
+    # REST request governor (requests/second). Docs contradict (1–10/s); start
+    # conservative, raise after the probe measures the enforced ceiling.
+    truedata_rate_limit_rps: float = Field(default=4.0, validation_alias="TRUEDATA_RATE_LIMIT_RPS")
+
     # ---------------- Database ----------------
     db_url: str = Field(
         default="postgresql+psycopg://postgres:postgres@localhost:5432/oi",
