@@ -29,7 +29,7 @@ _LATEST_FULL_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, volume, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
@@ -38,7 +38,7 @@ _LATEST_FULL_SQL = text(
 _MAX_TS_SQL = text(
     """
     SELECT MAX(ts) AS max_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )

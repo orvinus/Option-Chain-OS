@@ -135,7 +135,7 @@ _LATEST_SNAPSHOT_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
@@ -145,7 +145,7 @@ _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts <= :cutoff AND ts >= :floor
     ORDER BY strike, option_type, ts DESC
     """
@@ -155,7 +155,7 @@ _SNAPSHOT_AT_OR_AFTER_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff
     ORDER BY strike, option_type, ts ASC
     """
@@ -168,7 +168,7 @@ _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL = text(
     """
     SELECT DISTINCT ON (strike, option_type)
         strike, option_type, oi, ltp, underlying, ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff AND ts <= :upper
     ORDER BY strike, option_type, ts ASC
     """
@@ -183,13 +183,13 @@ _PREV_DISTINCT_OI_SQL = text(
     WITH latest AS (
         SELECT DISTINCT ON (strike, option_type)
             strike, option_type, oi AS cur_oi
-        FROM option_oi_snapshots
+        FROM oi_snapshots_unified
         WHERE symbol = :symbol AND expiry = :expiry
         ORDER BY strike, option_type, ts DESC
     )
     SELECT DISTINCT ON (o.strike, o.option_type)
         o.strike, o.option_type, o.oi, o.ltp, o.underlying, o.ts
-    FROM option_oi_snapshots o
+    FROM oi_snapshots_unified o
     JOIN latest l USING (strike, option_type)
     WHERE o.symbol = :symbol AND o.expiry = :expiry
       AND o.oi <> l.cur_oi
@@ -201,7 +201,7 @@ _PREV_DISTINCT_OI_SQL = text(
 _MAX_TS_SQL = text(
     """
     SELECT MAX(ts) AS max_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )
@@ -209,7 +209,7 @@ _MAX_TS_SQL = text(
 _MIN_TS_SQL = text(
     """
     SELECT MIN(ts) AS min_ts
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     """
 )

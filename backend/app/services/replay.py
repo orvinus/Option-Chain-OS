@@ -24,7 +24,7 @@ from ..core.config import settings
 from ..core.db import AsyncSessionLocal
 from ..core.time_utils import IST, session_floor_for
 from .greeks_history import fetch_greeks_series
-from .oi_change import _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL, _atm_strike, _safe_ratio
+from .oi_change import _atm_strike, _safe_ratio
 
 
 @dataclass
@@ -66,6 +66,11 @@ class ReplayFrame:
 # every bucket (so the book is complete at each instant, mirroring the old
 # per-cursor ``DISTINCT ON`` snapshot). Buckets before a strike's first tick stay
 # NULL and are dropped; a bucket before ANY data has no rows and is absent.
+#
+# Reads ``oi_snapshots_unified`` (live table UNION vendor-backfilled
+# ``oi_archive_bars``, migration 0005) so replay serves both live-recorded days
+# and the imported 6-month TrueData history through one query. The importer
+# guarantees no (symbol, day) overlap between the two stores.
 _REPLAY_SERIES_SQL = text(
     """
     WITH per_strike AS (
@@ -74,21 +79,53 @@ _REPLAY_SERIES_SQL = text(
             strike,
             option_type,
             locf(last(oi, ts)) AS oi,
+            locf(last(ltp, ts)) AS ltp,
             locf(last(underlying, ts)) AS underlying,
             -- Age of the carried-forward values, so the frame's spot can be taken from
             -- the FRESHEST leg rather than whichever strike happens to sort first.
             locf(last(ts, ts)) AS last_ts
-        FROM option_oi_snapshots
+        FROM oi_snapshots_unified
         WHERE symbol = :symbol
           AND expiry = :expiry
           AND ts >= :start
           AND ts <= :end
         GROUP BY 1, 2, 3
     )
-    SELECT bucket, strike, option_type, oi, underlying, last_ts
+    SELECT bucket, strike, option_type, oi, ltp, underlying, last_ts
     FROM per_strike
     WHERE oi IS NOT NULL
     ORDER BY bucket, strike, option_type
+    """
+)
+
+
+def _min_straddle_atm(ltp_book: dict[int, dict[str, float]]) -> int | None:
+    """ATM fallback when no spot is stored for a frame: the strike whose CE+PE
+    premium sum is smallest (the classic straddle-minimum ATM detector). Used
+    for vendor-backfilled days that predate the vendor's own index-bar depth —
+    without it the replay ATM (and the frontend's ATM±N strike filter) dies on
+    exactly those days."""
+    best: tuple[float, int] | None = None
+    for strike, legs in ltp_book.items():
+        ce, pe = legs.get("CE"), legs.get("PE")
+        if ce is None or pe is None or (ce <= 0 and pe <= 0):
+            continue
+        s = ce + pe
+        if best is None or s < best[0]:
+            best = (s, strike)
+    return best[1] if best else None
+
+# Session-open baseline over the SAME unified source. A local copy of
+# ``oi_change._SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL`` on purpose: the live tabs keep
+# reading the live table only, while replay must baseline archive days too —
+# sharing the constant would silently widen every live tab's scan.
+_BASELINE_AT_OR_AFTER_SQL = text(
+    """
+    SELECT DISTINCT ON (strike, option_type)
+        strike, option_type, oi, ltp, underlying, ts
+    FROM oi_snapshots_unified
+    WHERE symbol = :symbol AND expiry = :expiry AND ts >= :cutoff AND ts <= :upper
+    ORDER BY strike, option_type, ts ASC
     """
 )
 
@@ -141,7 +178,7 @@ async def fetch_replay(
         # first row as its baseline.
         base_rows = (
             await s.execute(
-                _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL,
+                _BASELINE_AT_OR_AFTER_SQL,
                 {
                     "symbol": symbol,
                     "expiry": expiry,
@@ -158,16 +195,20 @@ async def fetch_replay(
     # Group rows by bucket, preserving order (query is ORDER BY bucket).
     buckets: list[datetime] = []
     by_bucket: dict[datetime, dict[int, dict[str, int]]] = {}
+    ltp_by_bucket: dict[datetime, dict[int, dict[str, float]]] = {}
     spot_by_bucket: dict[datetime, float | None] = {}
     spot_ts_by_bucket: dict[datetime, datetime | None] = {}
     for r in rows:
         b = r["bucket"]
         if b not in by_bucket:
             by_bucket[b] = {}
+            ltp_by_bucket[b] = {}
             spot_by_bucket[b] = None
             spot_ts_by_bucket[b] = None
             buckets.append(b)
         by_bucket[b].setdefault(r["strike"], {"CE": 0, "PE": 0})[r["option_type"]] = int(r["oi"])
+        if r.get("ltp") is not None:
+            ltp_by_bucket[b].setdefault(r["strike"], {})[r["option_type"]] = float(r["ltp"])
         # Take the frame's spot from the FRESHEST leg. Rows arrive in strike order, so
         # the old "first non-null wins" locked onto the LOWEST strike — typically a
         # quiet deep-ITM contract whose locf-carried underlying stops updating, which
@@ -242,7 +283,12 @@ async def fetch_replay(
                 # clock the data is up to one step ahead of. See the module docstring.
                 ts=(b + step).astimezone(IST).isoformat(),
                 spot=spot,
-                atm=_atm_strike(symbol, spot),
+                # Spot-less frames (vendor-backfilled days before the vendor's own
+                # index depth) fall back to the straddle-minimum ATM so the ATM tile
+                # and the frontend's ATM±N strike filter keep working.
+                atm=_atm_strike(symbol, spot)
+                if spot is not None
+                else _min_straddle_atm(ltp_by_bucket.get(b, {})),
                 total_call_oi=total_ce,
                 total_put_oi=total_pe,
                 total_call_oi_change=total_ce - base_ce,

@@ -61,12 +61,14 @@ async def expiries(symbol: str | None = Query(default=None)) -> ExpiriesResponse
     if entry.symbol == rt.active_symbol and rt.expiries:
         expiry_set.update(rt.expiries)
 
-    # Source 2: distinct expiries that actually have snapshot data in the DB.
+    # Source 2: distinct expiries that actually have stored data — live table ∪
+    # vendor archive (oi_snapshots_unified, migration 0005), so backfilled
+    # expired weeklies are selectable in the Replay date/expiry pickers.
     async with AsyncSessionLocal() as s:
         rows = (
             await s.execute(
                 text(
-                    "SELECT DISTINCT expiry FROM option_oi_snapshots "
+                    "SELECT DISTINCT expiry FROM oi_snapshots_unified "
                     "WHERE symbol = :symbol ORDER BY expiry"
                 ),
                 {"symbol": entry.symbol},
