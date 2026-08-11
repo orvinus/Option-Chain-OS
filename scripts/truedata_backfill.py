@@ -952,9 +952,11 @@ class Backfill:
             self.note(f"== spot-less sessions (Issue-4 class): {len(spotless)}"
                       + (f" → {[(r[0], str(r[1])) for r in spotless[:20]]}" if spotless else ""))
 
-            # (b) Intra-day OI-collapse signature (report Issue 5): a day whose
-            # minimum per-minute total PE (or CE) OI falls below 20% of that
-            # day's maximum — real OI never does this; a feed failure does.
+            # (b) Intra-day OI-collapse signature (report Issue 5): the day's
+            # CLOSING OI (last 30 min avg) below 25% of the day's maximum. A
+            # true feed collapse persists to the close (Jun-10: 127M → 14M);
+            # a new weekly's natural morning ramp starts low but ENDS high —
+            # min-vs-max alone false-flagged every first trading day.
             collapse = (await c.execute(text(
                 """
                 WITH per_min AS (
@@ -963,11 +965,18 @@ class Backfill:
                            sum(oi) AS tot
                     FROM oi_archive_bars WHERE option_type IN ('CE','PE')
                     GROUP BY 1, 2, 3, 4
+                ),
+                daily AS (
+                    SELECT symbol, d, option_type, max(tot) AS day_max,
+                           avg(tot) FILTER (
+                               WHERE m >= (d + time '15:00') AT TIME ZONE 'Asia/Kolkata'
+                           ) AS close_avg
+                    FROM per_min GROUP BY 1, 2, 3
                 )
                 SELECT symbol, d, option_type,
-                       round(100.0 * min(tot) / nullif(max(tot), 0)) AS min_pct_of_max
-                FROM per_min GROUP BY 1, 2, 3
-                HAVING min(tot) < 0.2 * max(tot)
+                       round(100.0 * close_avg / nullif(day_max, 0)) AS close_pct_of_max
+                FROM daily
+                WHERE close_avg IS NOT NULL AND close_avg < 0.25 * day_max
                 ORDER BY 1, 2 LIMIT 20
                 """
             ))).all()
