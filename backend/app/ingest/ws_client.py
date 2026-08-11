@@ -592,21 +592,26 @@ class OptionFeedClient:
             # with the XTS reason instead of masking it as success.
             live = ok + already
             self._live_subs = live
-            # MEASURED IN PRODUCTION 2026-08-11: after the gateway cycles the
-            # socket (~every 67 s), instruments answering "Instrument Already
-            # Subscribed" deliver NO data on the NEW socket — "already
-            # subscribed" is proof of registration, not of delivery. The result
-            # was a fully "healthy" feed that stored only the spot row for two
-            # hours. If NOTHING was newly subscribed, hard-cycle the
-            # registrations once (unsubscribe → subscribe) so the broadcast
-            # re-arms on this socket; freeing the slots first also untangles the
-            # 50-cap breaches these half-dead sessions accumulate.
+            # MEASURED IN PRODUCTION 2026-08-11: the gateway cycles the socket
+            # every ~67 s, and after a reconnect the NSEFO options broadcast is
+            # DEAD no matter what: "Instrument Already Subscribed" delivers
+            # nothing, and even a same-session unsubscribe→resubscribe cycle
+            # (tried first — newly-subscribed instruments still stream nothing)
+            # does not re-arm it. Only a FRESH LOGIN arms delivery — which is
+            # what the pre-steward code did on every cycle, and why it survived
+            # this gateway for weeks. So: free the broker-side slots, then ask
+            # the steward for a rotation. The steward remains the ONE rotation
+            # authority (floor + burst budget + circuit all still apply) — this
+            # is the bounded, single-actor version of the old behaviour, not a
+            # return of the outage-#2 login storm. Tune LOGIN_FLOOR_S /
+            # LOGIN_BURST_MAX to the measured cycle cadence.
             if ok == 0 and already > 0 and not _rearmed:
                 log.warning(
                     "ws.subscribe.rearm",
                     already_present=already,
-                    hint="already-subscribed instruments deliver no data on a "
-                    "fresh socket — cycling unsubscribe→subscribe to re-arm",
+                    hint="already-subscribed after a gateway socket cycle — "
+                    "broadcast re-arms only on a fresh login; freeing slots and "
+                    "requesting a steward rotation",
                 )
                 for code, insts in groups.items():
                     for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
@@ -615,10 +620,12 @@ class OptionFeedClient:
                                 token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S
                             )
                         except Exception:
-                            # Best-effort: even a failed unsubscribe leaves us no
-                            # worse off — the retry below reports what happened.
+                            # Best-effort: a failed unsubscribe leaves us no
+                            # worse off than the dead broadcast we already have.
                             pass
-                await self._subscribe_all(_rearmed=True)
+                await self._request_auth_recovery(
+                    "gateway socket cycle: options broadcast re-arms only on a fresh login"
+                )
                 return
             if live == 0 and (rejected or errors):
                 log.error(
