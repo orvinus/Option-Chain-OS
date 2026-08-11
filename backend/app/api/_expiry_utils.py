@@ -40,14 +40,25 @@ async def resolve_expiry(s: str | None, symbol: str | None = None) -> date:
     # Fall back to the most recent stored expiry only when nothing current exists.
     try:
         async with AsyncSessionLocal() as sess:
-            # Unified view (live ∪ vendor archive) so a symbol whose only data is
-            # backfilled history (e.g. SENSEX pre-live) still resolves an expiry.
+            # Live ∪ archive so a symbol whose only data is backfilled history
+            # (e.g. SENSEX pre-live) still resolves an expiry — but as explicit
+            # per-table aggregates, NOT the unified view: view-level MIN/MAX
+            # scans contributed to the 2026-08-11 pool-exhaustion incident.
             row = await sess.execute(
                 text(
                     "SELECT COALESCE("
-                    "  (SELECT MIN(expiry) FROM oi_snapshots_unified"
-                    "     WHERE symbol = :sym AND expiry >= :today),"
-                    "  (SELECT MAX(expiry) FROM oi_snapshots_unified WHERE symbol = :sym)"
+                    "  LEAST("
+                    "    (SELECT MIN(expiry) FROM option_oi_snapshots"
+                    "       WHERE symbol = :sym AND expiry >= :today),"
+                    "    (SELECT MIN(expiry) FROM oi_archive_bars"
+                    "       WHERE symbol = :sym AND expiry >= :today"
+                    "         AND option_type IN ('CE','PE'))"
+                    "  ),"
+                    "  GREATEST("
+                    "    (SELECT MAX(expiry) FROM option_oi_snapshots WHERE symbol = :sym),"
+                    "    (SELECT MAX(expiry) FROM oi_archive_bars"
+                    "       WHERE symbol = :sym AND option_type IN ('CE','PE'))"
+                    "  )"
                     ")"
                 ),
                 {"sym": sym, "today": now_ist().date()},
