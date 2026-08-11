@@ -62,14 +62,22 @@ async def expiries(symbol: str | None = Query(default=None)) -> ExpiriesResponse
         expiry_set.update(rt.expiries)
 
     # Source 2: distinct expiries that actually have stored data — live table ∪
-    # vendor archive (oi_snapshots_unified, migration 0005), so backfilled
-    # expired weeklies are selectable in the Replay date/expiry pickers.
+    # vendor archive, so backfilled expired weeklies are selectable in the
+    # Replay date/expiry pickers. Deliberately NOT the oi_snapshots_unified
+    # view: a DISTINCT over the UNION ALL view cannot be planned per-arm, and
+    # in production (2026-08-11) four stacked 8-second copies of that scan —
+    # this endpoint is polled by every open tab — exhausted the DB pool and
+    # starved the aggregator into dropping every tick. Explicit per-table
+    # DISTINCTs let each side use its own index and finish in milliseconds.
     async with AsyncSessionLocal() as s:
         rows = (
             await s.execute(
                 text(
-                    "SELECT DISTINCT expiry FROM oi_snapshots_unified "
-                    "WHERE symbol = :symbol ORDER BY expiry"
+                    "SELECT DISTINCT expiry FROM option_oi_snapshots WHERE symbol = :symbol "
+                    "UNION "
+                    "SELECT DISTINCT expiry FROM oi_archive_bars "
+                    "WHERE symbol = :symbol AND option_type IN ('CE','PE') "
+                    "ORDER BY expiry"
                 ),
                 {"symbol": entry.symbol},
             )

@@ -44,7 +44,7 @@ async def _resolve_default_expiry(symbol: str) -> date | None:
         async with AsyncSessionLocal() as s:
             row = await s.execute(
                 text(
-                    "SELECT MIN(expiry) FROM oi_snapshots_unified WHERE symbol = :sym"
+                    "SELECT MIN(expiry) FROM option_oi_snapshots WHERE symbol = :sym"
                 ),
                 {"sym": symbol},
             )
