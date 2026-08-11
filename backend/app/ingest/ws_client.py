@@ -525,7 +525,7 @@ class OptionFeedClient:
             return "INDEX"
         return str(iid)
 
-    async def _subscribe_all(self) -> None:
+    async def _subscribe_all(self, _rearmed: bool = False) -> None:
         groups = self._build_subscription_groups()
         total = sum(len(v) for v in groups.values())
         if not total:
@@ -592,6 +592,34 @@ class OptionFeedClient:
             # with the XTS reason instead of masking it as success.
             live = ok + already
             self._live_subs = live
+            # MEASURED IN PRODUCTION 2026-08-11: after the gateway cycles the
+            # socket (~every 67 s), instruments answering "Instrument Already
+            # Subscribed" deliver NO data on the NEW socket — "already
+            # subscribed" is proof of registration, not of delivery. The result
+            # was a fully "healthy" feed that stored only the spot row for two
+            # hours. If NOTHING was newly subscribed, hard-cycle the
+            # registrations once (unsubscribe → subscribe) so the broadcast
+            # re-arms on this socket; freeing the slots first also untangles the
+            # 50-cap breaches these half-dead sessions accumulate.
+            if ok == 0 and already > 0 and not _rearmed:
+                log.warning(
+                    "ws.subscribe.rearm",
+                    already_present=already,
+                    hint="already-subscribed instruments deliver no data on a "
+                    "fresh socket — cycling unsubscribe→subscribe to re-arm",
+                )
+                for code, insts in groups.items():
+                    for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
+                        try:
+                            await xts_client.unsubscribe(
+                                token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S
+                            )
+                        except Exception:
+                            # Best-effort: even a failed unsubscribe leaves us no
+                            # worse off — the retry below reports what happened.
+                            pass
+                await self._subscribe_all(_rearmed=True)
+                return
             if live == 0 and (rejected or errors):
                 log.error(
                     "ws.subscribe.all_failed",
