@@ -251,7 +251,17 @@ class Backfill:
 
     async def _load_live_days(self, symbol: str) -> set[date]:
         """IST days already recorded live — the importer skips them entirely so
-        the UNION ALL view can never double-count."""
+        the UNION ALL view can never double-count.
+
+        ``--include-live-days`` disables the skip for REPAIR pulls: the 18
+        partial dev-machine recordings transferred as gap days (the Jun-10
+        put-collapse / truncated-session classes in the data-quality report)
+        can only be replaced by vendor data if the skip is bypassed. The
+        no-double-count invariant then holds at TIMESTAMP level (upserts), not
+        day level — callers must delete the inferior rows after the pull."""
+        if getattr(self.args, "include_live_days", False):
+            self.live_days[symbol] = set()
+            return set()
         if symbol not in self.live_days:
             async with self.engine.begin() as c:
                 rows = await c.execute(
@@ -928,6 +938,49 @@ class Backfill:
             ))).all()
             self.note(f"== implausible strikes (date-contaminated parse?): {strike_bad or 'none'}")
 
+            # --- Tripwires added after the 2026-08-11 data-quality report ---
+            # (a) Whole sessions with no spot stamped (report Issue 4).
+            spotless = (await c.execute(text(
+                """
+                SELECT symbol, (ts AT TIME ZONE 'Asia/Kolkata')::date AS d
+                FROM oi_archive_bars WHERE option_type IN ('CE','PE')
+                GROUP BY 1, 2
+                HAVING count(*) FILTER (WHERE underlying IS NOT NULL) = 0
+                ORDER BY 1, 2
+                """
+            ))).all()
+            self.note(f"== spot-less sessions (Issue-4 class): {len(spotless)}"
+                      + (f" → {[(r[0], str(r[1])) for r in spotless[:20]]}" if spotless else ""))
+
+            # (b) Intra-day OI-collapse signature (report Issue 5): a day whose
+            # minimum per-minute total PE (or CE) OI falls below 20% of that
+            # day's maximum — real OI never does this; a feed failure does.
+            collapse = (await c.execute(text(
+                """
+                WITH per_min AS (
+                    SELECT symbol, (ts AT TIME ZONE 'Asia/Kolkata')::date AS d,
+                           date_trunc('minute', ts) AS m, option_type,
+                           sum(oi) AS tot
+                    FROM oi_archive_bars WHERE option_type IN ('CE','PE')
+                    GROUP BY 1, 2, 3, 4
+                )
+                SELECT symbol, d, option_type,
+                       round(100.0 * min(tot) / nullif(max(tot), 0)) AS min_pct_of_max
+                FROM per_min GROUP BY 1, 2, 3
+                HAVING min(tot) < 0.2 * max(tot)
+                ORDER BY 1, 2 LIMIT 20
+                """
+            ))).all()
+            self.note(f"== intra-day OI-collapse days (Issue-5 class): {len(collapse)}"
+                      + (f" → {[(r[0], str(r[1]), r[2], int(r[3])) for r in collapse]}" if collapse else ""))
+
+            # (c) Rows still carried from partial dev-machine recordings.
+            xts_days = (await c.execute(text(
+                "SELECT count(DISTINCT (ts AT TIME ZONE 'Asia/Kolkata')::date) "
+                "FROM oi_archive_bars WHERE token LIKE 'xts:%'"
+            ))).scalar()
+            self.note(f"== days still on xts: gap-transfer rows (should be 0 after repair): {xts_days}")
+
             for tbl, label in (
                 ("oi_archive_ticks", "tick archive"),
                 ("eod_bars", "EOD bars"),
@@ -965,6 +1018,9 @@ async def main() -> None:
     ap.add_argument("--workers", type=int, default=4, help="concurrent in-flight requests (rate-governed)")
     ap.add_argument("--index-symbol", default=None, help="vendor index-bar symbol override")
     ap.add_argument("--dry-run", action="store_true", help="pull: stop after the first expiry")
+    ap.add_argument("--include-live-days", action="store_true",
+                    help="repair pulls: do NOT skip days present in option_oi_snapshots "
+                         "(no-double-count then holds at timestamp level, not day level)")
     ap.add_argument("--days", type=int, default=None,
                     help="lookback days (defaults: ticks 6, eod-bhavcopy 130, flows/news 190)")
     ap.add_argument("--years", type=int, default=10, help="pull-eod: index/futures daily depth")

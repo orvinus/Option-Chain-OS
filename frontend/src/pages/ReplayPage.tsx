@@ -519,10 +519,14 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                   <AtmWindowSelect value={atmWindow} max={ATM_MAX_WINDOW} onChange={setAtmWindow} />
                 </div>
                 <div className="ml-auto">
+                  {/* Filename date comes from the LOADED FRAMES, never the picker:
+                      exporting while a new date was still loading used to save the
+                      previous session under the new date's name — the source of 27
+                      mislabeled files in the 2026-08-11 data-quality report. */}
                   <ExportButton
                     getTable={() => (frames.length ? buildReplayTable(frames) : null)}
-                    filenameBase={`replay_${symbol}_${date ?? "day"}_${step}`}
-                    disabled={frames.length === 0}
+                    filenameBase={`replay_${symbol}_${frames[0]?.ts.slice(0, 10) ?? "no-data"}_${step}`}
+                    disabled={loading || frames.length === 0}
                   />
                 </div>
               </>
@@ -684,10 +688,13 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                 <div className="px-1 pb-2 flex items-center gap-3">
                   <span className="text-sm font-medium text-accent">Option chain @ playhead · {tfLabel}</span>
                   <div className="ml-auto">
+                    {/* Date from the playhead frame itself + the ATM-window setting in
+                        the name: exports made with different windows have wildly
+                        different totals and must be distinguishable at a glance. */}
                     <ExportButton
                       getTable={() => (frameData ? buildSnapshotTable(frameData) : null)}
-                      filenameBase={`chain_${symbol}_${date ?? "day"}_${timeframe}_${current?.ts.slice(11, 16).replace(":", "") ?? ""}`}
-                      disabled={!frameData || tfRows.length === 0}
+                      filenameBase={`chain_${symbol}_${current?.ts.slice(0, 10) ?? "no-data"}_${timeframe}_${current?.ts.slice(11, 16).replace(":", "") ?? ""}_w${atmWindow < 0 ? "All" : atmWindow}`}
+                      disabled={loading || !frameData || tfRows.length === 0}
                     />
                   </div>
                 </div>
