@@ -211,7 +211,7 @@ class SessionSteward:
         )
         while True:
             try:
-                await self._sleep_or_request(CHECK_INTERVAL_S)
+                requested = await self._sleep_or_request(CHECK_INTERVAL_S)
                 self._last_check_at = datetime.now(timezone.utc)
                 await self._maybe_scheduled_rotation()
 
@@ -232,6 +232,19 @@ class SessionSteward:
                     continue
 
                 healthy = self._healthy_verdict(feed)
+                # An explicit recovery request outranks the freshness metric.
+                # MEASURED 2026-08-11: with the options broadcast dead after a
+                # gateway socket cycle, the spot row alone keeps
+                # _data_age_seconds() green — so requests from the feed's rearm
+                # path were evaluated as "healthy, nothing to do" and ignored
+                # all morning. A requester states a concrete broker-visible
+                # problem; believe it. Kick cannot fix a dead broadcast, so
+                # enter the ladder at the rotate rung (jump applied after
+                # _open_episode, which resets the step) — the login floor and
+                # burst budget still bound the actual rotation rate.
+                jump_to_rotate = requested and not _in_warmup()
+                if jump_to_rotate:
+                    healthy = False
                 if healthy:
                     self._set_healthy(True)
                     if self._unhealthy_since is not None:
@@ -247,7 +260,12 @@ class SessionSteward:
                 self._note_possible_post_verify_death()
                 self._set_healthy(False)
                 self._open_episode()
-                await self._escalate()
+                if jump_to_rotate:
+                    # Skip the kick rung; force_gate bypasses the 90 s
+                    # escalate spacing so the rotation keeps pace with the
+                    # ~67 s gateway cycles — LOGIN_FLOOR_S still applies.
+                    self._step = max(self._step, 1)
+                await self._escalate(force_gate=jump_to_rotate)
                 if self._should_exit():
                     await self._do_exit()
             except asyncio.CancelledError:
@@ -256,12 +274,15 @@ class SessionSteward:
             except Exception as e:  # pragma: no cover — must outlive anything
                 log.warning("steward.error", error=str(e))
 
-    async def _sleep_or_request(self, timeout: float) -> None:
+    async def _sleep_or_request(self, timeout: float) -> bool:
+        """Sleep until the next check; True when woken by an explicit request."""
+        requested = True
         try:
             await asyncio.wait_for(self._recovery_requested.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            pass
+            requested = False
         self._recovery_requested.clear()
+        return requested
 
     # ------------------------------------------------ health
 
