@@ -1,7 +1,10 @@
 @echo off
 rem ============================================================================
-rem NIGHTLY TRUEDATA TOP-UP  — scheduled 17:30 IST on this PC (Task Scheduler:
-rem "OI-Nightly-Topup"). Keeps the VPS archive permanently current:
+rem SUPERSEDED 2026-08-13 by scripts/nightly_topup_vps.sh (cron on the VPS,
+rem through the WARP proxy) — the Task Scheduler entry is DISABLED; keep this
+rem file only as a manual fallback if the VPS path ever breaks.
+rem NIGHTLY TRUEDATA TOP-UP  — was scheduled 17:30 IST on this PC (Task
+rem Scheduler: "OI-Nightly-Topup"). Keeps the VPS archive permanently current:
 rem   1. ensures Docker + local DB are up (self-heals after a PC reboot)
 rem   2. re-pulls the last ~4 days of both symbols' chains + index/futures
 rem   3. captures the sliding 5-day tick window (use-it-or-lose-it)
