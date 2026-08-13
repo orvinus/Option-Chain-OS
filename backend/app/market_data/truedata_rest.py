@@ -155,7 +155,12 @@ class TrueDataRest:
         self.gov = _RateGovernor(rps or settings.truedata_rate_limit_rps)
         self._tok = _TokenState()
         self._tok_lock = asyncio.Lock()
-        self._client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
+        # TRUEDATA_PROXY routes ONLY this client through a proxy — used on the
+        # VPS, whose IP TrueData's edge drops (hosting-ASN filter, measured
+        # 2026-08-13): Cloudflare WARP in proxy mode (socks5://127.0.0.1:40000)
+        # gives an India-egress path the vendor accepts. Empty = direct.
+        proxy = (getattr(settings, "truedata_proxy", "") or "").strip() or None
+        self._client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, proxy=proxy)
 
     async def aclose(self) -> None:
         await self._client.aclose()
