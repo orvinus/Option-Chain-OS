@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # REST request governor (requests/second). Docs contradict (1–10/s); start
     # conservative, raise after the probe measures the enforced ceiling.
     truedata_rate_limit_rps: float = Field(default=4.0, validation_alias="TRUEDATA_RATE_LIMIT_RPS")
+    # Optional proxy for the TrueData client ONLY (e.g. socks5://127.0.0.1:40000
+    # = Cloudflare WARP proxy mode on the VPS, whose direct IP the vendor's
+    # edge drops). Never affects the live XTS feed. Empty = direct connection.
+    truedata_proxy: str = Field(default="", validation_alias="TRUEDATA_PROXY")
 
     # ---------------- Database ----------------
     db_url: str = Field(
