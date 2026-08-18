@@ -2,14 +2,14 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { api } from "../api/rest";
 
 /**
- * Fixed-credential login gate for the MAIN dashboard (served at "/"). Mirrors the
- * /hidden gate: the username + password are verified server-side against
- * HIDDEN_USER / HIDDEN_PASSWORD (the same single credential pair) via
- * POST /api/auth/hidden-login — never checked in the browser. A successful sign-in
- * in live mode also starts the broker feed, so it can block up to ~45s.
+ * Fixed-credential login gate for the MAIN dashboard (served at "/"): the
+ * username + password are verified server-side against MAIN_USER /
+ * MAIN_PASSWORD via POST /api/auth/main-login — never checked in the browser.
+ * A successful sign-in in live mode also starts the broker feed, so it can
+ * block up to ~45s.
  *
- * The gate is display-only and in-memory: a full page reload re-prompts, and the
- * backend does not enforce it on /api routes (same behavior as /hidden).
+ * The gate is display-only and in-memory: a full page reload re-prompts, and
+ * the backend does not enforce it on /api routes.
  */
 export function LoginGate({ children }: { children: ReactNode }) {
   const [unlocked, setUnlocked] = useState(false);

@@ -376,8 +376,8 @@ class LoginResponse(BaseModel):
     authenticated: bool
 
 
-class HiddenLoginRequest(BaseModel):
-    """Fixed username+password gate for the /hidden dashboard (verified against .env)."""
+class GateLoginRequest(BaseModel):
+    """Fixed username+password gate for the main dashboard (verified against .env)."""
     username: str
     password: str
 

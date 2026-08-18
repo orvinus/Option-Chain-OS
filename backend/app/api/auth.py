@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..auth import get_session_manager
 from ..core.config import settings
 from ..core.logging import get_logger
-from .schemas import HiddenLoginRequest, LoginRequest, LoginResponse
+from .schemas import GateLoginRequest, LoginRequest, LoginResponse
 
 log = get_logger("auth.api")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -156,9 +156,9 @@ async def login(body: LoginRequest) -> LoginResponse:
 
 
 async def _fixed_credential_gate(
-    body: HiddenLoginRequest, cfg_user: str, cfg_password: str, gate_label: str, env_hint: str
+    body: GateLoginRequest, cfg_user: str, cfg_password: str, gate_label: str, env_hint: str
 ) -> LoginResponse:
-    """Shared logic for the fixed-credential dashboard gates (/hidden and the main /).
+    """Shared logic for the fixed-credential dashboard gate at "/".
 
     Verifies a single username+password from .env (never shipped to the browser),
     then — since these dashboards only load data once the broker session is live —
@@ -222,21 +222,9 @@ async def _fixed_credential_gate(
     )
 
 
-@router.post("/hidden-login", response_model=LoginResponse)
-async def hidden_login(body: HiddenLoginRequest) -> LoginResponse:
-    """Fixed-credential gate for the /hidden dashboard (HIDDEN_USER / HIDDEN_PASSWORD)."""
-    return await _fixed_credential_gate(
-        body, settings.hidden_user, settings.hidden_password,
-        "Hidden dashboard", "HIDDEN_USER and HIDDEN_PASSWORD",
-    )
-
-
 @router.post("/main-login", response_model=LoginResponse)
-async def main_login(body: HiddenLoginRequest) -> LoginResponse:
-    """Fixed-credential gate for the main dashboard at "/" (MAIN_USER / MAIN_PASSWORD).
-
-    A distinct credential from /hidden so the two dashboards can be shared separately.
-    """
+async def main_login(body: GateLoginRequest) -> LoginResponse:
+    """Fixed-credential gate for the main dashboard at "/" (MAIN_USER / MAIN_PASSWORD)."""
     return await _fixed_credential_gate(
         body, settings.main_user, settings.main_password,
         "Main dashboard", "MAIN_USER and MAIN_PASSWORD",

@@ -162,12 +162,9 @@ class Settings(BaseSettings):
     )
     db_persist_timeout_s: float = Field(default=20.0, validation_alias="DB_PERSIST_TIMEOUT_S")
 
-    # ---------------- Dashboard gates ----------------
-    # Fixed username + password protecting the /hidden dashboard (verified server-side,
-    # never shipped to the browser). Blank => the /hidden-login endpoint returns 500 until set.
-    hidden_user: str = Field(default="", validation_alias="HIDDEN_USER")
-    hidden_password: str = Field(default="", validation_alias="HIDDEN_PASSWORD")
-    # Separate fixed credential for the MAIN dashboard at "/" (distinct from /hidden).
+    # ---------------- Dashboard gate ----------------
+    # Fixed username + password protecting the main dashboard at "/" (verified
+    # server-side, never shipped to the browser).
     # Blank => the /main-login endpoint returns 500 until set.
     main_user: str = Field(default="", validation_alias="MAIN_USER")
     main_password: str = Field(default="", validation_alias="MAIN_PASSWORD")

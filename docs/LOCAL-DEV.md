@@ -25,8 +25,8 @@ just don't get a live tick feed. This is all you need for normal feature work.
 
 Two independent guards make it **impossible** for a replay instance to touch the broker:
 
-1. **Backend** (`backend/app/api/auth.py`): `POST /api/auth/login` and `/api/auth/hidden-login`
-   refuse with **409** when `RUN_MODE != live`; the ingestion bootstrap no-ops in replay.
+1. **Backend** (`backend/app/api/auth.py`): `POST /api/auth/login` and `/api/auth/main-login`
+   refuse to touch the broker when `RUN_MODE != live`; the ingestion bootstrap no-ops in replay.
 2. **Frontend** (`frontend/src/hooks/useMarketContext.ts`): the auto-connect effect is
    skipped when health reports `run_mode: "replay"` — the dashboard never even asks.
 

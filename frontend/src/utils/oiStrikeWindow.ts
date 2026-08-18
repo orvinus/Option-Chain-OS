@@ -24,7 +24,7 @@ export function atmRound(spot: number, step: number): number {
 
 /** Effective strike window: one fewer strike on each side than the picked value,
  *  while preserving the sentinels (0 = ATM only, <0 = All). So a picked N shows
- *  ATM ± (N-1). Keep this in sync with the hidden-dashboard copy. */
+ *  ATM ± (N-1). */
 export function effectiveAtmWindow(atmWindow: number): number {
   return atmWindow > 0 ? atmWindow - 1 : atmWindow;
 }

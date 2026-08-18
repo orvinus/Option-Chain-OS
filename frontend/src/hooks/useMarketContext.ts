@@ -83,7 +83,7 @@ export function useMarketContext(): MarketContextValue {
   const [expiryError, setExpiryError] = useState<string | null>(null);
 
   // Defaults to NIFTY; changes only via the confirmation gate. Never follows the
-  // backend's active symbol out-of-band (so /hidden switching can't drag it off NIFTY).
+  // backend's active symbol out-of-band (a global switch can't drag it off NIFTY).
   const [symbol, setSymbol] = useState<string>(DEFAULT_SYMBOL);
   const [symbolGroups, setSymbolGroups] = useState<SymbolSectorGroup[]>([]);
   const [switching, setSwitching] = useState(false);
@@ -117,8 +117,8 @@ export function useMarketContext(): MarketContextValue {
           setDataReady(true);
           setAuthChecked(true);
           // NOTE: intentionally do NOT adopt h.active_symbol — the main dashboard is
-          // pinned to NIFTY and must not follow the global active symbol (which the
-          // /hidden dashboard may switch to a stock/commodity).
+          // pinned to NIFTY and must not follow the global active symbol (which
+          // another consumer may have switched to a stock/commodity).
         }
       } catch {
         if (!cancelled) {
@@ -243,7 +243,7 @@ export function useMarketContext(): MarketContextValue {
   // Assert NIFTY as the backend's active symbol ONCE on load, so live NIFTY data
   // flows here (the WS hub and spot only serve the globally-active symbol). Fires a
   // single time — it never re-grabs the feed afterwards, so a later user-confirmed
-  // switch (or the /hidden dashboard) is not fought.
+  // switch is not fought.
   const nudgedActiveRef = useRef(false);
   useEffect(() => {
     if (!authenticated || !health || nudgedActiveRef.current) return;
