@@ -1,6 +1,6 @@
 # Rebuilding the "hidden" dashboard as a standalone TrueData application
 
-**Why this document exists.** On 2026-08-19 the `/hidden` dashboard was removed from this
+**Why this document exists.** On 2026-08-18 the `/hidden` dashboard was removed from this
 platform (frontend `src/hidden/**`, the `/api/auth/hidden-login` endpoint, and the
 `HIDDEN_USER`/`HIDDEN_PASSWORD` env pair). This document is the complete blueprint for
 recreating it as a **new standalone application** with **TrueData** as the market-data vendor —
