@@ -41,7 +41,13 @@ from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+# Source checkout: repo/scripts/<this> → package at repo/backend/app.
+# Docker image:    /app/scripts/<this>  → package at /app/app (Dockerfile copies
+# backend/ to /app). The old unconditional ``ROOT / "backend"`` resolved to the
+# non-existent /app/backend inside the image, so EVERY boot gap-fill subprocess
+# died with ``ModuleNotFoundError: No module named 'app'`` (2026-09-09).
+_PKG_ROOT = ROOT / "backend" if (ROOT / "backend" / "app").is_dir() else ROOT
+sys.path.insert(0, str(_PKG_ROOT))
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -54,7 +60,7 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.core.time_utils import IST  # noqa: E402
+from app.core.time_utils import IST, ist_naive_to_utc  # noqa: E402
 from app.market_data.truedata_rest import (  # noqa: E402
     QuotaExceeded,
     TrueDataError,
@@ -66,22 +72,43 @@ from app.market_data.truedata_rest import (  # noqa: E402
 
 OUT_DIR = ROOT / "logs" / "backfill"
 SENTINEL_EXPIRY = date(1970, 1, 1)  # IDX / continuous-FUT rows
-SESSION_OPEN = dtime(9, 15)
-SESSION_CLOSE = dtime(15, 30)
+
+
+def _cfg_time(value: str, fallback: dtime) -> dtime:
+    """Parse an 'HH:MM' settings string, falling back on anything unparseable."""
+    try:
+        hh, mm = value.split(":")
+        return dtime(int(hh), int(mm))
+    except Exception:
+        return fallback
+
+
+# Session bounds come from settings, NOT hardcoded. These bound every fetch
+# window below, so a stale constant silently truncates every archived day:
+# SESSION_CLOSE was pinned at 15:30 while the exchange moved the close to 15:40
+# on 2026-08-04, which dropped the last ten minutes — including the settlement
+# window that anchors expiry-day IV — from every day the archive has collected.
+SESSION_OPEN = _cfg_time(settings.market_open_ist, dtime(9, 15))
+SESSION_CLOSE = _cfg_time(settings.market_close_ist, dtime(15, 40))
 
 # Default TrueData index-bar symbols (overridable via --index-symbol; the probe
 # prints the real names from getAllSymbols?segment=in).
 INDEX_SYMBOLS = {"NIFTY": "NIFTY 50", "SENSEX": "SENSEX"}
 EXCHANGE = {"NIFTY": "NSE", "SENSEX": "BSE"}
 
+# source='td_getbars_v2' marks rows written with the CORRECT IST conversion.
+# Rows still carrying the old default ('td_getbars') were written 23 minutes
+# early by the pytz LMT bug and are what scripts/repair_archive_tz.py shifts;
+# writing a distinct value here is what makes that repair safe to re-run.
 _UPSERT_SQL = text(
     """
     INSERT INTO oi_archive_bars
         (ts, symbol, expiry, strike, option_type, token,
-         open, high, low, close, volume, volume_cum, oi, underlying)
+         open, high, low, close, volume, volume_cum, oi, underlying, source)
     VALUES
         (:ts, :symbol, :expiry, :strike, :option_type, :token,
-         :open, :high, :low, :close, :volume, :volume_cum, :oi, :underlying)
+         :open, :high, :low, :close, :volume, :volume_cum, :oi, :underlying,
+         'td_getbars_v2')
     ON CONFLICT (ts, token) DO UPDATE SET
         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
         close = EXCLUDED.close, volume = EXCLUDED.volume,
@@ -102,10 +129,10 @@ _UPSERT_TICKS_SQL = text(
     """
     INSERT INTO oi_archive_ticks
         (ts, symbol, expiry, strike, option_type, token,
-         ltp, volume, oi, bid, bidqty, ask, askqty)
+         ltp, volume, oi, bid, bidqty, ask, askqty, source)
     VALUES
         (:ts, :symbol, :expiry, :strike, :option_type, :token,
-         :ltp, :volume, :oi, :bid, :bidqty, :ask, :askqty)
+         :ltp, :volume, :oi, :bid, :bidqty, :ask, :askqty, 'td_getticks_v2')
     ON CONFLICT (ts, token) DO UPDATE SET
         ltp = EXCLUDED.ltp, volume = EXCLUDED.volume, oi = EXCLUDED.oi,
         bid = EXCLUDED.bid, bidqty = EXCLUDED.bidqty,
@@ -123,6 +150,17 @@ _UPSERT_EOD_SQL = text(
     ON CONFLICT (trade_date, token) DO UPDATE SET
         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
         close = EXCLUDED.close, volume = EXCLUDED.volume, oi = EXCLUDED.oi
+    """
+)
+_FIX_BHAV_EXPIRY_SQL = text(
+    """
+    UPDATE eod_bars
+    SET expiry = to_date(substr(token, length(:prefix) + 1, 6), 'YYMMDD')
+    WHERE symbol = :symbol
+      AND source = 'td_bhavcopy'
+      AND option_type IN ('CE', 'PE')
+      AND expiry = DATE '1970-01-01'
+      AND substr(token, length(:prefix) + 1, 6) ~ '^[0-9]{6}$'
     """
 )
 _UPSERT_FLOWS_SQL = text(
@@ -151,13 +189,22 @@ def _oi_scale(symbol: str) -> int:
 
 
 def _ist_naive_to_utc(s: str) -> datetime | None:
-    """Vendor bar stamps are IST-naive ('2025-02-14T09:15:00' or with space)."""
+    """Vendor bar stamps are IST-naive ('2025-02-14T09:15:00' or with space).
+
+    Uses the shared helper. The previous implementation did
+    ``naive.replace(tzinfo=IST)``, and because IST is a pytz zone that attaches
+    Local Mean Time (+05:53) rather than +05:30 — writing EVERY archived bar 23
+    minutes early, silently, for six months. Confirmed 2026-08-13 by joining
+    archive rows to live rows at varying offsets: 11% OI agreement at 0 minutes,
+    92% at -23. Run scripts/repair_archive_tz.py on any data written before the
+    fix.
+    """
     v = s.strip().replace(" ", "T")
     try:
         naive = datetime.fromisoformat(v)
     except ValueError:
         return None
-    return naive.replace(tzinfo=IST).astimezone(timezone.utc)
+    return ist_naive_to_utc(naive)
 
 
 def _f(v: str | None) -> float | None:
@@ -231,6 +278,7 @@ class Backfill:
         self.done_units: set[str] = set()
         self.live_days: dict[str, set[date]] = {}
         self.report_lines: list[str] = []
+        self.errors = 0          # units that ended in 'error' this run → exit code 2
 
     async def close(self) -> None:
         await self.td.aclose()
@@ -259,7 +307,9 @@ class Backfill:
         can only be replaced by vendor data if the skip is bypassed. The
         no-double-count invariant then holds at TIMESTAMP level (upserts), not
         day level — callers must delete the inferior rows after the pull."""
-        if getattr(self.args, "include_live_days", False):
+        if getattr(self.args, "include_live_days", False) or self.day_mode is not None:
+            # Day mode always targets a session the live feed (partially)
+            # recorded — the whole point is to fill what live missed.
             self.live_days[symbol] = set()
             return set()
         if symbol not in self.live_days:
@@ -279,6 +329,12 @@ class Backfill:
             return 0
         live = await self._load_live_days(symbol)
         rows = [r for r in rows if r["ts"].astimezone(IST).date() not in live]
+        if self.day_mode is not None:
+            # Defensive: never persist a bar at/after the window end (the
+            # forming minute), whatever the vendor decided to return.
+            _s, end = self._window()
+            end_utc = ist_naive_to_utc(end)
+            rows = [r for r in rows if r["ts"] < end_utc]
         if not rows:
             return 0
         async with self.engine.begin() as c:
@@ -295,12 +351,54 @@ class Backfill:
 
     # ---------------- discovery ----------------
 
+    @property
+    def day_mode(self) -> date | None:
+        """``--day YYYY-MM-DD`` restricts the pull to ONE session (the boot /
+        reconnect session catch-up). ``None`` = the normal months-long pull."""
+        raw = getattr(self.args, "day", None)
+        return date.fromisoformat(raw) if raw else None
+
     def _window(self) -> tuple[datetime, datetime]:
-        end = datetime.now(IST).replace(tzinfo=None)
+        now = datetime.now(IST).replace(tzinfo=None)
+        day = self.day_mode
+        if day is not None:
+            start = datetime.combine(day, SESSION_OPEN)
+            end = datetime.combine(day, SESSION_CLOSE)
+            to_raw = getattr(self.args, "to", None)
+            if to_raw:
+                end = min(end, datetime.combine(day, _cfg_time(to_raw, SESSION_CLOSE)))
+            if day == now.date():
+                # Never archive the FORMING minute: the vendor serves the bar in
+                # progress with a partial OHLC, and an archived partial bar would
+                # be treated as a completed candle by every reader.
+                last_completed = now.replace(second=0, microsecond=0)
+                end = min(end, last_completed)
+            return start, end
+        end = now
+        # Month-aligned start: the index/futures ledger keys embed the chunk
+        # start date (``{SYM}:IDX:{yymmdd}``). Deriving it from ``now - 186d``
+        # produced a NEW key every calendar day, so the whole 6-month index and
+        # futures series was re-fetched on every run and the ledger never saved
+        # a single call. Aligning to the 1st keeps the keys stable for a month.
         start = (end - timedelta(days=self.args.months * 31)).replace(
-            hour=9, minute=0, second=0, microsecond=0
+            day=1, hour=9, minute=0, second=0, microsecond=0
         )
         return start, end
+
+    def _unit_suffix(self) -> str:
+        """Ledger namespace for day-mode units, so a PARTIAL session can never
+        mark the expiry-level unit of the full pull as done (and vice versa)."""
+        day = self.day_mode
+        return f":d{day:%y%m%d}" if day is not None else ""
+
+    def _unit_status(self, end: datetime) -> str:
+        """Day-mode units are 'partial' until the session close has been
+        fetched; only 'done' units are skipped by later runs, so an intraday
+        catch-up naturally re-fetches the same session until it completes."""
+        day = self.day_mode
+        if day is not None and end < datetime.combine(day, SESSION_CLOSE):
+            return "partial"
+        return "done"
 
     async def _discover_expiries(self, symbol: str) -> list[date]:
         """Past + near-future expiries for the window.
@@ -322,6 +420,20 @@ class Backfill:
         # Weekly weekday = the most common weekday among the nearest 4 expiries.
         weekdays = [e.weekday() for e in future[:4]]
         wk = max(set(weekdays), key=weekdays.count)
+        day = self.day_mode
+        if day is not None:
+            # Session catch-up: only the chains that trade ON that day matter —
+            # the nearest N expiries at/after it (current weekly + next). Past
+            # sessions (a repair) get the same rule from the generated weekday
+            # ladder, since the vendor lists future expiries only.
+            n = max(1, int(getattr(self.args, "max_expiries", 2) or 2))
+            cands = {e for e in future if e >= day}
+            d = day
+            while d <= day + timedelta(days=45):
+                if d.weekday() == wk:
+                    cands.add(d)
+                d += timedelta(days=1)
+            return sorted(cands)[:n]
         past: list[date] = []
         d = today - timedelta(days=1)
         while d >= start.date():
@@ -363,8 +475,9 @@ class Backfill:
         idx_symbol = self.args.index_symbol or INDEX_SYMBOLS.get(symbol, symbol)
         start, end = self._window()
         spot: dict[datetime, float] = {}
-        for c_start, c_end in reversed(month_chunks(start, end)):
-            unit = f"{symbol}:IDX:{c_start:%y%m%d}"
+        chunks = [(start, end)] if self.day_mode else month_chunks(start, end)
+        for c_start, c_end in reversed(chunks):
+            unit = f"{symbol}:IDX:{c_start:%y%m%d}{self._unit_suffix()}"
             bars = await self._fetch_unit(unit, idx_symbol, c_start, c_end)
             if bars is None:
                 continue
@@ -377,7 +490,7 @@ class Backfill:
                     spot[r["ts"]] = r["close"]
                 r["underlying"] = r["close"]
             n = await self._write(rows, symbol)
-            await self._mark(unit, "done", n)
+            await self._mark(unit, self._unit_status(c_end), n)
         # Complete the map from everything already stored (skipped chunks, prior runs).
         async with self.engine.begin() as c:
             db_rows = await c.execute(
@@ -398,8 +511,9 @@ class Backfill:
         response just logs and moves on."""
         start, end = self._window()
         total = 0
-        for c_start, c_end in reversed(month_chunks(start, end)):
-            unit = f"{symbol}:FUT:{c_start:%y%m%d}"
+        chunks = [(start, end)] if self.day_mode else month_chunks(start, end)
+        for c_start, c_end in reversed(chunks):
+            unit = f"{symbol}:FUT:{c_start:%y%m%d}{self._unit_suffix()}"
             bars = await self._fetch_unit(unit, f"{symbol}-I", c_start, c_end)
             if bars is None:
                 continue
@@ -408,7 +522,7 @@ class Backfill:
                 option_type="FUT", token=f"td:{symbol}:FUT-I", spot_by_minute=None,
             )
             n = await self._write(rows, symbol)
-            await self._mark(unit, "done", n)
+            await self._mark(unit, self._unit_status(c_end), n)
             total += n
         self.note(f"   {symbol}: futures ({symbol}-I) rows={total}"
                   + ("" if total else " — continuous symbol may not be served; not fatal"))
@@ -416,7 +530,12 @@ class Backfill:
     async def _fetch_unit(
         self, unit: str, fetch_symbol: str, start: datetime, end: datetime
     ) -> list[dict[str, str]] | None:
-        """One governed getbars call with quota backoff; None ⇒ already done."""
+        """One governed getbars call with quota backoff.
+
+        ``None`` ⇒ nothing to write AND nothing to mark: the unit is already
+        done, or it just FAILED. Returning ``[]`` on failure (the previous
+        contract) made every caller mark the unit ``done`` with 0 rows in the
+        same run, so a transient vendor error silently retired the unit forever."""
         if unit in self.done_units:
             return None
         for attempt in range(5):
@@ -429,9 +548,11 @@ class Backfill:
             except TrueDataError as e:
                 await self._mark(unit, "error", 0, str(e))
                 print(f"   !! {unit}: {e}", flush=True)
-                return []
+                self.errors += 1
+                return None
         await self._mark(unit, "error", 0, "quota backoff exhausted")
-        return []
+        self.errors += 1
+        return None
 
     # ---------------- pull ----------------
 
@@ -439,9 +560,19 @@ class Backfill:
         symbol = self.args.symbol.upper()
         await self._load_done_units()
         await self._load_live_days(symbol)
-        self.note(f"== pull {symbol} — window {self.args.months} months, "
-                  f"rps={self.td.gov.min_interval and round(1 / self.td.gov.min_interval, 1)}, "
-                  f"live-days skipped={len(self.live_days[symbol])}")
+        w_start, w_end = self._window()
+        if self.day_mode is not None:
+            if w_start >= w_end:
+                self.note(f"== pull {symbol} --day {self.day_mode}: nothing to fetch yet "
+                          f"(window {w_start:%H:%M}→{w_end:%H:%M})")
+                return
+            self.note(f"== pull {symbol} — SESSION {self.day_mode} "
+                      f"{w_start:%H:%M}→{w_end:%H:%M} IST (day mode), "
+                      f"rps={self.td.gov.min_interval and round(1 / self.td.gov.min_interval, 1)}")
+        else:
+            self.note(f"== pull {symbol} — window {self.args.months} months, "
+                      f"rps={self.td.gov.min_interval and round(1 / self.td.gov.min_interval, 1)}, "
+                      f"live-days skipped={len(self.live_days[symbol])}")
 
         spot = await self._pull_index(symbol)
         await self._pull_futures(symbol)
@@ -478,7 +609,7 @@ class Backfill:
 
             async def one(contract: str, strike: int, opt: str) -> int:
                 nonlocal rows_written
-                unit = f"{symbol}:{expiry:%y%m%d}:{strike}:{opt}"
+                unit = f"{symbol}:{expiry:%y%m%d}:{strike}:{opt}{self._unit_suffix()}"
                 async with sem:
                     if self.args.dry_run and rows_written:
                         return 0
@@ -491,7 +622,7 @@ class Backfill:
                         spot_by_minute=spot,
                     )
                     n = await self._write(rows, symbol)
-                    await self._mark(unit, "done", n)
+                    await self._mark(unit, self._unit_status(c_end), n)
                     rows_written += n
                     return n
 
@@ -501,8 +632,9 @@ class Backfill:
             if self.args.dry_run:
                 self.note("   (dry-run: stopping after first expiry)")
                 break
-        self.note(f"== pull {symbol} complete: rows written {total_rows}")
-        self._write_report(f"pull_{symbol.lower()}")
+        self.note(f"== pull {symbol} complete: rows written {total_rows}"
+                  + (f", units in error: {self.errors}" if self.errors else ""))
+        self._write_report(f"pull_{symbol.lower()}" + (f"_day{self.day_mode:%y%m%d}" if self.day_mode else ""))
 
     # ---------------- pull-ticks (last 5 trading days — use it or lose it) ----------------
 
@@ -669,9 +801,20 @@ class Backfill:
                     strike, opt = (int(round(tail[0])), tail[1]) if tail else (
                         0, "FUT" if vsym.upper().endswith(("FUT", "-I")) else "EQ"
                     )
+                    # Option rows carry their REAL expiry (the yymmdd right
+                    # after the underlying: NIFTY26090823900PE → 2026-09-08).
+                    # They were stored under the IDX/FUT sentinel until
+                    # 2026-09-02, which made the official closes un-joinable
+                    # per contract — the UMP daily feed reads them by expiry.
+                    expiry_val = SENTINEL_EXPIRY
+                    if tail:
+                        try:
+                            expiry_val = datetime.strptime(rest[:6], "%y%m%d").date()
+                        except ValueError:
+                            expiry_val = SENTINEL_EXPIRY
                     rows.append(
                         {
-                            "trade_date": day, "symbol": symbol, "expiry": SENTINEL_EXPIRY,
+                            "trade_date": day, "symbol": symbol, "expiry": expiry_val,
                             "strike": strike, "option_type": opt, "token": f"td:bhav:{vsym}",
                             "open": _f(r.get("open")), "high": _f(r.get("high")),
                             "low": _f(r.get("low")), "close": _f(r.get("close")),
@@ -685,6 +828,14 @@ class Backfill:
                             await c.execute(_UPSERT_EOD_SQL, rows[i : i + 5000])
                 await self._mark(unit, "done", len(rows))
             self.note(f"   bhavcopy fo: {fetched} trading days attempted")
+            # Repair rows written before the expiry fix (sentinel expiry on
+            # option contracts) — idempotent, cheap, keeps old archives usable.
+            async with self.engine.begin() as c:
+                fixed = await c.execute(
+                    _FIX_BHAV_EXPIRY_SQL, {"symbol": symbol, "prefix": f"td:bhav:{symbol}"}
+                )
+            if fixed.rowcount:
+                self.note(f"   bhavcopy fo: stamped real expiry on {fixed.rowcount} legacy rows")
         self._write_report(f"eod_{symbol.lower()}")
 
     # ---------------- pull-flows (FII/DII) & pull-news (corporate host) ----------------
@@ -761,7 +912,7 @@ class Backfill:
                         continue
                     pub = None
                     try:
-                        pub = datetime.fromisoformat((r.get("pub_date") or "").strip()).replace(tzinfo=IST)
+                        pub = ist_naive_to_utc(datetime.fromisoformat((r.get("pub_date") or "").strip()))
                     except ValueError:
                         pass
                     rows.append(
@@ -1008,6 +1159,33 @@ class Backfill:
             self.note(f"== progress ledger: {dict(prog)}")
         self._write_report("validate")
 
+    # ---------------- integrity (delegates to the backend service) ----------------
+
+    async def integrity(self) -> None:
+        """Per-(symbol, day) integrity report over the last ``--days`` trading
+        days (default 2: today + previous). Same code the API serves."""
+        from app.core.holidays import is_nse_holiday
+        from app.services.data_integrity import run_integrity
+
+        symbol = self.args.symbol.upper()
+        n = self.args.days or 2
+        today = datetime.now(IST).date()
+        days: list[date] = []
+        d = today
+        while len(days) < n and d > today - timedelta(days=30):
+            if d.weekday() < 5 and not is_nse_holiday(d):
+                days.append(d)
+            d -= timedelta(days=1)
+        summary = await run_integrity([symbol], days)
+        for key, v in summary["reports"].items():
+            if "error" in v:
+                self.note(f"== integrity {key}: ERROR {v['error']}")
+                self.errors += 1
+                continue
+            bad = {k: c for k, c in v["counts"].items() if c}
+            self.note(f"== integrity {key}: {'OK' if v['ok'] else 'ISSUES ' + str(bad)}")
+        self._write_report(f"integrity_{symbol.lower()}")
+
     # ---------------- report ----------------
 
     def _write_report(self, name: str) -> None:
@@ -1020,7 +1198,7 @@ class Backfill:
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["probe", "pull", "pull-ticks", "pull-eod", "pull-flows", "pull-news", "validate"])
+    ap.add_argument("command", choices=["probe", "pull", "pull-ticks", "pull-eod", "pull-flows", "pull-news", "validate", "integrity"])
     ap.add_argument("--symbol", default="NIFTY", help="NIFTY | SENSEX (pull)")
     ap.add_argument("--months", type=int, default=6)
     ap.add_argument("--rps", type=float, default=None, help="override TRUEDATA_RATE_LIMIT_RPS")
@@ -1033,6 +1211,14 @@ async def main() -> None:
     ap.add_argument("--days", type=int, default=None,
                     help="lookback days (defaults: ticks 6, eod-bhavcopy 130, flows/news 190)")
     ap.add_argument("--years", type=int, default=10, help="pull-eod: index/futures daily depth")
+    ap.add_argument("--day", default=None,
+                    help="pull: ONE session only (YYYY-MM-DD, IST) — the boot/reconnect "
+                         "session catch-up. Implies --include-live-days; fetches from the "
+                         "session open to the last COMPLETED minute; ledger units carry a "
+                         ":dYYMMDD suffix and stay 'partial' until the close is fetched")
+    ap.add_argument("--to", default=None, help="pull --day: cap the window end at HH:MM IST")
+    ap.add_argument("--max-expiries", type=int, default=2,
+                    help="pull --day: nearest N expiries at/after the day (default 2)")
     args = ap.parse_args()
 
     bf = Backfill(args)
@@ -1041,10 +1227,15 @@ async def main() -> None:
             "probe": bf.probe, "pull": bf.pull, "pull-ticks": bf.pull_ticks,
             "pull-eod": bf.pull_eod, "pull-flows": bf.pull_flows,
             "pull-news": bf.pull_news, "validate": bf.validate,
+            "integrity": bf.integrity,
         }
         await dispatch[args.command]()
     finally:
         await bf.close()
+    if bf.errors:
+        # Loud, machine-readable failure for the gap-fill supervisor: units
+        # ended in 'error' and will be retried on the next run.
+        sys.exit(2)
 
 
 if __name__ == "__main__":

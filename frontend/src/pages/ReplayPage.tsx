@@ -14,7 +14,7 @@ import {
   type LineSeriesSpec,
 } from "../components/charts/TimeSeriesChart";
 import { SERIES_COLORS } from "../components/charts/chartTheme";
-import { istIsoToChartTime } from "../components/charts/chartTime";
+import { IST_OFFSET_SEC, istIsoToChartTime } from "../components/charts/chartTime";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useReplayFrames } from "../hooks/useReplayFrames";
@@ -225,12 +225,39 @@ function buildGridRows(
  * the shape `/api/oi-timeseries` returns, so the Charts tab's components render it
  * unchanged. Levels, not changes: `toChangeSinceOpen` does that conversion itself and
  * anchors on the first point, which is the session open.
+ *
+ * TIMESTAMPS ARE RE-LABELLED TO THE BUCKET START here, once, for every chart on this
+ * page. Replay frames are deliberately labelled with the bucket END so the transport
+ * can never show a clock earlier than the data behind it (see `services/replay.py`).
+ * That is right for the player, but `/api/oi-timeseries`, `/api/ratio-timeseries` and
+ * the Algo Config Ratio panel all label a bucket with its START — the convention every
+ * candle in the app uses — so leaving the end label here drew the SAME crossover one
+ * minute later than the Ratio tab drew it. Verified 2026-09-14: the two series are
+ * identical row for row (386/386); only the label differed.
+ *
+ * Doing it here rather than inside one chart keeps Call OI, Put OI and Ratio on a
+ * single clock, and makes the bar GROUPING right too: `ratioLines` buckets on
+ * `sinceOpen`, which was folding each bar's first minute into the previous bar.
+ * The transport clock above the charts keeps the end label; it means "data known
+ * through here", which is a different (and correct) statement.
  */
+function istIsoMinus(iso: string, seconds: number): string {
+  const epoch = Date.parse(iso);
+  if (Number.isNaN(epoch)) return iso;
+  // Shift in IST wall-clock space, then re-emit with the fixed +05:30 the rest of
+  // the app assumes (`parseIstDateAndMinute` reads the clock by string slice).
+  const d = new Date(epoch - seconds * 1000 + IST_OFFSET_SEC * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`
+    + `T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}+05:30`;
+}
+
 function seriesPoints(
   frames: ReplayFrame[],
   index: number,
   atmWindow: number,
   strikeStep: number,
+  stepSec: number,
 ): OITimeseriesPoint[] {
   const current = frames[index];
   if (!current) return [];
@@ -246,7 +273,8 @@ function seriesPoints(
       pe += r.put_oi;
     }
     out.push({
-      ts: frames[k].ts,
+      // Bucket START, not the frame's end label — see the note above.
+      ts: istIsoMinus(frames[k].ts, stepSec),
       total_call_oi: ce,
       total_put_oi: pe,
       ratio: safeRatio(ce, pe),
@@ -264,7 +292,11 @@ function seriesPoints(
  * is the Ratio tab's own behaviour (`RatioChartPage.tsx`), kept so the two read alike.
  * A bar's value is its LAST sample, matching the backend's `last(oi, ts)` per bucket.
  */
-function ratioLines(points: OITimeseriesPoint[], barMin: number, cumulative: boolean): LineSeriesSpec[] {
+function ratioLines(
+  points: OITimeseriesPoint[],
+  barMin: number,
+  cumulative: boolean,
+): LineSeriesSpec[] {
   const ratioData: LineSeriesSpec["data"] = [];
   const pcrData: LineSeriesSpec["data"] = [];
 
@@ -437,9 +469,21 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
   // Throttled: this is the only series that GROWS with the playhead, so it is what made
   // playback expensive. See `useThrottled`.
   const chartIndex = useThrottled(index, CHART_THROTTLE_MS);
+  // The replay step in seconds — the width of one frame's bucket, and so the amount
+  // every chart's x-axis is moved back to reach the bucket START. Taken as the
+  // SMALLEST positive gap between frames: a session with a missing minute leaves a
+  // wider gap, and `frameMs[1] - frameMs[0]` alone would read that hole as the step.
+  const frameStepSec = useMemo(() => {
+    let best = 0;
+    for (let i = 1; i < frameMs.length; i++) {
+      const d = frameMs[i] - frameMs[i - 1];
+      if (d > 0 && (best === 0 || d < best)) best = d;
+    }
+    return best > 0 ? Math.round(best / 1000) : 60;
+  }, [frameMs]);
   const points = useMemo(
-    () => seriesPoints(frames, chartIndex, atmWindow, strikeStep),
-    [frames, chartIndex, atmWindow, strikeStep],
+    () => seriesPoints(frames, chartIndex, atmWindow, strikeStep, frameStepSec),
+    [frames, chartIndex, atmWindow, strikeStep, frameStepSec],
   );
   // The by-strike chart is ECharts too, but its data is a fixed ~25 rows; it rides the
   // same throttle so all four charts advance together rather than visibly out of step.
@@ -615,6 +659,7 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                   {timeframe === "full_day"
                     ? "Ratio of the OI CHANGES accumulated since the session open, matching the Ratio tab's Full Day mode."
                     : `Ratio of the OI LEVELS at each ${barMin}m bar's close, matching the Ratio tab's bucket mode.`}
+                  {" Bars carry their START time, like every other chart in the app, so a crossover here reads at the same clock as the Ratio tab; the transport clock above shows the instant through which data is known, one step later."}
                   {barMin !== (TF_MINUTES[timeframe] ?? barMin) &&
                     ` Bars are ${barMin}m rather than ${TF_MINUTES[timeframe]}m — the replay Step is the finest resolution available.`}
                 </p>
@@ -749,8 +794,15 @@ export function ReplayPage({ mc }: { mc: MarketContextValue }) {
                   </div>
                 ) : (
                   <p className="px-1 text-xs text-muted">
-                    No stored greeks for this session yet — greeks are persisted going forward, so
-                    replays of sessions recorded after this deploy will show them here.
+                    {loading ? (
+                      "Loading greeks…"
+                    ) : (
+                      <>
+                        No stored greeks for this session yet — greeks are persisted going
+                        forward, so replays of sessions recorded after this deploy will show
+                        them here.
+                      </>
+                    )}
                   </p>
                 )}
               </div>

@@ -66,7 +66,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const atm = mtf.data?.atm_strike ?? null;
   const { strikeMin, strikeMax } = useMemo(() => {
     if (atm == null || atmWindow < 0) return { strikeMin: undefined, strikeMax: undefined };
-    const w = effectiveAtmWindow(atmWindow); // one fewer strike each side than the picked N
+    const w = effectiveAtmWindow(atmWindow); // exactly ATM ± the picked N, as in Algo Config
     return { strikeMin: atm - w * strikeStep, strikeMax: atm + w * strikeStep };
   }, [atm, atmWindow, strikeStep]);
 

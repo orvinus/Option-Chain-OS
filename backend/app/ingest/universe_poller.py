@@ -110,8 +110,27 @@ class UniversePoller:
 
     async def start(self) -> None:
         self._stopping.clear()
-        self._client = httpx.AsyncClient(timeout=30.0)
         mode = settings.effective_poller_mode
+        # This poller speaks XTS's batch-quote endpoint (POST /instruments/quotes,
+        # 25 instruments per call). TrueData has NO equivalent: the nearest
+        # primitive is one request PER CONTRACT, and 230 symbols x 46 contracts is
+        # 10,580 requests per sweep — 35 min at the documented 5 rps ceiling and
+        # ~2.9 h at the 1 rps floor the vendor's own error string quotes, i.e. a
+        # certain quota ban and never a completed sweep.
+        #
+        # Fail LOUD at boot rather than degrade: a stale .env carrying the legacy
+        # POLLER_ENABLED=true is silently promoted to "full" by
+        # effective_poller_mode, so this is a realistic misconfiguration, and its
+        # symptom would be a vendor lockout during market hours.
+        if settings.feed_vendor == "truedata" and mode == "full":
+            raise RuntimeError(
+                "POLLER_MODE=full is unsupported under FEED_VENDOR=truedata: there "
+                "is no batch-quote endpoint, so a full sweep costs ~10,580 "
+                "per-contract requests (hours at the vendor's rate limit, and a "
+                "quota ban). Use POLLER_MODE=failover, or procure the getAllBars "
+                "add-on and run the segment sweeper instead."
+            )
+        self._client = httpx.AsyncClient(timeout=30.0)
         if mode == "failover":
             # One lightweight task; no tiers, no prewarm — it does nothing at all
             # until the steward declares the WS feed unhealthy.

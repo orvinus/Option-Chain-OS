@@ -54,6 +54,13 @@ OnFlushHook = Callable[[datetime, int, int], Awaitable[None]]
 # flow; beyond it the oldest buckets are dropped (counted, logged).
 MAX_OPEN_BUCKETS = 60_000
 
+# The live product's store. The ONLY other legal value is the shadow store, and
+# it is an allow-list rather than a free string because the table name is
+# interpolated into SQL: a caller-supplied name would be an injection point.
+LIVE_TABLE = "option_oi_snapshots"
+SHADOW_TABLE = "td_shadow_snapshots"
+_ALLOWED_TABLES = (LIVE_TABLE, SHADOW_TABLE)
+
 
 class MinuteAggregator:
     """Bucketing consumer for ``Tick`` objects."""
@@ -62,15 +69,32 @@ class MinuteAggregator:
         self,
         in_queue: "asyncio.Queue[Tick]",
         on_flush: OnFlushHook | None = None,
+        table: str = LIVE_TABLE,
     ) -> None:
         self._queue = in_queue
         self._on_flush = on_flush
+        if table not in _ALLOWED_TABLES:
+            raise ValueError(
+                f"aggregator table must be one of {_ALLOWED_TABLES}, got {table!r}"
+            )
+        self._table = table
+        self._shadow = table == SHADOW_TABLE
         self._stopping = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._bucket = _bucket_size()
         # (token, bucket_start) -> Tick (latest observed)
         self._open_buckets: dict[tuple[str, datetime], Tick] = {}
         self._dropped_buckets = 0
+        # token -> bucket_start of the last bucket SUCCESSFULLY flushed for it.
+        # The first successful flush of a (token, bucket) is final for this
+        # process: a tick that arrives later but stamps an OLDER bucket (a
+        # delayed failover-poller row, a re-delivered frame after a reconnect)
+        # would otherwise re-create the bucket and its next flush would
+        # overwrite the socket's value — ``oi = EXCLUDED.oi`` is unconditional
+        # in the upsert. Equal buckets are still allowed (the failover poller
+        # legitimately re-upserts the current vendor minute).
+        self._last_flushed: dict[str, datetime] = {}
+        self.late_dropped = 0
         # Sample the 1/s "flushed" INFO line down to ~1/min; every flush still
         # fires the hook, and errors are never sampled.
         self._last_flush_log: float = 0.0
@@ -103,7 +127,7 @@ class MinuteAggregator:
                 pass
 
     async def _run(self) -> None:
-        log.info("aggregator.started", bucket=settings.persist_bucket)
+        log.info("aggregator.started", bucket=settings.persist_bucket, table=self._table)
         last_bucket = _floor_to_bucket(datetime.now(timezone.utc), self._bucket)
         while not self._stopping.is_set():
             # Poll often enough to notice a bucket boundary promptly; the wait is
@@ -135,10 +159,27 @@ class MinuteAggregator:
         log.info("aggregator.stopping.final_flush", drained=drained, open_buckets=len(self._open_buckets))
         await self._flush_closed(datetime.now(timezone.utc), force_all=True)
 
+    # Reference instruments, not contracts. `option_type` is CHAR(2) in both
+    # stores, so these three-character values do not merely pollute the data —
+    # they RAISE on insert and take the whole flush batch down with them. Under
+    # XTS only "IDX" could occur; TrueData additionally uses continuous futures
+    # ("-I") as the reference price for MCX, so "FUT" became reachable.
+    _REFERENCE_TYPES = ("IDX", "FUT")
+
     def _absorb(self, tick: Tick) -> None:
-        if tick.option_type == "IDX":
-            return  # spot is broadcast via ws_client.latest_underlying, not stored
+        if tick.option_type in self._REFERENCE_TYPES:
+            return  # spot rides denormalised in `underlying`; never its own row
         bucket_start = _floor_to_bucket(tick.ts, self._bucket)
+        last = self._last_flushed.get(tick.token)
+        if last is not None and bucket_start < last:
+            self.late_dropped += 1
+            if self.late_dropped in (1, 10, 100) or self.late_dropped % 1000 == 0:
+                log.warning(
+                    "aggregator.late_tick_dropped", token=tick.token, origin=tick.origin,
+                    bucket=bucket_start.isoformat(), last_flushed=last.isoformat(),
+                    total=self.late_dropped,
+                )
+            return
         key = (tick.token, bucket_start)
         prev = self._open_buckets.get(key)
         # Within a bucket the newest tick wins — EXCEPT that a REST-poller tick may
@@ -189,40 +230,62 @@ class MinuteAggregator:
                 "ltp": tick.ltp,
                 "volume": tick.volume,
                 "underlying": tick.underlying,
+                **(
+                    {
+                        "vendor_ts": tick.vendor_ts,
+                        # Feed latency, measurable for the first time: the vendor
+                        # stamps the trade, we stamp arrival. Null when the vendor
+                        # supplied no timestamp.
+                        "recv_lag_ms": (
+                            int((tick.ts - tick.vendor_ts).total_seconds() * 1000)
+                            if tick.vendor_ts is not None
+                            else None
+                        ),
+                    }
+                    if self._shadow
+                    else {}
+                ),
             }
             for (_, bstart), tick in to_flush
         ]
+        extra_cols = ", vendor_ts, recv_lag_ms" if self._shadow else ""
+        extra_vals = ", :vendor_ts, :recv_lag_ms" if self._shadow else ""
         try:
             async with session_scope() as s:
                 await s.execute(
                     text(
-                        """
-                        INSERT INTO option_oi_snapshots
+                        f"""
+                        INSERT INTO {self._table}
                             (ts, symbol, expiry, strike, option_type, token,
-                             oi, ltp, volume, underlying)
+                             oi, ltp, volume, underlying{extra_cols})
                         VALUES
                             (:ts, :symbol, :expiry, :strike, :option_type, :token,
-                             :oi, :ltp, :volume, :underlying)
+                             :oi, :ltp, :volume, :underlying{extra_vals})
                         ON CONFLICT (ts, token) DO UPDATE SET
                             oi = EXCLUDED.oi,
                             -- COALESCE so a later "price unknown" (NULL) tick can never
                             -- erase a price we already knew for this bucket.
-                            ltp = COALESCE(EXCLUDED.ltp, option_oi_snapshots.ltp),
-                            volume = GREATEST(EXCLUDED.volume, option_oi_snapshots.volume),
-                            underlying = COALESCE(EXCLUDED.underlying, option_oi_snapshots.underlying)
+                            ltp = COALESCE(EXCLUDED.ltp, {self._table}.ltp),
+                            volume = GREATEST(EXCLUDED.volume, {self._table}.volume),
+                            underlying = COALESCE(EXCLUDED.underlying, {self._table}.underlying)
                         """
                     ),
                     rows,
                 )
             for key, _ in to_flush:
                 self._open_buckets.pop(key, None)
+                token, bstart = key
+                prev_last = self._last_flushed.get(token)
+                if prev_last is None or bstart > prev_last:
+                    self._last_flushed[token] = bstart
             # At PERSIST_BUCKET=1s this line fired every second (~86k lines/day of
             # pure noise on the production disk) — sample it to ~1/min. The flush
             # itself, the hook and every error path are NOT sampled.
             now_mono = asyncio.get_running_loop().time()
             if now_mono - self._last_flush_log >= 60.0:
                 self._last_flush_log = now_mono
-                log.info("aggregator.flushed", rows=len(rows), cutoff=cutoff.isoformat())
+                log.info("aggregator.flushed", rows=len(rows), cutoff=cutoff.isoformat(),
+                         table=self._table)
             if self._on_flush is not None:
                 ws_rows = sum(1 for _, tick in to_flush if tick.origin == "ws")
                 try:
@@ -230,5 +293,5 @@ class MinuteAggregator:
                 except Exception as e:  # pragma: no cover - hook failure must not stop ingest
                     log.warning("aggregator.flush_hook.error", error=str(e))
         except Exception as e:
-            log.error("aggregator.flush.error", error=str(e), rows=len(rows))
+            log.error("aggregator.flush.error", error=str(e), rows=len(rows), table=self._table)
             # leave buckets in place so we retry on next iteration

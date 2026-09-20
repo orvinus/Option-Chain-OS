@@ -178,13 +178,21 @@ _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL = text(
 # current latest OI, i.e. the value just before the last OI move. Bounded to a
 # recent horizon so far/illiquid strikes that stopped moving don't surface a
 # stale all-day delta on a sub-minute view.
+#
+# BOTH arms are also floored to the current session. This was the only unfloored
+# query in this module and it could reach across the session boundary: early in a
+# session `:horizon` (anchor − 5 min) still lands in YESTERDAY's rows, so a strike
+# whose OI legitimately changed overnight surfaced that overnight move as a
+# sub-minute delta. Harmless-looking today; on a vendor cutover it becomes a
+# CROSS-VENDOR phantom delta held for the full 5-minute horizon, because the two
+# feeds' OI for the same strike differ by construction at the boundary.
 _PREV_DISTINCT_OI_SQL = text(
     """
     WITH latest AS (
         SELECT DISTINCT ON (strike, option_type)
             strike, option_type, oi AS cur_oi
         FROM option_oi_snapshots
-        WHERE symbol = :symbol AND expiry = :expiry
+        WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
         ORDER BY strike, option_type, ts DESC
     )
     SELECT DISTINCT ON (o.strike, o.option_type)
@@ -194,6 +202,7 @@ _PREV_DISTINCT_OI_SQL = text(
     WHERE o.symbol = :symbol AND o.expiry = :expiry
       AND o.oi <> l.cur_oi
       AND o.ts >= :horizon
+      AND o.ts >= :floor
     ORDER BY o.strike, o.option_type, o.ts DESC
     """
 )
@@ -772,11 +781,14 @@ class OIChangeEngine:
         to 0. Strikes with no recent move stay flat (baseline = current = 0 delta).
         """
         horizon = anchor - HOLD_LAST_HORIZON
+        # Never let the held baseline reach into a previous session (see the SQL's
+        # own note): at 09:16 the 5-minute horizon still covers yesterday's close.
+        floor = session_floor_for(anchor).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             held_rows = (
                 await s.execute(
                     _PREV_DISTINCT_OI_SQL,
-                    {"symbol": symbol, "expiry": expiry, "horizon": horizon},
+                    {"symbol": symbol, "expiry": expiry, "horizon": horizon, "floor": floor},
                 )
             ).mappings().all()
 

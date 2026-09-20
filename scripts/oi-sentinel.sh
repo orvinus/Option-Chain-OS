@@ -46,6 +46,9 @@ REALERT_S="${REALERT_S:-1800}"
 DISK_ALERT_PCT="${DISK_ALERT_PCT:-85}"
 CERT_ALERT_DAYS="${CERT_ALERT_DAYS:-14}"
 BACKUP_MAX_AGE_H="${BACKUP_MAX_AGE_H:-26}"
+# Backtest-archive staleness, in TRADING days. Hours would page every
+# weekend and every NSE holiday.
+DATA_MAX_AGE_TRADING_DAYS="${DATA_MAX_AGE_TRADING_DAYS:-1}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/nifty-oi}"
 EDGE_URL="${EDGE_URL:-https://oialgo.tech/}"
 HEALTHCHECKS_URL="${HEALTHCHECKS_URL:-}"          # external dead-man ping (optional)
@@ -88,7 +91,7 @@ alert() {  # never fails the cycle
 
 load_state() {
   STATUS=UP; FAILS=0; RESTARTS_TODAY=0; RESTARTS_DATE=""; LAST_DOWN_ALERT=0
-  HEARTBEAT_DATE=""; DISK_ALERT_DATE=""; CERT_ALERT_DATE=""; BACKUP_ALERT_DATE=""
+  HEARTBEAT_DATE=""; DISK_ALERT_DATE=""; CERT_ALERT_DATE=""; BACKUP_ALERT_DATE=""; DATA_ALERT_DATE=""
   EDGE_ALERT=0; DOCKER_ALERT=0; DEGRADED_ALERT=0
   [[ -f "$STATE_FILE" ]] && . "$STATE_FILE"
   # Daily rollover (IST).
@@ -109,6 +112,7 @@ save_state() {
     echo "DISK_ALERT_DATE=$DISK_ALERT_DATE"
     echo "CERT_ALERT_DATE=$CERT_ALERT_DATE"
     echo "BACKUP_ALERT_DATE=$BACKUP_ALERT_DATE"
+    echo "DATA_ALERT_DATE=$DATA_ALERT_DATE"
     echo "EDGE_ALERT=$EDGE_ALERT"
     echo "DOCKER_ALERT=$DOCKER_ALERT"
     echo "DEGRADED_ALERT=$DEGRADED_ALERT"
@@ -195,8 +199,35 @@ daily_checks() {
     alert "🚨 No DB backups found in $BACKUP_DIR — install oi-backup.timer."
   fi
 
+  # ---- backtest archive freshness -------------------------------------
+  # Nothing watched this before: the nightly top-up stopped on 2026-08-13 and
+  # the only symptom was backtests quietly missing recent days for over a week.
+  data_newest=$(docker exec docker-timescaledb-1 psql -U postgres -d oi -t -A -c     "SELECT COALESCE(max(day)::text,'') FROM oi_day_stats WHERE symbol IN ('NIFTY','SENSEX') AND winner <> 'none';" 2>/dev/null || echo "")
+  data_ltd=$(python3 - <<'PYEOF' 2>/dev/null || echo ""
+import datetime, json, pathlib
+hol = set()
+try:
+    hol = set(json.loads(pathlib.Path("/root/nifty-oi/data/nse_holidays.json").read_text())["holidays"])
+except Exception:
+    pass
+d = datetime.date.today(); n = 0
+for _ in range(21):
+    d -= datetime.timedelta(days=1)
+    if d.weekday() < 5 and d.isoformat() not in hol:
+        n += 1
+        if n >= int(__import__("os").environ.get("DATA_MAX_AGE_TRADING_DAYS", "1")):
+            print(d.isoformat()); break
+PYEOF
+)
+  if [[ -n "$data_ltd" ]]; then
+    if [[ -z "$data_newest" || "$data_newest" < "$data_ltd" ]] && [[ "$DATA_ALERT_DATE" != "$today" ]]; then
+      DATA_ALERT_DATE=$today
+      alert "🚨 Backtest archive stale — newest usable day ${data_newest:-none}, expected ≥ $data_ltd. Check oi-topup.timer / journalctl -u oi-topup."
+    fi
+  fi
+
   HEARTBEAT_DATE=$today
-  alert "💚 sentinel alive · backend $STATUS · disk ${disk}% · cert ${cert_days}d · backup ${backup_age_h}h · restarts today $RESTARTS_TODAY/$MAX_RESTARTS_PER_DAY$notes"
+  alert "💚 sentinel alive · backend $STATUS · disk ${disk}% · cert ${cert_days}d · backup ${backup_age_h}h · data ${data_newest:-none} · restarts today $RESTARTS_TODAY/$MAX_RESTARTS_PER_DAY$notes"
 }
 
 edge_check() {
@@ -282,6 +313,32 @@ cycle() {
     edge_check; daily_checks; save_state; return
   fi
 
+  # TrueData session wedge — the one failure a restart actively WORSENS.
+  #
+  # TrueData allows one realtime session per user per port and REJECTS a second
+  # login rather than displacing it. After a dirty disconnect the vendor still
+  # believes the old process is connected, and recovery is logoutRequest plus a
+  # ~60s cool-down. A container restart IS a dirty disconnect. So the naive loop
+  # is: restart -> re-wedge -> still stale -> restart again, and this watchdog
+  # keeps a 60-second problem alive for hours.
+  #
+  # Checked BEFORE the generic restart_recommended branch, because that branch
+  # keys on a field the backend might not emit if it is failing badly, whereas
+  # the reason list is explicit.
+  if [[ "$code" == "503" ]] && echo "$body" | grep -q '"session_wedged"'; then
+    throttled_down_alert "🔒 TrueData session WEDGED — logoutRequest + cool-down in progress. NOT restarting (a restart re-wedges it). Recovers on its own in ~75s; page if it persists past two cycles."
+    STATUS=DOWN; FAILS=0
+    edge_check; daily_checks; save_state; return
+  fi
+
+  # Proxy down — the vendor is unreachable at the network layer. A backend
+  # restart cannot repair host networking; only warp-svc / warp-socks-bridge can.
+  if [[ "$code" == "503" ]] && echo "$body" | grep -q '"proxy_down"'; then
+    throttled_down_alert "🌐 SOCKS proxy (WARP) unreachable — TrueData cannot be reached from this host at all. NOT restarting the backend. Check: systemctl status warp-svc warp-socks-bridge; warp-cli --accept-tos status"
+    STATUS=DOWN; FAILS=0
+    edge_check; daily_checks; save_state; return
+  fi
+
   # Unhealthy. Cause-aware: never restart for what a restart can't fix.
   if [[ "$code" == "503" ]] && echo "$body" | grep -q '"restart_recommended": *false'; then
     throttled_down_alert "⚠️ Backend degraded ($(echo "$body" | head -c 200)) — external cause; NOT restarting."
@@ -322,6 +379,18 @@ cycle() {
       throttled_down_alert "🚨 Restart cap reached ($RESTARTS_TODAY/$MAX_RESTARTS_PER_DAY today) — NOT restarting again. If today is an NSE holiday missing from data/nse_holidays.json this is expected noise; otherwise SSH in NOW."
     else
       local snap; snap=$(snapshot_logs)
+      # LAST-CHANCE RE-PROBE. Between the K_FAILS that got us here and this
+      # moment, the backend may have recovered on its own — and under TrueData a
+      # restart of a HEALTHY process is not neutral, it costs a wedge cycle. One
+      # cheap probe is far cheaper than that.
+      local recheck
+      recheck=$(curl -m 10 -s -o /dev/null -w '%{http_code}' \
+                "$API/api/health/strict" 2>/dev/null || echo 000)
+      if [[ "$recheck" == "200" ]]; then
+        say "recovered on re-probe just before restart — standing down"
+        STATUS=UP; FAILS=0
+        edge_check; daily_checks; save_state; return
+      fi
       say "restarting backend (snapshot: $snap)"
       "${COMPOSE[@]}" restart backend >/dev/null 2>&1 || true
       RESTARTS_TODAY=$((RESTARTS_TODAY + 1)); FAILS=0

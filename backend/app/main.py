@@ -39,7 +39,7 @@ from .ingest.market_session_watch import run_nse_session_open_watch
 from .ingest.session_steward import SessionSteward, set_steward
 from .ingest.universe_poller import UniversePoller
 from .runtime import get_runtime
-from .ws import ws_router
+from .ws import algo_ws_router, ws_router
 
 log = get_logger("main")
 
@@ -55,9 +55,41 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rt = get_runtime()
     sess = get_session_manager()
 
+    # ---- TrueData boot path -------------------------------------------------
+    # TrueData needs no session restore and no login here: credentials ride in
+    # the websocket URL, so the feed authenticates itself on connect. What it
+    # DOES need is the opposite of a login — a defensive logout.
+    #
+    # A container restart is, from the vendor's point of view, a dirty
+    # disconnect: the server still believes the previous process is connected
+    # and rejects us with "User Already Connected" for ~60s. Since restarts are
+    # routine here (deploys, the sentinel, the steward's own backstop), the boot
+    # path MUST assume the last exit was dirty and clear the session before the
+    # feed's first connect attempt — otherwise every restart begins with a
+    # guaranteed lockout.
+    if settings.run_mode == "live" and settings.feed_vendor == "truedata":
+        from .auth.td_session import get_td_session
+        from .core import proxy_health
+
+        await proxy_health.probe(force=True)
+        if not proxy_health.is_up():
+            log.error("app.startup.proxy_down", detail=proxy_health.last_error(),
+                      hint="TrueData is only reachable through the WARP SOCKS proxy; "
+                           "check warp-svc and warp-socks-bridge on the host.")
+        td_sess = get_td_session()
+        try:
+            td_sess.require_credentials()
+            await asyncio.wait_for(td_sess.logout_request("boot", force=True), timeout=25.0)
+            log.info("app.startup.td_boot_logout_done",
+                     cooldown_s=round(td_sess.cooldown_remaining_s, 1))
+        except Exception as e:
+            log.warning("app.startup.td_boot_logout_failed", error=str(e))
+
     # 1) Restore the last persisted XTS session when possible.
     # 2) Else log in fresh from the appKey/secretKey in .env.
-    if settings.run_mode == "live":
+    # Skipped entirely under FEED_VENDOR=truedata: there is no XTS session to
+    # hold, and logging in would pointlessly consume the broker's single seat.
+    if settings.run_mode == "live" and settings.feed_vendor == "xts":
         restored = False
         try:
             restored = await asyncio.wait_for(
@@ -109,18 +141,51 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             spawn_supervised(run_nse_session_open_watch, "nse-session-watch")
             spawn_supervised(run_atm_drift_watch, "atm-drift-watch")
 
-            # The single recovery authority: outcome-based feed recovery, token
-            # rotation schedule (daily pre-open + TTL backstop), alerting, and the
-            # os._exit backstop. Every other actor only REQUESTS recovery.
-            steward = SessionSteward()
-            set_steward(steward)
-            rt.steward = steward
-            spawn_supervised(steward.run, "session-steward")
+            # The single recovery authority. Which one depends on the vendor,
+            # because the two have OPPOSITE premises: the XTS steward exists to
+            # avoid logging in too often (a login kills the live session), while
+            # the TrueData steward exists to avoid logging OUT too often (a
+            # logout costs a ~60s lockout). Running the XTS ladder against
+            # TrueData would be a lockout generator, so this is a hard branch,
+            # never a shared class with flags.
+            if settings.feed_vendor == "truedata":
+                from .core.proxy_health import run_proxy_watch
+                from .ingest.truedata_steward import get_td_steward
+
+                td_steward = get_td_steward()
+                rt.steward = td_steward
+                spawn_supervised(td_steward.run, "session-steward")
+                spawn_supervised(run_proxy_watch, "proxy-watch")
+            elif settings.feed_vendor == "td_relay":
+                # Follower: there is no vendor session to rotate or log out, so
+                # NO steward. The relay client reconnects on its own; running
+                # the TrueData ladder here would try to log the OWNER out.
+                rt.steward = None
+                log.info("app.startup.td_relay_follower", relay=settings.td_relay_url.split("?")[0])
+            else:
+                steward = SessionSteward()
+                set_steward(steward)
+                rt.steward = steward
+                spawn_supervised(steward.run, "session-steward")
 
             # REST snapshotter: "failover" covers the active symbol while the WS
             # feed is down; "full" additionally polls the whole F&O universe.
+            # The transports are vendor-specific (XTS batch-quotes vs TrueData
+            # per-contract getlastnbars / whole-segment getAllBars), so the
+            # implementation is chosen here while the MODE semantics stay shared.
             if settings.effective_poller_mode != "off":
-                poller = UniversePoller(rt.tick_queue)
+                # The REST failover transport is the vendor's, and a relay
+                # follower still holds REST credentials — so it fails over the
+                # same way the owner does.
+                if settings.feed_vendor in ("truedata", "td_relay"):
+                    from .ingest.td_failover_poller import TdFailoverPoller, TdSegmentSweeper
+
+                    if settings.effective_poller_mode == "segment_sweep":
+                        poller = TdSegmentSweeper(rt.tick_queue)
+                    else:
+                        poller = TdFailoverPoller(rt.tick_queue)
+                else:
+                    poller = UniversePoller(rt.tick_queue)
                 await poller.start()
                 rt.universe_poller = poller
 
@@ -129,6 +194,42 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             # Persist per-strike greeks so replay/exports can show live-computed greeks.
             spawn_supervised(_greeks_history_loop, "greeks-history-snapshot")
 
+            # The Algo Config trading orchestrator: one decision pass per
+            # closed minute during the session (clock-driven — it reads the
+            # already-persisted buckets, deliberately NOT the flush hook, so
+            # the hardened ingestion path stays untouched). Routes to the
+            # paper simulator until the live broker milestone lands.
+            from .algo.orchestrator import run_orchestrator_loop
+
+            spawn_supervised(run_orchestrator_loop, "algo-orchestrator")
+
+        # The Algo Config live stream — deliberately OUTSIDE the live-mode
+        # branch. Under RUN_MODE=replay there is no feed and no orchestrator,
+        # but the page must still render the last stored session and SAY that
+        # it is replaying rather than look broken. The loop costs nothing with
+        # zero subscribers, so running it unconditionally is free.
+        from .algo.live_stream import run_algo_stream_loop
+
+        spawn_supervised(run_algo_stream_loop, "algo-stream")
+
+        # Keeps oi_day_stats / live_days current. Independent of the nightly
+        # shell script on purpose: that script's refresh line was uncommitted
+        # for weeks, so anything deployed from git never refreshed at all and
+        # oi_snapshots_unified silently served the wrong arm. Also runs in
+        # replay — a stale index is stale regardless of the feed.
+        from .services.data_health import run_data_health_loop
+
+        spawn_supervised(run_data_health_loop, "data-health")
+
+        # Heals multi-day outages: if this backend was down for N trading days,
+        # pull them from the TrueData REST archive (same puller as the nightly
+        # cron) and refresh the day index. Live mode only — a replay box has
+        # no business writing history it did not observe.
+        if settings.run_mode == "live":
+            from .ingest.gapfill import run_gapfill_loop
+
+            spawn_supervised(run_gapfill_loop, "gapfill", respawn=False)
+
         yield
 
     finally:
@@ -136,6 +237,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         for name in (
             "session-steward", "nse-session-watch", "atm-drift-watch",
             "iv-history-snapshot", "greeks-history-snapshot", "spot-refresher",
+            "proxy-watch", "algo-orchestrator", "algo-stream", "data-health",
+            # was missing: an in-flight vendor pull subprocess outlived shutdown
+            "gapfill",
         ):
             cancel_supervised(name)
         # Stop producers (feed + poller) before the aggregator so no producer
@@ -143,10 +247,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if poller is not None:
             await poller.stop()
         if rt.feed_client is not None:
+            # Under TrueData this is load-bearing, not tidiness: stop() sends the
+            # on-socket logout, and skipping it leaves the session dirty so the
+            # NEXT boot starts inside a ~60s "User Already Connected" window.
+            # docker-compose's stop_grace_period is raised to 45s for this.
             await rt.feed_client.stop()
+        if rt.shadow_feed_client is not None:
+            await rt.shadow_feed_client.stop()
         if rt.aggregator is not None:
             await rt.aggregator.stop()
-        if settings.run_mode == "live":
+        if rt.shadow_aggregator is not None:
+            await rt.shadow_aggregator.stop()
+        if settings.run_mode == "live" and settings.feed_vendor == "xts":
             await sess.stop()
 
 
@@ -168,7 +280,7 @@ def _frontend_dist_dir() -> Path | None:
 
 class _SPAStaticFiles(StaticFiles):
     """StaticFiles that falls back to ``index.html`` on 404 so client-side routes
-    (e.g. ``/hidden``) resolve on hard refresh when FastAPI serves the built SPA
+    resolve on hard refresh when FastAPI serves the built SPA
     directly (frozen-exe / local ``frontend/dist``). Inert under nginx/Vite, which
     already do history fallback. The ``/api`` and ``/ws`` routers are registered
     before the greedy ``/`` mount, so they always match first — this fallback only
@@ -243,6 +355,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.include_router(ws_router)
+    app.include_router(algo_ws_router)
+    # Relay owner endpoint — inert unless TD_RELAY_ENABLED (it answers with an
+    # error frame and closes), so mounting it unconditionally is safe.
+    from .ws.td_relay import router as td_relay_router
+
+    app.include_router(td_relay_router)
 
     dist = _frontend_dist_dir()
     if dist is not None:

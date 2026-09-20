@@ -284,6 +284,93 @@ class TrueDataRest:
             return sorted(merged.values(), key=lambda r: r.get("timestamp") or "")
         return rows
 
+    async def get_last_n_bars(
+        self,
+        symbol: str,
+        nbars: int = 1,
+        interval: str = "1min",
+    ) -> list[dict[str, str]]:
+        """The most recent ``nbars`` bars — the live failover transport.
+
+        Used when the websocket is unhealthy, to keep the ACTIVE symbol's chain
+        updating at REST cadence instead of going dark. ``bidask=0`` is mandatory
+        on this endpoint per the vendor docs, and ``nbars`` is documented max 200
+        (their own sample violates that, so we clamp rather than trust it).
+        """
+        n = max(1, min(int(nbars), 200))
+        url = (
+            f"{HISTORY_BASE}/getlastnbars?symbol={_q(symbol)}"
+            f"&nbars={n}&interval={interval}&bidask=0&response=csv"
+        )
+        try:
+            return self.parse_csv(await self._get_text(url, bearer=True))
+        except _NoData:
+            return []
+
+    async def get_all_bars(
+        self,
+        segment: str,
+        minute: datetime,
+        lotsize: bool = True,
+    ) -> list[dict[str, str]]:
+        """Every symbol's 1-min bar for ONE minute of a whole segment (add-on).
+
+        The only arithmetically viable way to cover the long tail: one request
+        per minute regardless of universe size. Per-contract polling of 230
+        symbols' chains is ~10,580 requests per sweep, which cannot complete
+        inside a sweep interval at any documented rate limit.
+
+        ``minute`` is IST-naive at minute precision (``yymmddTHH:MM``) — note
+        this is a DIFFERENT stamp format from getbars' ``yymmddTHH:MM:SS``.
+        """
+        stamp = minute.strftime("%y%m%dT%H:%M")
+        url = (
+            f"{HISTORY_BASE}/getAllBars?segment={_q(segment)}&timestamp={stamp}"
+            f"&lotsize={'true' if lotsize else 'false'}&response=csv"
+        )
+        try:
+            return self.parse_csv(await self._get_text(url, bearer=True))
+        except _NoData:
+            return []
+
+    async def logout_request(self, port: int) -> bool:
+        """Clear a WEDGED realtime session, then the caller must wait ~60s.
+
+        TrueData allows one realtime session per user per port and REJECTS a
+        second login rather than displacing it, so after a dirty disconnect
+        (crash, SIGKILL, container restart) the server still believes we are
+        connected and every reconnect returns "User Already Connected". This is
+        the only documented way out.
+
+        Note the auth model: this endpoint takes credentials as QUERY PARAMS, not
+        a bearer token — a different scheme from every other host. The URL is
+        scrubbed before it can reach a log.
+        """
+        # Credentials RAW, not percent-encoded — same vendor quirk as the
+        # realtime socket: this host compares the literal query value instead
+        # of URL-decoding it. Measured 2026-08-21 against the live account:
+        #     raw "ayush@1075"   -> {"status":"Request Accepted", ...}
+        #     wrong password     -> {"status":"Invalid user credentials", ...}
+        # so the endpoint really does authenticate, and an encoded "%40" was
+        # being read as a wrong password. This logout is the ONLY way out of a
+        # wedged session, so a silently-rejected one meant every dirty restart
+        # sat through the full lockout with no way to clear it.
+        url = (
+            f"{MASTER_BASE}/logoutRequest?user={self.user}"
+            f"&password={self.password}&port={int(port)}"
+        )
+        await self.gov.wait()
+        try:
+            resp = await self._client.get(url, timeout=20.0)
+            body = (resp.text or "")[:200]
+            log.info("truedata.logout_request", port=port, status=resp.status_code,
+                     body=body[:120])
+            return resp.status_code < 400
+        except Exception as e:
+            log.warning("truedata.logout_request.error", port=port, error=str(e),
+                        url=_scrub(url))
+            return False
+
     async def get_symbol_expiry_list(self, symbol: str) -> list[str]:
         url = f"{HISTORY_BASE}/getSymbolExpiryList?symbol={_q(symbol)}&response=csv"
         rows = self.parse_csv(await self._get_text(url, bearer=True))

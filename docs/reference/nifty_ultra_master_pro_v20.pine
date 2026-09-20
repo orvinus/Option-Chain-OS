@@ -1,0 +1,1563 @@
+//@version=5
+// ══════════════════════════════════════════════════════════════════
+// NIFTY ULTRA-MASTER PRO  v20  — Levels + Regime + Entry Model
+//
+// CONFIGURED BEHAVIOUR:
+//   1. ENTRY PRECISION (Option A): the entry engine and the chart read
+//      ONE unified full level set (outP), built by f_buildLevels() with
+//      the complete pipeline — structural + bridge + median injection +
+//      20% spacing. f_findZone scans this same set, so every entry can
+//      only fire on a level that is actually drawn. No hidden-level
+//      entries. (No separate simplified em_outP exists.)
+//
+//   2. STABILITY (Option B): levels are built at GLOBAL scope every bar
+//      (not trapped in barstate.islast), so the display is never empty.
+//      During an active trade the build is gated by `not em_inTrade`,
+//      so the level set (lines, zones, SL anchor, target) FREEZES from
+//      entry until the trade fully exits (target / trail / base SL /
+//      max SL), then resumes. No "0 mapped" freeze bug.
+//
+//   3. BUY-ONLY: long entries only (7 sub-scenarios S1A..S3C, all ▲).
+//      No short/sell signals are generated or plotted.
+//
+//   4. TWO ENTRY MODELS (mutually exclusive — one position at a time):
+//      a) BODY CLOSING (high-probability): green trigger + next-candle
+//         retrace, scenarios S1A..S3C, on ALL level types.
+//      b) RETEST (low-probability): LIVE intrabar same-candle — price
+//         wicks to a level and ticks back above it (no color/close
+//         check). R1 (wick to Base, back above -> enter Upper Median),
+//         R2 (wick under Upper Median but not Base, back above -> enter
+//         Zone Top). ONLY on 1H-STRUCT / BRIDGE / DISCOVERY (not MEDIAN).
+//      Both share the SAME exit system (Base SL / Max 10% / target /
+//      trailing) and the same outP levels. Toggles: enableLong,
+//      enableRetest.
+// ══════════════════════════════════════════════════════════════════
+indicator("NIFTY ULTRA-MASTER PRO [Levels + Regime + Entry Model v20]",
+     overlay          = true,
+     max_lines_count  = 500,
+     max_labels_count = 500,
+     max_boxes_count  = 500,
+     max_bars_back    = 2000)
+
+// ══════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════
+grp1 = "🏛️ Institutional Master Laws"
+expansionLawPct = input.float(20.0, "Expansion Law (20% Spacing)",     group=grp1)
+bridgeLawPct    = input.float(50.0, "Bridge Law (50% Void Threshold)", group=grp1)
+medianLawPct    = input.float(50.0, "Median Law (Injection Gap %)",    minval=5.0, maxval=100.0, step=1.0, group=grp1)
+priceFloorINR   = input.float(50.0, "Price Floor (₹50 Stop)",          group=grp1)
+
+grp2 = "🔍 Structural Detection"
+bodyMatchThreshold = input.float(2.2, "Body Match (pts)", step=0.1, group=grp2)
+pivotScanDepth     = input.int(250,   "1H Scan Depth (Bars)", minval=50, maxval=500, group=grp2)
+
+grp3 = "🎨 Visual"
+lineExtensionBars = input.int(500,    "Line Left Extension (Bars)", group=grp3)
+labelOffset       = input.int(30,     "Label Right Offset (Bars)",  group=grp3)
+showStructural    = input.bool(true,  "Show 1H-STRUCT (Red)",        group=grp3)
+showDiscovery     = input.bool(true,  "Show DISCOVERY (Green)",      group=grp3)
+showBridge        = input.bool(true,  "Show BRIDGE (Cyan)",          group=grp3)
+showMedian        = input.bool(true,  "Show MEDIAN (Yellow)",        group=grp3)
+medianColor       = input.color(#FFD700, "Median Color",              group=grp3)
+medianLineWidth   = input.int(1,      "Median Line Width", minval=1, maxval=4, group=grp3)
+zonePct           = input.float(3.0,  "Zone Width ± %", minval=0.0, maxval=20.0, step=0.1, group=grp3)
+
+grpE = "📐 Entry Model"
+showEntrySignals = input.bool(true,   "Show Entry Signals",           group=grpE)
+enableLong       = input.bool(true,   "Enable LONG entries (▲)",      group=grpE)
+enableRetest     = input.bool(true,   "Enable RETEST entries (▲R)",   group=grpE)
+showSLLines      = input.bool(true,   "Show SL Lines",                group=grpE)
+showTrailLabels  = input.bool(true,   "Show Trail Labels",            group=grpE)
+maxSLPct         = input.float(10.0,  "Max SL % (Hard Cap)", minval=1.0, maxval=30.0, step=0.1, group=grpE)
+triggerTimeout   = input.int(6,       "Trigger Timeout (5m Bars)", minval=1, maxval=100, group=grpE)
+
+grp5 = "📊 Dashboard"
+showDashboard   = input.bool(true,    "Show Dashboard",   group=grp5)
+showLevelsPanel = input.bool(true,    "Show Key Levels",  group=grp5)
+dashPos         = input.string("Top Right",    "Dashboard Position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"], group=grp5)
+levelsPos       = input.string("Bottom Right", "Levels Position",    options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Left"],  group=grp5)
+
+// ══════════════════════════════════════════════════════════════════
+// DATA FEEDS
+// ══════════════════════════════════════════════════════════════════
+[h1O, h1C, h1H, h1L] = request.security(syminfo.tickerid, "60",
+     [open, close, high, low], lookahead=barmerge.lookahead_on)
+
+[wH, wL, wC] = request.security(syminfo.tickerid, "W",
+     [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+
+[d1H, d1L, d1C] = request.security(syminfo.tickerid, "D",
+     [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+[d2H, d2L, d2C] = request.security(syminfo.tickerid, "D",
+     [high[2], low[2], close[2]], lookahead=barmerge.lookahead_on)
+[d3H, d3L, d3C] = request.security(syminfo.tickerid, "D",
+     [high[3], low[3], close[3]], lookahead=barmerge.lookahead_on)
+
+// Confirmed 5m OHLC
+[em5_o_raw, em5_h_raw, em5_l_raw, em5_c_raw] = request.security(
+     syminfo.tickerid, "5", [open, high, low, close],
+     lookahead=barmerge.lookahead_off)
+
+em5_conf_raw = request.security(
+     syminfo.tickerid, "5", barstate.isconfirmed,
+     lookahead=barmerge.lookahead_off)
+
+// CHANGE-1: Live (unconfirmed) 5m OHLC — fires every tick
+[em5_lo_raw, em5_lh_raw, em5_ll_raw, em5_lc_raw] = request.security(
+     syminfo.tickerid, "5", [open, high, low, close],
+     lookahead=barmerge.lookahead_off)
+
+// CHANGE-1: 5m timestamp — for two-candle guard on all chart timeframes
+em5_time_raw = request.security(
+     syminfo.tickerid, "5", time,
+     lookahead=barmerge.lookahead_off)
+
+// Confirmed 5m values
+float em5_open  = nz(em5_o_raw)
+float em5_high  = nz(em5_h_raw)
+float em5_low   = nz(em5_l_raw)
+float em5_close = nz(em5_c_raw)
+bool  em5_conf  = not na(em5_conf_raw) and em5_conf_raw
+int   em5_time  = nz(em5_time_raw, 0)
+
+// Live (unconfirmed) 5m values
+float em5_live_open  = nz(em5_lo_raw)
+float em5_live_high  = nz(em5_lh_raw)
+float em5_live_low   = nz(em5_ll_raw)
+float em5_live_close = nz(em5_lc_raw)
+
+// Confirmed 5m bar detection
+var float _prev5c = na
+bool new5mClose = em5_conf and (na(_prev5c) or em5_close != _prev5c)
+if new5mClose
+    _prev5c := em5_close
+
+// ══════════════════════════════════════════════════════════════════
+// DATA-READY GATE  (fixes first-load latency / stale-level entries)
+// ──────────────────────────────────────────────────────────────────
+// On first chart load the 5m entry feed resolves before the daily /
+// weekly level feeds. For ~1-2s the entry engine would see TODAY's 5m
+// price but YESTERDAY's levels (outP not yet rebuilt) and could fire an
+// entry on stale levels. This gate blocks ALL entry activity until the
+// raw daily AND weekly feeds have actually loaded (non-na). Once they
+// resolve, outP is built from current data and entries are allowed.
+bool feedsLoaded =
+     not na(d1H) and not na(d1L) and not na(d1C) and
+     not na(d2H) and not na(d2L) and not na(d2C) and
+     not na(d3H) and not na(d3L) and not na(d3C) and
+     not na(wH)  and not na(wL)  and not na(wC)  and
+     not na(h1H) and not na(h1C)
+
+// levelsReady latched below, AFTER outP is built (see level-build block)
+var bool levelsReady = false
+
+// ══════════════════════════════════════════════════════════════════
+// 1H STRUCTURAL REVERSAL DETECTION
+// ══════════════════════════════════════════════════════════════════
+// ZONE-CONSISTENCY FIX: this 1H reversal feed builds the structural levels
+// (h1_struct → bridges → medians → zones). It was the ONLY level-building
+// feed using lookahead_off, while the main 1H/weekly/daily level feeds use
+// lookahead_on. With lookahead_off the completed 1H reversals became visible
+// at different points on a 5m chart vs a 1H chart, so a DIFFERENT reversal
+// set was detected → different bridges/medians → different zones per
+// timeframe. Aligning it to lookahead_on makes the SAME 1H reversals (and
+// therefore the SAME zones) appear on every chart timeframe, matching the
+// 1H chart. The 5m ENTRY feeds (confirmed/live 5m OHLC) remain lookahead_off
+// and are untouched, so entry logic is unchanged.
+h1_rev_val = request.security(syminfo.tickerid, "60",
+     ( (close[2] > open[2] and close[1] < open[1] and close[1] < close[2]) or
+       (close[2] < open[2] and close[1] > open[1] and close[1] > close[2]) ) and
+     math.abs(open[1] - close[2]) <= bodyMatchThreshold and
+     close[2] > priceFloorINR
+     ? close[2] : na,
+     lookahead=barmerge.lookahead_on)
+
+var float[] h1_struct = array.new_float(0)
+
+if not na(h1_rev_val) and (na(h1_rev_val[1]) or h1_rev_val != h1_rev_val[1])
+    bool _dup = false
+    int  _sz  = array.size(h1_struct)
+    if _sz > 0
+        for _k = 0 to _sz - 1
+            if array.get(h1_struct, _k) == h1_rev_val
+                _dup := true
+                break
+    if not _dup
+        array.push(h1_struct, h1_rev_val)
+
+// ══════════════════════════════════════════════════════════════════
+// PIVOT MATRIX  (P, R1-R5, S1-S5, R4x, R5x = 13 levels)
+// ══════════════════════════════════════════════════════════════════
+f_matrix(float h, float l, float c) =>
+    float p  = (h + l + c) / 3
+    float r1 = 2 * p - l
+    float r2 = p + (h - l)
+    float r3 = h + 2 * (p - l)
+    float r4 = p + 1.5 * (h - l)
+    float r5 = h + 3 * (p - l)
+    float s1 = 2 * p - h
+    float s2 = p - (h - l)
+    float s3 = l - 2 * (h - p)
+    float s4 = 2 * p - r3
+    float s5 = 2 * p - r4
+    float r4x = r3 + (r3 - r2)
+    float r5x = r4x + (r4x - r3)
+    array.from(p, r1, r2, r3, r4, r5, s1, s2, s3, s4, s5, r4x, r5x)
+
+// Ascending insertion sort for 3 parallel arrays
+f_sortAsc(float[] P, int[] T, string[] N) =>
+    int sz = array.size(P)
+    if sz > 1
+        for i = 0 to sz - 2
+            for j = i + 1 to sz - 1
+                if array.get(P, i) > array.get(P, j)
+                    float tp = array.get(P, i)
+                    array.set(P, i, array.get(P, j))
+                    array.set(P, j, tp)
+                    int ti = array.get(T, i)
+                    array.set(T, i, array.get(T, j))
+                    array.set(T, j, ti)
+                    string tn = array.get(N, i)
+                    array.set(N, i, array.get(N, j))
+                    array.set(N, j, tn)
+
+// ══════════════════════════════════════════════════════════════════
+// UNIFIED LEVEL ENGINE  —  f_buildLevels()
+// ──────────────────────────────────────────────────────────────────
+// SINGLE SOURCE OF TRUTH.  Runs the COMPLETE level pipeline:
+//   structural → downside bridges → internal ladder bridges →
+//   20% spacing enforcement → median injection.
+// Returns exactly the levels that get plotted on the chart.
+//
+// Called on EVERY bar so the entry engine has the same levels the
+// chart shows.  This guarantees entries can ONLY fire on plotted
+// levels — never on a hidden/filtered level.
+// ══════════════════════════════════════════════════════════════════
+f_buildLevels() =>
+    float[]  finalP = array.new_float(0)
+    int[]    finalT = array.new_int(0)
+    string[] finalN = array.new_string(0)
+
+    // 1. Structural levels — newest first, 20% spaced
+    int _tot  = array.size(h1_struct)
+    int _slim = math.min(_tot, pivotScanDepth)
+    int _si   = _tot - _slim
+    if _slim > 0
+        for i = _tot - 1 to _si
+            float pv = array.get(h1_struct, i)
+            if pv > priceFloorINR
+                bool cf = false
+                int  sf = array.size(finalP)
+                if sf > 0
+                    for j = 0 to sf - 1
+                        float lv = math.min(pv, array.get(finalP, j))
+                        if lv > 0 and math.abs(pv - array.get(finalP, j)) / lv * 100 < expansionLawPct
+                            cf := true
+                            break
+                if not cf
+                    array.push(finalP, pv)
+                    array.push(finalT, 1)
+                    array.push(finalN, "1H-STRUCT")
+
+    // 2. Bridge pool (39 pivots from 3 daily candles)
+    float[] bPool = array.new_float(0)
+    float _d1h = nz(d1H)
+    float _d1l = nz(d1L)
+    float _d1c = nz(d1C)
+    float _d2h = nz(d2H)
+    float _d2l = nz(d2L)
+    float _d2c = nz(d2C)
+    float _d3h = nz(d3H)
+    float _d3l = nz(d3L)
+    float _d3c = nz(d3C)
+    if _d1h > _d1l and _d1h > 0
+        for v in f_matrix(_d1h, _d1l, _d1c)
+            if v > 0
+                array.push(bPool, v)
+    if _d2h > _d2l and _d2h > 0
+        for v in f_matrix(_d2h, _d2l, _d2c)
+            if v > 0
+                array.push(bPool, v)
+    if _d3h > _d3l and _d3h > 0
+        for v in f_matrix(_d3h, _d3l, _d3c)
+            if v > 0
+                array.push(bPool, v)
+    array.sort(bPool)
+
+    // 3. Weekly discovery staircase above structural max
+    float _wh = nz(wH)
+    float _wl = nz(wL)
+    float _wc = nz(wC)
+    if _wh > _wl and _wh > 0
+        float[] wM    = f_matrix(_wh, _wl, _wc)
+        float   sMax  = array.size(finalP) > 0 ? array.max(finalP) : close
+        float   uBase = sMax
+        int[] _dIdx = array.from(1, 2, 3, 4, 5, 11, 12)
+        for i = 0 to array.size(_dIdx) - 1
+            float cv = array.get(wM, array.get(_dIdx, i))
+            if cv > uBase * (1 + expansionLawPct / 100)
+                array.push(finalP, cv)
+                array.push(finalT, 2)
+                array.push(finalN, "DISCOVERY")
+                uBase := cv
+
+    f_sortAsc(finalP, finalT, finalN)
+
+    float[]  rP = array.new_float(0)
+    int[]    rT = array.new_int(0)
+    string[] rN = array.new_string(0)
+
+    // 4. Downside bridges below structural floor
+    int _fp0 = array.size(finalP)
+    if _fp0 > 0
+        float dFloor = array.min(finalP)
+        int   bpSz   = array.size(bPool)
+        if bpSz > 0
+            for i = bpSz - 1 to 0
+                float pvt = array.get(bPool, i)
+                if pvt < dFloor and pvt > priceFloorINR
+                    if dFloor > 0 and (dFloor - pvt) / pvt * 100 >= expansionLawPct
+                        array.push(rP, pvt)
+                        array.push(rT, 3)
+                        array.push(rN, "BRIDGE")
+                        dFloor := pvt
+
+    // 5. Internal ladder + scavenger bridges
+    int fpSz = array.size(finalP)
+    if fpSz > 0
+        for i = 0 to fpSz - 1
+            array.push(rP, array.get(finalP, i))
+            array.push(rT, array.get(finalT, i))
+            array.push(rN, array.get(finalN, i))
+            if i < fpSz - 1
+                float gap_L = array.get(finalP, i)
+                float gap_H = array.get(finalP, i + 1)
+                float lBase = gap_L
+                int   safety = 0
+                bool  kLoop  = true
+                while kLoop and gap_L > 0 and (gap_H - lBase) / lBase * 100 > bridgeLawPct and safety < 10
+                    safety += 1
+                    bool  pFound = false
+                    float fndPvt = na
+                    int   bpSz2  = array.size(bPool)
+                    if bpSz2 > 0
+                        for pvt in bPool
+                            if not pFound and lBase > 0 and pvt > lBase * (1 + expansionLawPct / 100) and pvt < gap_H * 0.98
+                                fndPvt := pvt
+                                pFound := true
+                    if pFound
+                        array.push(rP, fndPvt)
+                        array.push(rT, 3)
+                        array.push(rN, "BRIDGE")
+                        lBase := fndPvt
+                    else
+                        kLoop := false
+
+    f_sortAsc(rP, rT, rN)
+
+    // 6. 20% spacing enforcement
+    float[]  fP2 = array.new_float(0)
+    int[]    fT2 = array.new_int(0)
+    string[] fN2 = array.new_string(0)
+    float    lk  = -1.0
+    int _sz6 = array.size(rP)
+    if _sz6 > 0
+        for i = 0 to _sz6 - 1
+            float p = array.get(rP, i)
+            if lk <= 0.0 or (lk > 0 and (p - lk) / lk * 100 >= expansionLawPct)
+                array.push(fP2, p)
+                array.push(fT2, array.get(rT, i))
+                array.push(fN2, array.get(rN, i))
+                lk := p
+    rP := fP2
+    rT := fT2
+    rN := fN2
+
+    // 7. Median injection
+    int  mSafe = 0
+    bool anyInj = true
+    while anyInj and mSafe < 20
+        mSafe  += 1
+        anyInj  := false
+        int csz  = array.size(rP)
+        if csz >= 2
+            float[]  nP = array.new_float(0)
+            int[]    nT = array.new_int(0)
+            string[] nN = array.new_string(0)
+            for i = 0 to csz - 1
+                array.push(nP, array.get(rP, i))
+                array.push(nT, array.get(rT, i))
+                array.push(nN, array.get(rN, i))
+                if i < csz - 1
+                    float lo = array.get(rP, i)
+                    float hi = array.get(rP, i + 1)
+                    if lo > 0 and (hi - lo) / lo * 100 > medianLawPct
+                        float med  = (lo + hi) / 2.0
+                        bool  okLo = (med - lo) / lo  * 100 >= expansionLawPct
+                        bool  okHi = (hi - med) / med * 100 >= expansionLawPct
+                        if med > priceFloorINR and okLo and okHi
+                            array.push(nP, med)
+                            array.push(nT, 4)
+                            array.push(nN, "MEDIAN")
+                            anyInj := true
+            rP := nP
+            rT := nT
+            rN := nN
+
+    [rP, rT, rN]
+
+// ══════════════════════════════════════════════════════════════════
+// TRADE STATE  (declared before the level build so the freeze gate
+// can read em_inTrade)
+// ══════════════════════════════════════════════════════════════════
+var bool   em_inTrade    = false
+var float  em_entryPrice = na
+var float  em_baseLevel  = na
+// RETEST BASE-SL FIX: em_baseLevel re-anchors upward to NB as a Retest trade
+// trails into higher zones (needed so the Q-ladder keeps building quarters in
+// the new zone). But the Base Level SL must NOT follow it up — it must always
+// reference the ORIGINAL entry-zone Base. em_entryBase captures that original
+// Base once at entry and never re-anchors, so P4 (Retest) uses it instead of
+// the drifting em_baseLevel. Upper zones' Base levels are ignored for the SL.
+var float  em_entryBase  = na
+var float  em_upperMed   = na
+var float  em_lowerMed   = na
+var float  em_zoneTop    = na
+var float  em_zoneBot    = na
+var float  em_maxSL      = na
+var float  em_trailSL    = na
+var string em_sub        = ""
+
+// ERROR-1 FIX (running post-entry high): the trail ladder must react ONLY
+// to highs made AFTER the entry tick, never to the candle's pre-entry
+// spike. em_postHigh is seeded at entry to the current live price (NOT the
+// candle's whole-bar high) and then ratchets up on subsequent ticks. The
+// trail-raise block compares against em_postHigh instead of em5_live_high.
+var float  em_postHigh   = na
+
+// ERROR-2 FIX (retest entry non-repainting): the moment an R1/R2 entry
+// fires on a live intrabar tick it must be COMMITTED permanently and never
+// be un-fired by a later tick of the SAME candle failing the condition
+// (Pine rolls var state back each realtime tick and replays the bar; the
+// old code therefore let a later tick wipe the entry, so the label vanished
+// on close). em_retestFired latches true on entry; em_retestLockTime stores
+// the committing 5m candle's timestamp so the commit survives intrabar
+// rollback and the entry/label is never removed once shown.
+var bool   em_retestFired    = false
+var int    em_retestLockTime = 0
+
+// ERROR-3 FIX (premature trail exit): the trail exit must only consider lows
+// made AFTER the trail was set/raised. Previously P2 compared the trail
+// against em5_live_low — the candle's WHOLE-BAR low — which on the entry
+// candle already contained the wick down to Base that CREATED the entry.
+// So the instant the trail was set to Base, that same entry wick satisfied
+// the exit and the trade was knocked out on the entry candle. em_trailLow
+// is reset to na every time the trail is set or raised, then tracks the
+// running low from that point forward only.
+var float  em_trailLow   = na
+
+// ERROR-4 FIX (intrabar trail-exit repaint): the intrabar touch exit fires
+// on a live tick, but Pine's realtime rollback then replays the bar; if the
+// live low no longer reaches the trail (price recovered within the same
+// candle), em_inTrade stays true and the TRAIL EXIT label vanishes — the
+// trade "un-exits". em_trailExitFired latches the commit and em_trailExitTime
+// stores the committing 5m candle's timestamp, so once a touch exit fires it
+// is permanent and cannot be reopened by intrabar rollback.
+var bool   em_trailExitFired = false
+var int    em_trailExitTime  = 0
+
+// ERROR-5 FIX (exit overwritten by a later, worse exit): once ANY exit
+// (P1 Max SL / P2 Trail / P3 NB take-profit / P4 Base SL) fires on a candle,
+// the whole exit chain must be locked for that candle. Otherwise Pine's
+// realtime rollback replays the bar and, if price has since dropped further,
+// a higher-priority exit (e.g. Max SL) re-fires and OVERWRITES the exit that
+// already committed — the label/price moves to a worse level. em_exitFired
+// latches the FIRST exit; em_exitTime binds it to that 5m candle. While the
+// latch matches the current candle the exit chain is skipped entirely, so
+// the first exit that fired is the one that stands.
+varip bool   em_exitFired  = false
+varip int    em_exitTime   = 0
+
+// EXIT-LABEL RE-EMIT: capture the first exit's label data in varip fields
+// so the label survives Pine's realtime rollback (sig_* arrays are var and
+// roll back, losing the pushed label). The force-close block re-pushes
+// this data to sig_* on every subsequent tick where the latch holds.
+varip int    _xLblBar  = 0
+varip float  _xLblPx   = na
+varip string _xLblTxt  = ""
+varip color  _xLblCol  = color.white
+varip bool   _xLblUp   = false
+
+// SYSTEM B (v2 zone-trailing overlay) — Body Closing model ONLY. A second,
+// parallel trailing SL that trails on the TARGET ZONE above the entry:
+//   SB_Base   = NB (target zone dark centre line) = final target (via P3)
+//   SB_Bottom = NB * (1 - zonePct/100)  = lower edge → first trail floor
+//   SB_Mid    = (SB_Bottom + SB_Base)/2 = 50% midpoint → second trail floor
+// Dormant until price crosses SB_Bottom; then ratchets up only. Intrabar
+// touch. Runs alongside System A (Q-ladder); first exit wins via the ERROR-5
+// latch. SB_trailLow is the ERROR-3-style post-arm low guard so the arming
+// wick can never self-trigger the SB exit. Retest trades never use System B.
+var float  SB_trailSL    = na
+var float  SB_trailLow   = na
+
+// SYSTEM B label repaint fix: the trail STATE (SB_trailSL) ratchets intrabar
+// so the exit stays live, but the ◈ ZONE labels must NOT be drawn intrabar —
+// Pine's realtime rollback can un-draw a label whose arming tick later
+// replays without the condition, so the label "vanishes" (repaint). Instead
+// we track which SB stage has been reached (SB_stage: 0 none, 1 armed@Bottom,
+// 2 raised@Mid) and draw each stage's label ONCE, only on a confirmed 5m
+// close (new5mClose), via SB_stageLabelled. The label appears one candle
+// later but can never repaint.
+var int    SB_stage        = 0
+var int    SB_stageLabelled = 0
+
+var bool   em_trig       = false
+var int    em_trigBar    = 0
+var int    em_trigTime5m = 0
+var int    em_trigScen   = 0
+var float  em_tB         = na
+var float  em_tZT        = na
+var float  em_tUM        = na
+var float  em_tLM        = na
+var float  em_tZB        = na
+
+//
+// FREEZE GATE:
+//   • No active trade → rebuild levels every bar (normal behaviour).
+//   • Active trade    → SKIP rebuild; outP/outT/outN keep the frozen
+//                       snapshot taken before entry. This locks the
+//                       plotted lines, the zones AND the target until
+//                       the trade exits (SL / target / trail).
+//   Rebuilding resumes automatically on the first bar after the trade
+//   closes (em_inTrade becomes false again).
+//
+// Because the chart render, entry engine and target scan ALL read
+// outP, freezing outP freezes every level reference at once.
+// ══════════════════════════════════════════════════════════════════
+
+// ── LEVEL BUILD + TRADE LOCK ─────────────────────────────────────
+//    The level ladder is produced by f_buildLevels(), which enforces
+//    ALL laws unchanged: 20% Expansion spacing, 50% Bridge void,
+//    Median injection, dedup. Nothing about the level criteria is
+//    altered here.
+//
+//    TRADE LOCK (your requirement): the build is gated by
+//    `not em_inTrade`. The moment an entry activates, em_inTrade
+//    becomes true and the build STOPS running — outP/outT/outN (and
+//    therefore the drawn lines, zones, SL anchor and target) are
+//    FROZEN. No level update happens until the trade fully exits
+//    (target / trail target / base SL / max SL). On the first bar
+//    AFTER exit, level updates resume.
+//
+//    INTRABAR STABILITY: when flat, the rebuild runs ONLY on a
+//    confirmed bar close (new5mClose) or the first load — NOT on every
+//    live tick. Previously f_buildLevels ran every tick, so the live
+//    1H candle's evolving structural reversals reshuffled the ladder
+//    second-by-second; an entry fired on one tick's levels no longer
+//    matched the next tick's levels (orphaned/"hidden" entry). Building
+//    only on confirmed closes keeps the level set fixed within each bar,
+//    so an entry always aligns with the levels that stay displayed.
+var float[]  outP = array.new_float(0)
+var int[]    outT = array.new_int(0)
+var string[] outN = array.new_string(0)
+
+if not em_inTrade
+    [_bP, _bT, _bN] = f_buildLevels()
+    outP := _bP
+    outT := _bT
+    outN := _bN
+
+// Latch levels-ready only once feeds are loaded AND outP is populated
+// from current data. Latched (never flickers off) so entries are
+// permitted only after today's levels are fully applied.
+if feedsLoaded and array.size(outP) > 0
+    levelsReady := true
+
+// ══════════════════════════════════════════════════════════════════
+// TECHNICAL CONTEXT
+// ══════════════════════════════════════════════════════════════════
+float ema20  = ta.ema(close, 20)
+float ema50  = ta.ema(close, 50)
+float ema200 = ta.ema(close, 200)
+float atrVal = ta.atr(14)
+float atrPct = close > 0 ? atrVal / close * 100 : 0.0
+float rsiVal = ta.rsi(close, 14)
+[_dp, _dm, adxVal] = ta.dmi(14, 14)
+float volAvg = ta.sma(volume, 20)
+bool  volOk  = volume > volAvg
+
+bool trendUp   = ema20 > ema50 and ema50 > ema200 and close > ema20
+bool trendDown = ema20 < ema50 and ema50 < ema200 and close < ema20
+bool sideways  = adxVal < 20 and not trendUp and not trendDown
+bool ranging   = atrPct < 0.8 and adxVal < 22
+
+string regimeText  = trendUp ? "▲ TRENDING UP" : trendDown ? "▼ TRENDING DOWN" : sideways ? "◆ SIDEWAYS" : ranging ? "◇ RANGING" : "● NEUTRAL"
+color  regimeColor = trendUp ? #00E676 : trendDown ? #FF1744 : sideways ? #FFC107 : ranging ? #FF9100 : #9E9E9E
+
+// ══════════════════════════════════════════════════════════════════
+// NON-REPAINTING SIGNAL STORE + LIVE DRAW
+// f_store() always queues to sig_* arrays for historical persistence.
+// At barstate.isrealtime it ALSO draws immediately — live signal
+// appears on the running candle without waiting for it to close.
+// live_lreg tracks realtime-drawn labels; cleaned at islast redraw.
+// ══════════════════════════════════════════════════════════════════
+var int[]    sig_bar   = array.new_int(0)
+var int[]    sig_time  = array.new_int(0)
+var float[]  sig_px    = array.new_float(0)
+var string[] sig_txt   = array.new_string(0)
+var color[]  sig_col   = array.new_color(0)
+var bool[]   sig_up    = array.new_bool(0)
+var label[]  sig_lreg  = array.new_label(0)
+var label[]  live_lreg = array.new_label(0)
+
+f_store(int bi, float px, string tx, color cl, bool up) =>
+    array.push(sig_bar,  bi)
+    array.push(sig_time, time)
+    array.push(sig_px,   px)
+    array.push(sig_txt,  tx)
+    array.push(sig_col,  cl)
+    array.push(sig_up,   up)
+    // Draw immediately on live bar
+    if barstate.isrealtime
+        array.push(live_lreg, label.new(bi, px, tx,
+             color     = cl,
+             textcolor = color.white,
+             style     = up ? label.style_label_up : label.style_label_down,
+             size      = size.small))
+
+// ══════════════════════════════════════════════════════════════════
+// TRADE STATE declared earlier (above the level build / freeze gate)
+// ══════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════
+// barstate.islast — zone rendering + signal redraw
+// Levels ALWAYS built regardless of trade state (freeze gate removed)
+// ══════════════════════════════════════════════════════════════════
+if barstate.islast
+    // Zone line / box / label redraw
+    var line[]  l_reg  = array.new_line(0)
+    var label[] lb_reg = array.new_label(0)
+    var box[]   bx_reg = array.new_box(0)
+    for l in l_reg
+        line.delete(l)
+    for lb in lb_reg
+        label.delete(lb)
+    for bx in bx_reg
+        box.delete(bx)
+    array.clear(l_reg)
+    array.clear(lb_reg)
+    array.clear(bx_reg)
+
+    int ozSz = array.size(outP)
+    if ozSz > 0
+        for i = 0 to ozSz - 1
+            float  p   = array.get(outP, i)
+            int    typ = array.get(outT, i)
+            string tag = array.get(outN, i)
+            bool vis = (typ == 1 and showStructural) or
+                       (typ == 2 and showDiscovery)  or
+                       (typ == 3 and showBridge)     or
+                       (typ == 4 and showMedian)
+            if vis
+                color  c   = typ==1 ? #FF1744 : typ==2 ? #00E676 : typ==3 ? #00E5FF : medianColor
+                string ico = typ==1 ? "◆" : typ==2 ? "▲" : typ==3 ? "◇" : "✦"
+                int    lnW = typ==1 ? 2 : typ==4 ? medianLineWidth : 1
+                float  zt2 = p * (1 + zonePct / 100)
+                float  zb2 = p * (1 - zonePct / 100)
+                array.push(bx_reg, box.new(
+                     bar_index - lineExtensionBars, zt2,
+                     bar_index + labelOffset, zb2,
+                     border_color=color.new(c, 60), border_width=1,
+                     bgcolor=color.new(c, 82)))
+                line lnObj = typ == 4 ?
+                     line.new(bar_index - lineExtensionBars, p, bar_index + labelOffset, p,
+                          color=c, width=lnW, style=line.style_dotted) :
+                     line.new(bar_index - lineExtensionBars, p, bar_index + labelOffset, p,
+                          color=c, width=lnW,
+                          style=typ == 1 ? line.style_solid : line.style_dashed)
+                array.push(l_reg, lnObj)
+                array.push(lb_reg, label.new(
+                     bar_index + labelOffset, p,
+                     ico + " " + tag + "  ₹" + str.tostring(p, "#.##"),
+                     color=color.new(c, 20), textcolor=color.white,
+                     style=label.style_label_left, size=size.small))
+
+    // ── Signal redraw ALWAYS runs (outside freeze gate) ──────────
+    for llb in live_lreg
+        label.delete(llb)
+    array.clear(live_lreg)
+    for slb in sig_lreg
+        label.delete(slb)
+    array.clear(sig_lreg)
+    if showEntrySignals
+        int ssz = array.size(sig_bar)
+        if ssz > 0
+            for i = 0 to ssz - 1
+                array.push(sig_lreg, label.new(
+                     x         = array.get(sig_time, i),
+                     y         = array.get(sig_px,   i),
+                     text      = array.get(sig_txt,  i),
+                     xloc      = xloc.bar_time,
+                     color     = array.get(sig_col,  i),
+                     textcolor = color.white,
+                     style     = array.get(sig_up, i) ? label.style_label_up : label.style_label_down,
+                     size      = size.small))
+
+// ══════════════════════════════════════════════════════════════════
+// NEAREST LEVELS  (dashboard use)
+// ══════════════════════════════════════════════════════════════════
+f_nearest() =>
+    float nS = na
+    float nR = na
+    int   tS = 0
+    int   tR = 0
+    int   sz = array.size(outP)
+    if sz > 0
+        for i = 0 to sz - 1
+            float p = array.get(outP, i)
+            int   t = array.get(outT, i)
+            if p < close and (na(nS) or p > nS)
+                nS := p
+                tS := t
+            if p > close and (na(nR) or p < nR)
+                nR := p
+                tR := t
+    [nS, nR, tS, tR]
+
+[nearSup, nearRes, tSup, tRes] = f_nearest()
+
+// ══════════════════════════════════════════════════════════════════
+// f_findZone — trigger candle classification
+// Unified origin rule: open MUST be strictly BELOW Base Level
+// SC1: open < B, close > ZT
+// SC2: open < B, close > B, close < UM
+// SC3: open < B, close >= UM, close <= ZT
+// ══════════════════════════════════════════════════════════════════
+f_findZone(float c5, float o5) =>
+    float rB    = na
+    float rZT   = na
+    float rUM   = na
+    float rLM   = na
+    float rZB   = na
+    int   rSc   = 0
+    float bestD = na
+    int   sz    = array.size(outP)
+    if sz > 0
+        for i = 0 to sz - 1
+            float b = array.get(outP, i)
+            if b <= 0.0
+                continue
+            float zt = b * (1 + zonePct / 100)
+            float um = b * (1 + zonePct / 200)
+            float lm = b * (1 - zonePct / 200)
+            float zb = b * (1 - zonePct / 100)
+            if o5 >= b
+                continue
+            if c5 > zt
+                float d = c5 - zt
+                if na(bestD) or d < bestD
+                    bestD := d
+                    rB  := b
+                    rZT := zt
+                    rUM := um
+                    rLM := lm
+                    rZB := zb
+                    rSc := 1
+            else if c5 > b and c5 < um
+                float d = math.abs(c5 - b)
+                if na(bestD) or d < bestD
+                    bestD := d
+                    rB  := b
+                    rZT := zt
+                    rUM := um
+                    rLM := lm
+                    rZB := zb
+                    rSc := 2
+            else if c5 >= um and c5 <= zt
+                float d = math.abs(c5 - um)
+                if na(bestD) or d < bestD
+                    bestD := d
+                    rB  := b
+                    rZT := zt
+                    rUM := um
+                    rLM := lm
+                    rZB := zb
+                    rSc := 3
+    [rB, rZT, rUM, rLM, rZB, rSc]
+
+// ══════════════════════════════════════════════════════════════════
+// STEP 1 — TRIGGER CHECK  (confirmed 5m close only)
+//
+// The trigger candle MUST be a confirmed closed green candle.
+// We fire Step 1 on new5mClose so the trigger bar is fully confirmed
+// before we start watching for the test candle in Step 2.
+//
+// Using live close (em5_live_close) inside new5mClose is safe —
+// on the confirmed tick em5_live_close == em5_close (same value).
+// ══════════════════════════════════════════════════════════════════
+bool em5_green = em5_close > em5_open and em5_close > 0
+
+if enableLong and levelsReady and new5mClose and not em_inTrade and not em_trig and em5_green and array.size(outP) > 0
+    [_zB, _zZT, _zUM, _zLM, _zZB, _zSc] = f_findZone(em5_close, em5_open)
+    if not na(_zB) and _zSc > 0
+        em_trig       := true
+        em_trigBar    := bar_index
+        em_trigTime5m := em5_time
+        em_trigScen   := _zSc
+        em_tB         := _zB
+        em_tZT        := _zZT
+        em_tUM        := _zUM
+        em_tLM        := _zLM
+        em_tZB        := _zZB
+
+// ══════════════════════════════════════════════════════════════════
+// STEP 2 — TEST CANDLE + LIVE ENTRY  (fires on every tick)
+//
+// TWO-CANDLE GUARD (both required):
+//   bar_index > em_trigBar   — test candle is on a DIFFERENT chart bar
+//   em5_time > em_trigTime5m — test candle is a DIFFERENT 5m candle
+//
+// Both guards together ensure trigger and entry are always on two
+// separate 5-minute candles regardless of chart timeframe.
+//
+// Entry fires INTRABAR via em5_live_low the moment price touches
+// the required level — no waiting for the test candle to close.
+// ══════════════════════════════════════════════════════════════════
+if em_trig and not em_inTrade and bar_index > em_trigBar and em5_time > em_trigTime5m
+    float B  = em_tB
+    float ZT = em_tZT
+    float UM = em_tUM
+    float LM = em_tLM
+    float ZB = em_tZB
+    int   SC = em_trigScen
+
+    // REPLAY-SAFE test-candle extremes: live ticks during realtime,
+    // confirmed bar low/high on historical replay. This makes an entry
+    // reproduce identically on reload (fixing the case where the SL
+    // label survived a reload but the entry label did not, because the
+    // entry was intrabar-only and the SL was confirmed-close).
+    float eff_low  = math.min(nz(em5_live_low,  em5_low),  em5_low)
+    float eff_high = math.max(nz(em5_live_high, em5_high), em5_high)
+
+    // CHANGE-1: Timeout via 5m timestamp diff
+    if em5_time - em_trigTime5m > triggerTimeout * 5 * 60 * 1000
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+
+    else
+        // ── SC1: Breakout — test candle retraces into zone ──────────
+        if SC == 1
+            if eff_low <= B and eff_high >= B
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := B
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := B * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S1A"
+                f_store(bar_index, B, "▲ S1A\n₹" + str.tostring(B, "#.##"), #00E676, true)
+
+            else if eff_low <= UM and eff_low > B
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := UM
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := UM * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S1B"
+                f_store(bar_index, UM, "▲ S1B\n₹" + str.tostring(UM, "#.##"), #00BCD4, true)
+
+            else if eff_low <= ZT and eff_low > UM
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := ZT
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := ZT * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S1C"
+                f_store(bar_index, ZT, "▲ S1C\n₹" + str.tostring(ZT, "#.##"), #FFC107, true)
+
+        // ── SC2: Recovery into lower zone ───────────────────────────
+        else if SC == 2
+            if eff_low <= B and eff_high >= B
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := B
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := B * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S2A"
+                f_store(bar_index, B, "▲ S2A\n₹" + str.tostring(B, "#.##"), #00E676, true)
+
+            else if eff_low > B and eff_low <= UM
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := UM
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := UM * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S2B"
+                f_store(bar_index, UM, "▲ S2B\n₹" + str.tostring(UM, "#.##"), #00BCD4, true)
+
+        // ── SC3: Upper zone / breakout ───────────────────────────────
+        else if SC == 3
+            if eff_low <= B and eff_high >= B
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := B
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := B * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S3A"
+                f_store(bar_index, B, "▲ S3A\n₹" + str.tostring(B, "#.##"), #00E676, true)
+
+            else if eff_low <= UM and eff_low > B
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := UM
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := UM * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S3B"
+                f_store(bar_index, UM, "▲ S3B\n₹" + str.tostring(UM, "#.##"), #00BCD4, true)
+
+            else if (nz(em5_live_close, em5_close) > ZT and nz(em5_live_open, em5_open) < ZT) or (em5_close > ZT and em5_open < ZT)
+                em_inTrade    := true
+                em_trig       := false
+                em_entryPrice := ZT
+                em_baseLevel  := B
+                em_zoneTop    := ZT
+                em_upperMed   := UM
+                em_lowerMed   := LM
+                em_zoneBot    := ZB
+                em_maxSL      := ZT * (1 - maxSLPct / 100)
+                em_trailSL    := na
+                em_sub        := "S3C"
+                f_store(bar_index, ZT, "▲ S3C Breakout\n₹" + str.tostring(ZT, "#.##"), #FF9800, false)
+
+// ══════════════════════════════════════════════════════════════════
+// RETEST ENTRY MODEL (low-probability, intrabar same-candle)
+//   Fires LIVE the moment price wicks to a level and ticks back above
+//   it. No candle-color check, no confirmed-close wait.
+//   R1: low <= Base AND live close > Base       -> enter at Upper Median
+//   R2: low <= UpperMed AND low > Base
+//                          AND live close > UpperMed -> enter at Zone Top
+//   ONLY on 1H-STRUCT(1) / BRIDGE(3) / DISCOVERY(2) levels — NOT MEDIAN(4).
+//   Shares em_inTrade + the same exit system (Step 3) as Body Closing,
+//   so it is mutually exclusive (one position at a time).
+// ══════════════════════════════════════════════════════════════════
+// ERROR-2 FIX (non-repaint re-assertion): if a retest entry was already
+// committed on THIS 5m candle (em_retestFired latched with a matching
+// em_retestLockTime) but Pine's realtime rollback has reset em_inTrade to
+// false on replay, restore the trade immediately. This makes an R1/R2 entry
+// that has fired impossible to remove/disable for the rest of its candle —
+// the label and trade persist through every subsequent tick and on close.
+// ERROR-4 guard: if ANY exit (trail or general) was ALSO committed on this
+// same candle, the exit wins — do not reopen the trade (prevents an
+// entry/exit reopen fight when entry, trail-set and touch-exit all occur
+// within one candle).
+if em_retestFired and em_retestLockTime == em5_time and not em_inTrade and not (em_trailExitFired and em_trailExitTime == em5_time) and not (em_exitFired and em_exitTime == em5_time)
+    em_inTrade := true
+
+if enableRetest and levelsReady and not em_inTrade and not em_trig and array.size(outP) > 0
+    // Replay-safe extremes: live ticks in realtime, confirmed low/high
+    // on historical replay (so intrabar entries reproduce on reload and
+    // labels don't disappear).
+    float _rLow   = math.min(nz(em5_live_low,  em5_low),  em5_low)
+    float _rClose = nz(em5_live_close, em5_close)
+    float _rOpen  = nz(em5_live_open,  em5_open)
+    int   _rSz = array.size(outP)
+    for _ri = 0 to _rSz - 1
+        if em_inTrade
+            break
+        float _rb = array.get(outP, _ri)
+        int   _rt = array.get(outT, _ri)
+        // Restrict to 1H-STRUCT(1), DISCOVERY(2), BRIDGE(3); skip MEDIAN(4)
+        if _rb <= 0.0 or _rt == 4
+            continue
+        float _rZT = _rb * (1 + zonePct / 100)
+        float _rUM = _rb * (1 + zonePct / 200)
+        float _rLM = _rb * (1 - zonePct / 200)
+        float _rZB = _rb * (1 - zonePct / 100)
+
+        // R1 — TOP→BOTTOM→TOP retest of the BASE:
+        //   open ABOVE base (came from the top)  AND
+        //   wick dropped to/below base (went below) AND
+        //   price back above base (recovered up)
+        if _rOpen > _rb and _rLow <= _rb and _rClose > _rb
+            em_inTrade       := true
+            em_trig          := false
+            em_entryPrice    := _rUM
+            em_baseLevel     := _rb
+            em_entryBase     := _rb   // RETEST BASE-SL: frozen original entry Base
+            em_zoneTop       := _rZT
+            em_upperMed      := _rUM
+            em_lowerMed      := _rLM
+            em_zoneBot       := _rZB
+            em_maxSL         := _rUM * (1 - maxSLPct / 100)
+            em_trailSL       := na
+            em_sub           := "R1"
+            em_retestFired    := true      // ERROR-2: latch commit (non-repaint)
+            em_retestLockTime := em5_time  // ERROR-2: bind commit to this 5m candle
+            f_store(bar_index, _rUM, "▲ R1\n₹" + str.tostring(_rUM, "#.##"), #18FFFF, true)
+
+        // R2 — TOP→BOTTOM→TOP retest of the UPPER MEDIAN (not reaching base):
+        //   open ABOVE upper median (came from the top) AND
+        //   wick dipped to/below upper median but stayed ABOVE base AND
+        //   price back above upper median (recovered up)
+        else if _rOpen > _rUM and _rLow <= _rUM and _rLow > _rb and _rClose > _rUM
+            em_inTrade       := true
+            em_trig          := false
+            em_entryPrice    := _rZT
+            em_baseLevel     := _rb
+            em_entryBase     := _rb   // RETEST BASE-SL: frozen original entry Base
+            em_zoneTop       := _rZT
+            em_upperMed      := _rUM
+            em_lowerMed      := _rLM
+            em_zoneBot       := _rZB
+            em_maxSL         := _rZT * (1 - maxSLPct / 100)
+            em_trailSL       := na
+            em_sub           := "R2"
+            em_retestFired    := true      // ERROR-2: latch commit (non-repaint)
+            em_retestLockTime := em5_time  // ERROR-2: bind commit to this 5m candle
+            f_store(bar_index, _rZT, "▲ R2\n₹" + str.tostring(_rZT, "#.##"), #76FF03, true)
+
+// ══════════════════════════════════════════════════════════════════
+// STEP 3 — TRADE MANAGEMENT
+//   MAX SL:        intrabar  — em5_live_low
+//   Base Level SL: confirmed — em5_close < B
+//   Trail SL SET:  intrabar  — em5_live_high
+//   Trail SL EXIT: intrabar  — em5_live_low touches em_trailSL (latched)
+//   Target Hit:    intrabar  — em5_live_high >= tgtBase
+// ══════════════════════════════════════════════════════════════════
+
+// ERROR-4/5 FIX (non-repaint re-assertion): if ANY exit was already committed
+// on THIS 5m candle (em_exitFired latched with a matching em_exitTime, or the
+// trail-specific em_trailExitFired) but Pine's realtime rollback has reset
+// em_inTrade back to true on replay, force the trade closed again. This makes
+// an exit that has fired impossible to reopen for the rest of its candle — the
+// exit label stays and the trade does not "un-exit" when price moves.
+if ((em_exitFired and em_exitTime == em5_time) or (em_trailExitFired and em_trailExitTime == em5_time)) and em_inTrade
+    em_inTrade  := false
+    em_trailSL  := na
+    em_trailLow := na
+    SB_trailSL  := na
+    SB_trailLow := na
+    SB_stage    := 0
+    SB_stageLabelled := 0
+    em_postHigh := na
+    em_maxSL    := na
+    em_retestFired := false
+    em_trig     := false
+    // RE-EMIT the first exit's label: sig_* arrays are var and roll back
+    // between ticks, losing the label that was pushed when the exit first
+    // fired. The label data was captured in varip fields (_xLblBar etc.)
+    // so it survives rollback. Re-push it here so the label persists.
+    if em_exitFired and em_exitTime == em5_time and _xLblTxt != ""
+        f_store(_xLblBar, _xLblPx, _xLblTxt, _xLblCol, _xLblUp)
+
+if em_inTrade
+    float B   = em_baseLevel
+    float MSL = em_maxSL
+
+    // Find next level above Base = NB (from outP — plotted levels only)
+    float NB   = na
+    int   emSz = array.size(outP)
+    if emSz > 0
+        for i = 0 to emSz - 1
+            float p = array.get(outP, i)
+            if p > B and (na(NB) or p < NB)
+                NB := p
+
+    // ── Quarter levels (recursive 50% midpoints) between B and NB ──
+    float Q2 = not na(NB) ? (B + NB) / 2.0  : na   // 50% midpoint
+    float Q1 = not na(NB) ? (B + Q2) / 2.0  : na   // mid of B..Q2
+    float Q3 = not na(NB) ? (Q2 + NB) / 2.0 : na   // mid of Q2..NB
+
+    // Is this a RETEST trade? (R1/R2) vs Body Closing (S*)
+    bool isRetest = em_sub == "R1" or em_sub == "R2"
+
+    // ══ ERROR-1 FIX: RUNNING POST-ENTRY HIGH ══
+    //   The trail ladder must react ONLY to highs achieved AFTER the entry
+    //   tick — never to the candle's pre-entry spike (e.g. a candle that
+    //   spiked to 111.6 first, then dropped to Base to trigger R1, must NOT
+    //   have the trail instantly set from that pre-entry 111.6 high).
+    //   • On the ENTRY tick (em_postHigh still na): seed it to the current
+    //     live price, so any high made earlier in the same candle is ignored.
+    //   • On later ticks: ratchet em_postHigh up with the live price only.
+    //   The trail-raise conditions below compare against em_postHigh.
+    if na(em_postHigh)
+        em_postHigh := em5_live_close
+    else
+        // GAP-OVER FIX: em5_live_high comes from request.security("5",high,
+        // lookahead_off). On the same-timeframe chart (5m), Pine may return
+        // the PREVIOUS bar's high for historical/confirmed bars, missing a
+        // gap-up that crossed a Q-level without touching it. Adding the
+        // chart-native `high` ensures em_postHigh always captures the true
+        // candle high regardless of feed timing.
+        em_postHigh := math.max(em_postHigh, math.max(em5_live_high, high))
+
+    // ══ TRAIL RAISE STEPS (ratchet up only, intrabar) — run FIRST so the
+    //    trail is at its correct level before any exit check this bar ══
+    //  MULTI-LEVEL JUMP FIX: previously the steps were an else-if chain, so
+    //  the trail could only advance ONE rung per candle. When a single candle
+    //  crossed several Q-levels at once (e.g. hit Q2 and Q3 together), the
+    //  trail stopped at the first matching rung and left profit un-locked.
+    //  Now the target rung is computed from em_postHigh in one pass so the
+    //  trail walks through EVERY level crossed this candle (Base→Q1→Q2, plus
+    //  Q3 for Retest), landing at the highest rung reached, with ONE label at
+    //  the final level. Thresholds, ratchet-only rule, and Retest handling
+    //  are unchanged.
+    if not na(NB)
+        float _prevTrail = em_trailSL
+        // Determine the highest rung em_postHigh qualifies for (ratchet).
+        float _newTrail = em_trailSL
+        string _newTxt  = na
+        color  _newCol  = #FFD700
+        if em_postHigh >= Q1 and (na(_newTrail) or _newTrail < B - 0.001)
+            _newTrail := B
+            _newTxt   := "✦ TRAIL SET\n₹" + str.tostring(B, "#.##")
+            _newCol   := #FFC107
+        if em_postHigh >= Q2 and (na(_newTrail) or _newTrail < Q1 - 0.001)
+            _newTrail := Q1
+            _newTxt   := "✦ TRAIL ↑\n₹" + str.tostring(Q1, "#.##")
+            _newCol   := #FFD700
+        if em_postHigh >= Q3 and (na(_newTrail) or _newTrail < Q2 - 0.001)
+            _newTrail := Q2
+            _newTxt   := "✦ TRAIL ↑\n₹" + str.tostring(Q2, "#.##")
+            _newCol   := #FFD700
+        if isRetest and em_postHigh >= NB and (na(_newTrail) or _newTrail < Q3 - 0.001)
+            _newTrail := Q3
+            _newTxt   := "✦ TRAIL ↑\n₹" + str.tostring(Q3, "#.##")
+            _newCol   := #FFD700
+        // Apply only if it advanced (ratchet up only); reset guard + label once.
+        if not na(_newTrail) and (na(_prevTrail) or _newTrail > _prevTrail + 0.001)
+            em_trailSL  := _newTrail
+            em_trailLow := na   // ERROR-3: ignore lows made before this trail level
+            if showTrailLabels and not na(_newTxt)
+                f_store(bar_index, em5_live_high, _newTxt, _newCol, false)
+        if isRetest and em_postHigh >= NB and em5_close > NB
+            em_baseLevel := NB
+
+    // ══ ERROR-3: POST-TRAIL LOW TRACKING ══
+    //   Only lows printed AFTER the trail was set/raised may trigger the
+    //   trail exit. On the tick the trail is set, em_trailLow is na, so it
+    //   seeds from the CURRENT live price — the entry wick (and any earlier
+    //   dip in that candle) can never satisfy the exit. From the next tick
+    //   onward it tracks the running low normally.
+    if not na(em_trailSL)
+        em_trailLow := na(em_trailLow) ? em5_live_close : math.min(em_trailLow, em5_live_low)
+
+    // ══ SYSTEM B — v2 ZONE TRAILING (Body Closing only) ══
+    //   Parallel overlay that trails on the TARGET ZONE above the entry.
+    //   Dormant until price crosses SB_Bottom; ratchets Bottom → Mid only.
+    //   SB_Base (= NB) target is delivered by the existing P3 take-profit,
+    //   so System B adds only the two tighter floors below NB.
+    if not isRetest and not na(NB)
+        float SB_Base   = NB
+        float SB_Bottom = SB_Base * (1 - zonePct / 100)
+        float SB_Mid    = (SB_Bottom + SB_Base) / 2.0
+        // arm at Bottom once price crosses above it (uses post-entry high)
+        // STATE ratchets intrabar (exit needs it live); label drawn on close.
+        if na(SB_trailSL) and em_postHigh >= SB_Bottom
+            SB_trailSL  := SB_Bottom
+            SB_trailLow := na
+            SB_stage    := 1
+        // raise to Mid (ratchet up only)
+        else if not na(SB_trailSL) and SB_trailSL < SB_Mid - 0.001 and em_postHigh >= SB_Mid
+            SB_trailSL  := SB_Mid
+            SB_trailLow := na
+            SB_stage    := 2
+        // ── Non-repainting label draw: only on a CONFIRMED 5m close, once
+        //    per stage. The label appears a candle later but never vanishes.
+        if showTrailLabels and new5mClose and SB_stage > SB_stageLabelled
+            if SB_stage == 1
+                f_store(bar_index, high, "◈ ZONE SET\n₹" + str.tostring(SB_Bottom, "#.##"), #18B6D6, false)
+            else if SB_stage == 2
+                f_store(bar_index, high, "◈ ZONE ↑\n₹" + str.tostring(SB_Mid, "#.##"), #18B6D6, false)
+            SB_stageLabelled := SB_stage
+
+    // ══ SYSTEM B POST-ARM LOW TRACKING (ERROR-3-style guard) ══
+    //   Seeds from live price on the arm/raise tick so the arming wick can
+    //   never instantly satisfy the SB exit; then tracks the running low.
+    if not na(SB_trailSL)
+        SB_trailLow := na(SB_trailLow) ? em5_live_close : math.min(SB_trailLow, em5_live_low)
+
+    // ══ EXIT PRIORITY (each checked in order; first match exits) ══
+    //   ERROR-5: every branch is gated by `not em_exitFired-this-candle` so
+    //   that once the FIRST exit commits, no later/rollback re-evaluation can
+    //   fire a different (worse) exit on the same candle.
+    bool _exitLocked = em_exitFired and em_exitTime == em5_time
+    // P1: MAX 10% hard cap — INTRABAR
+    if not _exitLocked and not na(MSL) and em5_live_low <= MSL
+        em_inTrade  := false
+        em_exitFired := true
+        em_exitTime  := em5_time
+        em_trailSL  := na
+        em_trailLow := na
+        SB_trailSL  := na
+        SB_trailLow := na
+        SB_stage    := 0
+        SB_stageLabelled := 0
+        em_postHigh := na
+        em_maxSL    := na
+        em_retestFired := false
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+        _xLblBar := bar_index
+        _xLblPx  := em5_live_low
+        _xLblTxt := "✗ MAX SL\n₹" + str.tostring(MSL, "#.##")
+        _xLblCol := #FF1744
+        _xLblUp  := true
+        f_store(bar_index, em5_live_low, _xLblTxt, #FF1744, true)
+
+    // P2: TRAIL EXIT — INTRABAR TOUCH of the current trailed level.
+    //     The exit fires the MOMENT post-trail price touches the trail
+    //     (em_trailLow <= em_trailSL), mid-candle, filling at em_trailSL.
+    //       • No new5mClose gate and no close test — this is a touch, not a
+    //         confirmed close.
+    //       • em_trailLow is the SOLE trigger, so its seed (em5_live_close on
+    //         the tick the trail is set) is what keeps the entry wick out of
+    //         the exit; do NOT change that seed to em5_live_low.
+    //     Checked BEFORE the Base SL so a raised trail (above Base) always
+    //     wins over a Base-close.
+    else if not _exitLocked and not na(em_trailSL) and not na(em_trailLow) and em_trailLow <= em_trailSL
+        float _exitSL = em_trailSL
+        em_inTrade  := false
+        em_exitFired := true
+        em_exitTime  := em5_time
+        em_trailExitFired := true       // ERROR-4: latch commit (non-repaint)
+        em_trailExitTime  := em5_time   // ERROR-4: bind commit to this 5m candle
+        em_trailSL  := na
+        em_trailLow := na
+        SB_trailSL  := na
+        SB_trailLow := na
+        SB_stage    := 0
+        SB_stageLabelled := 0
+        em_postHigh := na
+        em_maxSL    := na
+        em_retestFired := false
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+        _xLblBar := bar_index
+        _xLblPx  := _exitSL
+        _xLblTxt := "✦ TRAIL EXIT\n₹" + str.tostring(_exitSL, "#.##")
+        _xLblCol := #FF9800
+        _xLblUp  := true
+        f_store(bar_index, _exitSL, _xLblTxt, #FF9800, true)
+
+    // P2b: SYSTEM B ZONE-TRAIL EXIT — Body Closing only, INTRABAR TOUCH.
+    //      Fires when post-arm price falls back to the System B trail
+    //      (SB_trailLow <= SB_trailSL). Runs parallel to System A; the
+    //      ERROR-5 latch ensures whichever system fires first wins and no
+    //      later/worse exit overwrites it. SB_trailLow excludes the arming
+    //      wick so arming can't self-trigger.
+    else if not _exitLocked and not isRetest and not na(SB_trailSL) and not na(SB_trailLow) and SB_trailLow <= SB_trailSL
+        float _sbExit = SB_trailSL
+        em_inTrade  := false
+        em_exitFired := true
+        em_exitTime  := em5_time
+        em_trailExitFired := true       // reuse ERROR-4 latch (non-repaint)
+        em_trailExitTime  := em5_time
+        SB_trailSL  := na
+        SB_trailLow := na
+        SB_stage    := 0
+        SB_stageLabelled := 0
+        em_trailSL  := na
+        em_trailLow := na
+        em_postHigh := na
+        em_maxSL    := na
+        em_retestFired := false
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+        _xLblBar := bar_index
+        _xLblPx  := _sbExit
+        _xLblTxt := "◈ ZONE EXIT\n₹" + str.tostring(_sbExit, "#.##")
+        _xLblCol := #FF9800
+        _xLblUp  := true
+        f_store(bar_index, _sbExit, _xLblTxt, #FF9800, true)
+
+    // P3: BODY CLOSING take-profit — EXIT at NB (Retest never exits at NB)
+    else if not _exitLocked and not isRetest and not na(NB) and em5_live_high >= NB
+        em_inTrade  := false
+        em_exitFired := true
+        em_exitTime  := em5_time
+        em_trailSL  := na
+        em_trailLow := na
+        SB_trailSL  := na
+        SB_trailLow := na
+        SB_stage    := 0
+        SB_stageLabelled := 0
+        em_postHigh := na
+        em_maxSL    := na
+        em_retestFired := false
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+        _xLblBar := bar_index
+        _xLblPx  := em5_live_high
+        _xLblTxt := "◆ TARGET HIT\n₹" + str.tostring(NB, "#.##")
+        _xLblCol := #00E676
+        _xLblUp  := false
+        f_store(bar_index, em5_live_high, _xLblTxt, #00E676, false)
+
+    // P4: BASE LEVEL SL — CONFIRMED CLOSE below Base, ONLY while the trail
+    //     has not yet risen above Base (once trailing, the trail is the stop)
+    //     RETEST BASE-SL FIX: for Retest, the Base SL references the ORIGINAL
+    //     entry-zone Base (em_entryBase), NOT the drifting em_baseLevel that
+    //     re-anchors up to NB as the trade trails into higher zones. Body
+    //     Closing keeps using B (it never re-anchors, so behaviour is
+    //     unchanged for it).
+    else if not _exitLocked and new5mClose and em5_close < (isRetest ? em_entryBase : B) and (na(em_trailSL) or em_trailSL <= (isRetest ? em_entryBase : B))
+        em_inTrade  := false
+        em_exitFired := true
+        em_exitTime  := em5_time
+        em_trailSL  := na
+        em_trailLow := na
+        SB_trailSL  := na
+        SB_trailLow := na
+        SB_stage    := 0
+        SB_stageLabelled := 0
+        em_postHigh := na
+        em_maxSL    := na
+        em_retestFired := false
+        em_trig     := false
+        em_trigScen := 0
+        em_tB       := na
+        em_tZT      := na
+        em_tUM      := na
+        em_tLM      := na
+        em_tZB      := na
+        _xLblBar := bar_index
+        _xLblPx  := em5_low
+        _xLblTxt := "✗ SL HIT\nClose < Base ₹" + str.tostring(isRetest ? em_entryBase : B, "#.##")
+        _xLblCol := #FF1744
+        _xLblUp  := true
+        f_store(bar_index, em5_low, _xLblTxt, #FF1744, true)
+
+// ══════════════════════════════════════════════════════════════════
+// STEP 4 — LIVE TRADE GUIDE LINES
+// ══════════════════════════════════════════════════════════════════
+var line em_slLine    = na
+var line em_entryLine = na
+
+if em_inTrade and showSLLines
+    if not na(em_slLine)
+        line.delete(em_slLine)
+    if not na(em_entryLine)
+        line.delete(em_entryLine)
+    em_slLine    := line.new(bar_index - 1, em_baseLevel,  bar_index + 5, em_baseLevel,  color=#FF1744, width=1, style=line.style_dashed)
+    em_entryLine := line.new(bar_index - 1, em_entryPrice, bar_index + 5, em_entryPrice, color=#00E676, width=1, style=line.style_dotted)
+
+else if not em_inTrade
+    if not na(em_slLine)
+        line.delete(em_slLine)
+        em_slLine := na
+    if not na(em_entryLine)
+        line.delete(em_entryLine)
+        em_entryLine := na
+
+// ══════════════════════════════════════════════════════════════════
+// POSITION HELPER
+// ══════════════════════════════════════════════════════════════════
+f_pos(string s) =>
+    s == "Top Right"    ? position.top_right    :
+     s == "Top Left"     ? position.top_left     :
+     s == "Bottom Right" ? position.bottom_right :
+     s == "Bottom Left"  ? position.bottom_left  :
+     s == "Middle Left"  ? position.middle_left  :
+     position.middle_right
+
+// ══════════════════════════════════════════════════════════════════
+// COLORS
+// ══════════════════════════════════════════════════════════════════
+color cBgDark = color.new(#0A0E14,  5)
+color cBgRow1 = color.new(#0F1419, 10)
+color cBgRow2 = color.new(#161B22, 10)
+color cBgHdr  = color.new(#1F6FEB,  0)
+color cBorder = color.new(#30363D,  0)
+color cFrame  = color.new(#58A6FF, 20)
+color cText   = color.new(#E6EDF3,  0)
+color cDim    = color.new(#8B949E,  0)
+color cAccent = color.new(#58A6FF,  0)
+color cGold   = color.new(#FFD700,  0)
+color cGreen  = color.new(#00E676,  0)
+color cRed    = color.new(#FF1744,  0)
+
+// ══════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════
+var table dash = table.new(f_pos(dashPos), 2, 13,
+     bgcolor=cBgDark, border_color=cBorder, border_width=1,
+     frame_color=cFrame, frame_width=2)
+
+if barstate.islast and showDashboard
+    float chg  = close > 0 ? (close - close[1]) / close[1] * 100 : 0.0
+    float dSup = not na(nearSup) and close > 0 ? (close - nearSup) / close * 100 : na
+    float dRes = not na(nearRes) and close > 0 ? (nearRes - close) / close * 100 : na
+
+    table.cell(dash, 0, 0, "◆ NIFTY ULTRA-MASTER", bgcolor=cBgHdr, text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, "PRO v20",               bgcolor=cBgHdr, text_color=cGold,        text_size=size.normal)
+
+    table.cell(dash, 0, 1, "Symbol",    bgcolor=cBgRow1, text_color=cDim,  text_size=size.small)
+    table.cell(dash, 1, 1, syminfo.ticker, bgcolor=cBgRow1, text_color=cText, text_size=size.small)
+
+    table.cell(dash, 0, 2, "💰 Price",  bgcolor=cBgRow2, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 2, "₹" + str.tostring(close, "#.##") + "  " + str.tostring(chg, "+0.00;-0.00") + "%",
+         bgcolor=cBgRow2, text_color=chg >= 0 ? cGreen : cRed, text_size=size.small)
+
+    table.cell(dash, 0, 3, "🎯 Regime",     bgcolor=cBgRow1, text_color=cDim,        text_size=size.small)
+    table.cell(dash, 1, 3, regimeText,       bgcolor=cBgRow1, text_color=regimeColor,  text_size=size.small)
+
+    table.cell(dash, 0, 4, "🔴 Resistance", bgcolor=cBgRow2, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 4, na(nearRes) ? "—" : "₹" + str.tostring(nearRes, "#.##") + " (+" + str.tostring(dRes, "0.00") + "%)",
+         bgcolor=cBgRow2, text_color=cRed, text_size=size.small)
+
+    table.cell(dash, 0, 5, "🟢 Support",    bgcolor=cBgRow1, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 5, na(nearSup) ? "—" : "₹" + str.tostring(nearSup, "#.##") + " (-" + str.tostring(dSup, "0.00") + "%)",
+         bgcolor=cBgRow1, text_color=cGreen, text_size=size.small)
+
+    color  rc = rsiVal > 70 ? cRed : rsiVal < 30 ? cGreen : cGold
+    string rs = rsiVal > 70 ? "Overbought" : rsiVal < 30 ? "Oversold" : "Neutral"
+    table.cell(dash, 0, 6, "📈 RSI(14)",   bgcolor=cBgRow2, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(rsiVal, "0.0") + " " + rs, bgcolor=cBgRow2, text_color=rc, text_size=size.small)
+
+    color  ac  = adxVal > 25 ? cGreen : adxVal < 20 ? cGold : cText
+    string as2 = adxVal > 25 ? "Strong" : adxVal < 20 ? "Weak" : "Moderate"
+    table.cell(dash, 0, 7, "⚡ ADX",        bgcolor=cBgRow1, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(adxVal, "0.0") + " " + as2, bgcolor=cBgRow1, text_color=ac, text_size=size.small)
+
+    string atrSt = atrPct > 1.5 ? "High" : atrPct < 0.7 ? "Low" : "Normal"
+    color  atrC  = atrPct > 1.5 ? cRed : atrPct < 0.7 ? cDim : cAccent
+    table.cell(dash, 0, 8, "🌊 ATR%",       bgcolor=cBgRow2, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(atrPct, "0.00") + "% " + atrSt, bgcolor=cBgRow2, text_color=atrC, text_size=size.small)
+
+    table.cell(dash, 0, 9, "🔊 Volume",     bgcolor=cBgRow1, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 9, volOk ? "Above Avg" : "Below Avg", bgcolor=cBgRow1, text_color=volOk ? cGreen : cDim, text_size=size.small)
+
+    table.cell(dash, 0, 10, "🗺️ Levels",    bgcolor=cBgRow2, text_color=cDim,    text_size=size.small)
+    table.cell(dash, 1, 10, str.tostring(array.size(outP)) + " mapped", bgcolor=cBgRow2, text_color=cAccent, text_size=size.small)
+
+    string trSt = em_inTrade ? "🟢 ACTIVE — " + em_sub : em_trig ? "🟡 WATCHING..." : "⚪ No Signal"
+    color  trC  = em_inTrade ? cGreen : em_trig ? cGold : cDim
+    table.cell(dash, 0, 11, "📐 Entry Model", bgcolor=cBgRow1, text_color=cDim, text_size=size.small)
+    table.cell(dash, 1, 11, trSt,              bgcolor=cBgRow1, text_color=trC,  text_size=size.small)
+
+    string enStr = em_inTrade ? "₹" + str.tostring(em_entryPrice, "#.##") + "  SL: ₹" + str.tostring(em_baseLevel, "#.##") : "—"
+    table.cell(dash, 0, 12, "  Entry / SL", bgcolor=cBgRow2, text_color=cDim,                              text_size=size.small)
+    table.cell(dash, 1, 12, enStr,           bgcolor=cBgRow2, text_color=em_inTrade ? cText : cDim, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════
+// KEY LEVELS PANEL
+// ══════════════════════════════════════════════════════════════════
+var table lvlTbl = table.new(f_pos(levelsPos), 3, 8,
+     bgcolor=cBgDark, border_color=cBorder, border_width=1,
+     frame_color=color.new(#FFD700, 40), frame_width=2)
+
+if barstate.islast and showLevelsPanel and array.size(outP) > 0
+    table.cell(lvlTbl, 0, 0, "🗺️ KEY LEVELS", bgcolor=cBgHdr, text_color=color.white, text_size=size.normal)
+    table.cell(lvlTbl, 1, 0, "PRICE",          bgcolor=cBgHdr, text_color=color.white, text_size=size.normal)
+    table.cell(lvlTbl, 2, 0, "DIST",           bgcolor=cBgHdr, text_color=color.white, text_size=size.normal)
+
+    int totalLv = array.size(outP)
+    int maxRows = math.min(7, totalLv)
+    float[] dists = array.new_float(0)
+    for i = 0 to totalLv - 1
+        array.push(dists, math.abs(array.get(outP, i) - close))
+
+    int[] picked = array.new_int(0)
+    for r = 0 to maxRows - 1
+        float minD = na
+        int   minI = -1
+        for i = 0 to totalLv - 1
+            bool already = false
+            int ps = array.size(picked)
+            if ps > 0
+                for k = 0 to ps - 1
+                    if array.get(picked, k) == i
+                        already := true
+                        break
+            if not already
+                float d = array.get(dists, i)
+                if na(minD) or d < minD
+                    minD := d
+                    minI := i
+        if minI >= 0
+            array.push(picked, minI)
+
+    int pksz = array.size(picked)
+    if pksz > 1
+        for i = 0 to pksz - 2
+            for j = i + 1 to pksz - 1
+                int pi = array.get(picked, i)
+                int pj = array.get(picked, j)
+                if array.get(outP, pi) < array.get(outP, pj)
+                    array.set(picked, i, pj)
+                    array.set(picked, j, pi)
+
+    for r = 0 to array.size(picked) - 1
+        int    idx = array.get(picked, r)
+        float  p   = array.get(outP, idx)
+        int    typ = array.get(outT, idx)
+        string tag = array.get(outN, idx)
+        color  rbg = r % 2 == 0 ? cBgRow1 : cBgRow2
+        color  tc2 = typ==1 ? cRed : typ==2 ? cGreen : typ==3 ? #00E5FF : medianColor
+        string ico = typ==1 ? "◆" : typ==2 ? "▲" : typ==3 ? "◇" : "✦"
+        float  dp  = close > 0 ? (p - close) / close * 100 : 0.0
+        color  dc  = dp > 0 ? cRed : cGreen
+        table.cell(lvlTbl, 0, r + 1, ico + "  " + tag,              bgcolor=rbg, text_color=tc2,   text_size=size.small)
+        table.cell(lvlTbl, 1, r + 1, "₹" + str.tostring(p, "#.##"), bgcolor=rbg, text_color=cText, text_size=size.small)
+        table.cell(lvlTbl, 2, r + 1, str.tostring(dp, "+0.00;-0.00") + "%", bgcolor=rbg, text_color=dc, text_size=size.small)

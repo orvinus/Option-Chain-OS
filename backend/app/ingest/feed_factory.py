@@ -163,8 +163,67 @@ def _log_supervisor_death(task: asyncio.Task) -> None:
     notify("ws_supervisor_died", f"⚠️ ws-supervisor task died: {exc!r} — steward will rebuild.")
 
 
-async def build_feed_client() -> OptionFeedClient:
+async def _td_resubscribe_provider() -> tuple[list, float | None]:
+    """TrueData counterpart of ``_resubscribe_provider``.
+
+    Same contract and the same never-publish-an-empty-universe rule; only the
+    universe SOURCE differs. Kept separate rather than branching inside the XTS
+    provider so neither vendor's failure modes can leak into the other's path.
+    """
+    from ..market.scripmaster_td import resolve_td_option_universe
+
     rt = get_runtime()
+    spot = rt.latest_spot or await _initial_spot()
+    if spot is None:
+        log.warning("td_resubscribe.no_spot", symbol=rt.active_symbol)
+        return [], None
+    tokens, expiries = await resolve_td_option_universe(spot=spot, symbol=rt.active_symbol)
+    if not tokens:
+        log.warning(
+            "td_resubscribe.empty_universe_kept_previous",
+            symbol=rt.active_symbol, spot=spot, previous_tokens=len(rt.tokens),
+        )
+        return [], None
+    rt.tokens = tokens
+    rt.expiries = expiries
+    rt.latest_spot = spot
+    return tokens, spot
+
+
+async def build_feed_client():
+    """THE construction seam — where FEED_VENDOR selects the whole live stack.
+
+    Every path that stands up a feed goes through here (startup, the login
+    endpoint's bootstrap, and the steward's rebuild), so one branch covers all
+    three and rollback really is a config flip plus a restart.
+    """
+    rt = get_runtime()
+    if settings.feed_vendor == "td_relay":
+        # Follower: ticks come from another backend's /ws/td-relay. No vendor
+        # login happens in this process at all.
+        from .td_relay_feed import TdRelayFeedClient
+
+        return TdRelayFeedClient(
+            rt.tick_queue,
+            _td_resubscribe_provider,
+            active_symbol=rt.active_symbol,
+        )
+    if settings.feed_vendor == "truedata":
+        from .truedata_feed import TrueDataFeedClient
+
+        out_queue = rt.tick_queue
+        if settings.td_relay_enabled:
+            # Owner: mirror every tick to relay followers. The local queue is
+            # still written first, so the owner's own pipeline is unchanged.
+            from ..ws.td_relay import TeeQueue, get_relay_hub
+
+            out_queue = TeeQueue(rt.tick_queue, get_relay_hub())
+            log.info("ingestion.td_relay_owner_enabled")
+        return TrueDataFeedClient(
+            out_queue,
+            _td_resubscribe_provider,
+            active_symbol=rt.active_symbol,
+        )
     index_token, index_segment = await resolve_index_ref()
     return OptionFeedClient(
         rt.tick_queue,
@@ -175,12 +234,60 @@ async def build_feed_client() -> OptionFeedClient:
     )
 
 
-async def start_feed() -> OptionFeedClient:
+async def start_shadow_feed():
+    """Run TrueData ALONGSIDE the live feed, into a separate store.
+
+    The shadow pipeline is deliberately isolated at every point a live consumer
+    could observe it:
+
+      * its own queue and aggregator, writing td_shadow_snapshots;
+      * published on rt.shadow_feed_client, NEVER rt.feed_client — /api/health,
+        the spot refresher and the steward all read the latter;
+      * a flush hook that does NOT advance rt.last_flush_at / last_ws_flush_at
+        and does NOT call hub.publish_flush.
+
+    That last point is the load-bearing one. If shadow rows advanced the WS
+    freshness timestamp, a completely dead XTS socket would look healthy to the
+    steward and the recovery ladder would never fire — the shadow run would
+    manufacture the exact silent outage it exists to prevent.
+    """
+    from ..market.scripmaster_td import resolve_td_option_universe  # noqa: F401
+    from .aggregator import SHADOW_TABLE
+    from .truedata_feed import TrueDataFeedClient
+
+    rt = get_runtime()
+    if rt.shadow_feed_client is not None:
+        return rt.shadow_feed_client
+
+    async def _shadow_flush(bucket: datetime, rows: int, ws_rows: int) -> None:
+        rt.shadow_last_flush_at = bucket
+        rt.shadow_last_flush_rows = rows
+
+    if rt.shadow_aggregator is None:
+        agg = MinuteAggregator(
+            rt.shadow_tick_queue, on_flush=_shadow_flush, table=SHADOW_TABLE
+        )
+        await agg.start()
+        rt.shadow_aggregator = agg
+
+    feed = TrueDataFeedClient(
+        rt.shadow_tick_queue,
+        _td_resubscribe_provider,
+        active_symbol=rt.active_symbol,
+        shadow=True,
+    )
+    await feed.start()
+    rt.shadow_feed_client = feed
+    log.warning("shadow.started", table=SHADOW_TABLE, symbol=rt.active_symbol)
+    return feed
+
+
+async def start_feed():
     """Build + start a feed client, publish it on the runtime, watch its task."""
     rt = get_runtime()
     feed = await build_feed_client()
     await feed.start()
-    if feed._supervisor_task is not None:
+    if getattr(feed, "_supervisor_task", None) is not None:
         feed._supervisor_task.add_done_callback(_log_supervisor_death)
     rt.feed_client = feed
     return feed
@@ -240,6 +347,28 @@ def _make_on_flush():
     engine = get_oi_engine()
     hub = get_hub()
 
+    # Hub publishing is DECOUPLED from the flush path: publish_flush does a
+    # full chain recompute per WS subscriber (measured 20–60 ms each,
+    # serialised on the engine lock), and awaiting it here made the ingest
+    # flush cadence — and therefore the freshness timestamps written below —
+    # hostage to how many dashboard tabs are open. One worker task at a time;
+    # intermediate buckets coalesce to the newest (subscribers only ever want
+    # the latest state, and at 1 s buckets skipping one is invisible).
+    _pub: dict = {"task": None, "pending": None}
+
+    async def _publish_worker() -> None:
+        while True:
+            pending = _pub["pending"]
+            _pub["pending"] = None
+            if pending is None:
+                break
+            b, r = pending
+            try:
+                await hub.publish_flush(b, r)
+            except Exception as e:
+                log.warning("hub.publish_failed", error=str(e)[:160])
+        _pub["task"] = None
+
     async def on_flush(bucket: datetime, rows: int, ws_rows: int) -> None:
         rt.last_flush_at = bucket
         rt.last_flush_rows = rows
@@ -248,7 +377,10 @@ def _make_on_flush():
             # advance last_flush_at only.
             rt.last_ws_flush_at = bucket
         engine.on_aggregator_flush(bucket)
-        await hub.publish_flush(bucket, rows)
+        _pub["pending"] = (bucket, rows)
+        task = _pub["task"]
+        if task is None or task.done():
+            _pub["task"] = asyncio.create_task(_publish_worker())
 
     return on_flush
 
@@ -274,7 +406,19 @@ async def ensure_live_ingestion(fresh_token_minted: bool) -> None:
     if rt.feed_client is None:
         await start_feed()
         spawn_supervised(_spot_refresher, "spot-refresher")
-        log.info("ingestion.feed_started")
+        log.info("ingestion.feed_started", vendor=settings.feed_vendor)
     elif fresh_token_minted:
         log.info("ingestion.reconnecting_feed_with_fresh_token")
         rt.feed_client.nudge_reconnect()
+
+    # The shadow feed is independent of which vendor is live: it is the
+    # parallel-validation mode, so it can run beside XTS (the normal case) or
+    # beside TrueData itself (the post-cutover insurance run, where XTS becomes
+    # the shadow instead).
+    if settings.truedata_shadow_enabled and rt.shadow_feed_client is None:
+        try:
+            await start_shadow_feed()
+        except Exception as e:
+            # A shadow failure must NEVER take the live feed with it — the whole
+            # point of the shadow run is that it is unobservable to production.
+            log.error("shadow.start_failed", error=str(e))

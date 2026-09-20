@@ -17,6 +17,8 @@ import type {
   Timeframe,
 } from "../types";
 
+import { trackRequest } from "./inflight";
+
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 
 /** Prefer FastAPI `detail` field so login/API errors are readable in the UI. */
@@ -47,12 +49,16 @@ async function getJSON<T>(path: string, params?: Record<string, string | undefin
       if (v != null) url.searchParams.set(k, v);
     }
   }
-  const res = await fetch(url.toString(), { credentials: "same-origin" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status} ${res.statusText} :: ${formatErrorBody(res, text)}`);
-  }
-  return (await res.json()) as T;
+  // Counted so the app-wide loading indicator covers every dashboard read
+  // without each caller having to opt in.
+  return trackRequest(async () => {
+    const res = await fetch(url.toString(), { credentials: "same-origin" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status} ${res.statusText} :: ${formatErrorBody(res, text)}`);
+    }
+    return (await res.json()) as T;
+  });
 }
 
 type PostOpts = { timeoutMs?: number };

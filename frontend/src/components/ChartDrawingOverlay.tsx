@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import type { DrawingAnchor } from "./charts/drawingAnchors";
 
 /**
  * Transparent annotation layer rendered on top of a chart. Provides a small
@@ -7,10 +8,13 @@ import { createPortal } from "react-dom";
  * undo / redo and clear-all. Self-contained: each instance keeps its own
  * annotation history, so the two OI charts annotate independently.
  *
- * Coordinates are stored normalised (0..1) so annotations survive chart resize
- * and the 20s data poll (the overlay is a sibling of the ECharts canvas and is
- * never re-created by it). When the active tool is "cursor" the layer is fully
- * click-through, so the chart's own tooltip / hover still works.
+ * Storage: with an `anchor`, shapes are stored in DATA space (time, price) and
+ * re-projected whenever the chart's view changes, so a line drawn at 1.80
+ * stays at 1.80 through pan, zoom, rescale, reload and bucket changes. Without
+ * one (or for shapes saved before anchors existed) coordinates are normalised
+ * (0..1) to the canvas and stay put on screen. When the active tool is
+ * "cursor" the layer is fully click-through, so the chart's own tooltip /
+ * hover still works.
  */
 
 type Tool = "cursor" | "hline" | "vline" | "trend" | "ray" | "rect" | "free" | "eraser";
@@ -18,13 +22,47 @@ type Tool = "cursor" | "hline" | "vline" | "trend" | "ray" | "rect" | "free" | "
 /** Two-point tools store both anchors; single-axis tools store one coordinate. */
 type TwoPoint = { x1: number; y1: number; x2: number; y2: number };
 
-type Shape =
-  | { id: string; kind: "hline"; y: number }
-  | { id: string; kind: "vline"; x: number }
-  | ({ id: string; kind: "trend" } & TwoPoint)
-  | ({ id: string; kind: "ray" } & TwoPoint)
-  | ({ id: string; kind: "rect" } & TwoPoint)
-  | { id: string; kind: "free"; pts: { x: number; y: number }[] };
+/** `space: "data"` = x is anchor time, y is price; absent = canvas fractions. */
+type Space = { space?: "data" };
+
+type Shape = Space &
+  (
+    | { id: string; kind: "hline"; y: number }
+    | { id: string; kind: "vline"; x: number }
+    | ({ id: string; kind: "trend" } & TwoPoint)
+    | ({ id: string; kind: "ray" } & TwoPoint)
+    | ({ id: string; kind: "rect" } & TwoPoint)
+    | { id: string; kind: "free"; pts: { x: number; y: number }[] }
+  );
+
+/** Map every coordinate of a shape through (x, y) converters; null if any fails. */
+function mapShape(
+  s: Shape,
+  fx: (x: number) => number | null,
+  fy: (y: number) => number | null,
+): Shape | null {
+  if (s.kind === "hline") {
+    const y = fy(s.y);
+    return y == null ? null : { ...s, y };
+  }
+  if (s.kind === "vline") {
+    const x = fx(s.x);
+    return x == null ? null : { ...s, x };
+  }
+  if (s.kind === "free") {
+    const pts: { x: number; y: number }[] = [];
+    for (const q of s.pts) {
+      const x = fx(q.x);
+      const y = fy(q.y);
+      if (x == null || y == null) return null;
+      pts.push({ x, y });
+    }
+    return { ...s, pts };
+  }
+  const x1 = fx(s.x1), y1 = fy(s.y1), x2 = fx(s.x2), y2 = fy(s.y2);
+  if (x1 == null || y1 == null || x2 == null || y2 == null) return null;
+  return { ...s, x1, y1, x2, y2 };
+}
 
 let _idSeq = 0;
 const nextId = () => `s${++_idSeq}`;
@@ -160,13 +198,19 @@ interface Props {
    * it never overlaps chart data. The drawing canvas stays over the chart.
    */
   toolbarContainer?: HTMLElement | null;
+  /** Pixel <-> (time, price) converter; when given, new drawings stick to the data. */
+  anchor?: DrawingAnchor;
 }
 
-export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }: Props) {
+export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer, anchor }: Props) {
+  const anchorRef = useRef(anchor);
+  anchorRef.current = anchor;
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorTagRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
 
   const [tool, setTool] = useState<Tool>("cursor");
   const toolRef = useRef(tool);
@@ -212,6 +256,28 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
   const previewRef = useRef<Shape | null>(null);
   const eraseRemovedRef = useRef<Set<string> | null>(null);
 
+  // Stored shape -> canvas-fraction shape for drawing and hit-testing. Data-space
+  // shapes that cannot be placed right now (chart not ready) are skipped.
+  const toScreen = (s: Shape, w: number, h: number): Shape | null => {
+    if (s.space !== "data") return s;
+    const a = anchorRef.current;
+    if (!a || w <= 0 || h <= 0) return null;
+    return mapShape(
+      s,
+      (t) => { const x = a.timeToX(t); return x == null ? null : x / w; },
+      (v) => { const y = a.priceToY(v); return y == null ? null : y / h; },
+    );
+  };
+  // A freshly drawn canvas-fraction shape -> what gets stored: data space when
+  // the anchor can place every point, otherwise the screen-fraction form.
+  const toStored = (s: Shape): Shape => {
+    const a = anchorRef.current;
+    const { w, h } = sizeRef.current;
+    if (!a || w <= 0 || h <= 0) return s;
+    const d = mapShape(s, (x) => a.xToTime(x * w), (y) => a.yToPrice(y * h));
+    return d ? { ...d, space: "data" } : s;
+  };
+
   const redraw = () => {
     const cv = canvasRef.current;
     if (!cv) return;
@@ -221,9 +287,10 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.w, size.h);
     const removed = eraseRemovedRef.current;
-    for (const s of shapesRef.current) {
-      if (removed && removed.has(s.id)) continue;
-      drawShape(ctx, s, size.w, size.h);
+    for (const stored of shapesRef.current) {
+      if (removed && removed.has(stored.id)) continue;
+      const s = toScreen(stored, size.w, size.h);
+      if (s) drawShape(ctx, s, size.w, size.h);
     }
     if (draftPtsRef.current && draftPtsRef.current.length > 1) {
       drawShape(ctx, { id: "_d", kind: "free", pts: draftPtsRef.current }, size.w, size.h, true);
@@ -257,6 +324,26 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
   // Redraw whenever the committed annotation set changes (commit/undo/redo/clear).
   useEffect(() => { redrawRef.current(); }, [hist]);
 
+  // Data-space shapes follow the chart: re-project whenever its view changes
+  // (pan, zoom, autoscale, new data). One cheap fingerprint check per frame,
+  // and only while such shapes exist.
+  const hasDataShapes = anchor != null && shapes.some((s) => s.space === "data");
+  useEffect(() => {
+    if (!hasDataShapes) return;
+    let raf = 0;
+    let last: string | null = null;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const key = `${anchorRef.current?.viewKey() ?? ""}|${sizeRef.current.w}x${sizeRef.current.h}`;
+      if (key !== last) {
+        last = key;
+        redrawRef.current();
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [hasDataShapes]);
+
   // Drop the cursor readout when leaving draw mode.
   useEffect(() => { if (tool === "cursor") hideCursorLabel(); }, [tool]);
 
@@ -273,8 +360,10 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
     if (!removed) return;
     const { w, h } = size;
     const PX = p.x * w, PY = p.y * h;
-    for (const s of shapesRef.current) {
-      if (removed.has(s.id)) continue;
+    for (const stored of shapesRef.current) {
+      if (removed.has(stored.id)) continue;
+      const s = toScreen(stored, w, h);
+      if (!s) continue;
       let hit = false;
       if (s.kind === "hline") hit = Math.abs(s.y * h - PY) <= HIT_TOL_PX;
       else if (s.kind === "vline") hit = Math.abs(s.x * w - PX) <= HIT_TOL_PX;
@@ -356,16 +445,16 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
     if (t === "free") {
       const pts = draftPtsRef.current;
       draftPtsRef.current = null;
-      if (pts && pts.length > 1) commit([...shapesRef.current, { id: nextId(), kind: "free", pts }]);
+      if (pts && pts.length > 1) commit([...shapesRef.current, toStored({ id: nextId(), kind: "free", pts })]);
       else redrawRef.current();
     } else if (t === "hline") {
       const pv = previewRef.current;
       previewRef.current = null;
-      if (pv && pv.kind === "hline") commit([...shapesRef.current, { id: nextId(), kind: "hline", y: pv.y }]);
+      if (pv && pv.kind === "hline") commit([...shapesRef.current, toStored({ id: nextId(), kind: "hline", y: pv.y })]);
     } else if (t === "vline") {
       const pv = previewRef.current;
       previewRef.current = null;
-      if (pv && pv.kind === "vline") commit([...shapesRef.current, { id: nextId(), kind: "vline", x: pv.x }]);
+      if (pv && pv.kind === "vline") commit([...shapesRef.current, toStored({ id: nextId(), kind: "vline", x: pv.x })]);
     } else if (t === "trend" || t === "ray" || t === "rect") {
       const pv = previewRef.current;
       previewRef.current = null;
@@ -374,7 +463,7 @@ export function ChartDrawingOverlay({ describeAt, persistKey, toolbarContainer }
         if (Math.hypot((pv.x2 - pv.x1) * size.w, (pv.y2 - pv.y1) * size.h) > 3) {
           commit([
             ...shapesRef.current,
-            { id: nextId(), kind: pv.kind, x1: pv.x1, y1: pv.y1, x2: pv.x2, y2: pv.y2 } as Shape,
+            toStored({ id: nextId(), kind: pv.kind, x1: pv.x1, y1: pv.y1, x2: pv.x2, y2: pv.y2 } as Shape),
           ]);
         } else redrawRef.current();
       }

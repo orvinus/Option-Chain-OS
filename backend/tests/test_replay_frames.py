@@ -190,6 +190,90 @@ async def test_strike_missing_from_the_open_does_not_spike() -> None:
     assert frames[-1].total_put_oi_change == 100, frames[-1].total_put_oi_change
 
 
+# --------------------------------------------------------------------------- 4
+async def test_gapfill_finish_includes_the_end_instant() -> None:
+    """The bucket holding `end` must be inside the gapfill range (2026-09-14).
+
+    gapfill's finish bound is EXCLUSIVE but the row filter is `ts <= :end`. With
+    `end` on a bucket boundary, rows stamped exactly at `end` opened a bucket outside
+    the range: no locf, only the legs that ticked at that instant. On 2026-09-11 the
+    15:40 frame lost 3 of 21 strikes and zeroed 6 legs, so the Replay ratio chart
+    ended at PCR -3.25 instead of 4.34.
+    """
+    _, seen = await _run_fetch()
+    sql = str(replay_mod._REPLAY_SERIES_SQL)
+    assert "time_bucket_gapfill((:step_iv)::interval, ts, :start, :gap_end)" in sql, (
+        "the gapfill finish must be :gap_end (end + 1us), not :end"
+    )
+    assert "ts <= :end" in sql, "the row filter stays inclusive of the end instant"
+    prm = seen["series_params"]
+    assert prm["gap_end"] - prm["end"] == timedelta(microseconds=1), (prm["end"], prm["gap_end"])
+
+
+# --------------------------------------------------------------------------- 5
+async def test_leg_that_ticks_late_is_seeded_not_zeroed() -> None:
+    """A leg with no tick yet takes its first in-window value, never 0 (2026-09-14).
+
+    A second strike's CE trades from the open but its PE first trades in the LAST
+    bucket, and a third strike has no tick at all until 09:17. Before they trade
+    they must count at their first observed OI with zero change, so the frame
+    totals keep a constant membership instead of jumping when they appear.
+    """
+    late = STRIKE + 50
+    later = STRIKE + 100
+    rows = list(_SERIES_ROWS) + [
+        {"bucket": _ist(9, 15), "strike": late, "option_type": "CE", "oi": 30, "underlying": 24600.0, "last_ts": _ist(9, 15, 40)},
+        {"bucket": _ist(9, 16), "strike": late, "option_type": "CE", "oi": 30, "underlying": 24610.0, "last_ts": _ist(9, 15, 40)},
+        {"bucket": _ist(9, 17), "strike": late, "option_type": "CE", "oi": 35, "underlying": 24620.0, "last_ts": _ist(9, 17, 10)},
+        {"bucket": _ist(9, 17), "strike": late, "option_type": "PE", "oi": 900, "underlying": 24620.0, "last_ts": _ist(9, 17, 20)},
+        {"bucket": _ist(9, 17), "strike": later, "option_type": "CE", "oi": 70, "underlying": 24620.0, "last_ts": _ist(9, 17, 25)},
+        {"bucket": _ist(9, 17), "strike": later, "option_type": "PE", "oi": 80, "underlying": 24620.0, "last_ts": _ist(9, 17, 25)},
+    ]
+    base = list(_BASE_ROWS) + [
+        {"strike": late, "option_type": "CE", "oi": 30, "underlying": 24600.0, "ts": _ist(9, 15, 40)},
+        {"strike": late, "option_type": "PE", "oi": 900, "underlying": 24620.0, "ts": _ist(9, 17, 20)},
+        {"strike": later, "option_type": "CE", "oi": 70, "underlying": 24620.0, "ts": _ist(9, 17, 25)},
+        {"strike": later, "option_type": "PE", "oi": 80, "underlying": 24620.0, "ts": _ist(9, 17, 25)},
+    ]
+
+    class _LateSession(_FakeSession):
+        async def execute(self, sql, params):
+            if sql is replay_mod._REPLAY_SERIES_SQL:
+                return _FakeResult(rows)
+            if sql is replay_mod._BASELINE_AT_OR_AFTER_SQL:
+                return _FakeResult(base)
+            return await super().execute(sql, params)
+
+    seen: dict = {}
+    orig = replay_mod.AsyncSessionLocal
+    replay_mod.AsyncSessionLocal = lambda: _LateSession(seen)  # type: ignore[assignment]
+    try:
+        frames = await replay_mod.fetch_replay(EXPIRY, _ist(9, 15), _ist(9, 18), STEP, symbol=SYMBOL)
+    finally:
+        replay_mod.AsyncSessionLocal = orig  # type: ignore[assignment]
+
+    by = {r.strike: r for r in frames[0].rows}
+    assert set(by) == {STRIKE, late, later}, (
+        f"every strike that trades in the window is in EVERY frame; got {sorted(by)}"
+    )
+    assert by[late].put_oi == 900 and by[late].put_oi_change == 0, (
+        f"PE before its first tick must read its first value (900) with 0 change, "
+        f"not 0 OI and -900 change; got {by[late].put_oi} / {by[late].put_oi_change}"
+    )
+    assert (by[later].call_oi, by[later].put_oi) == (70, 80), (by[later].call_oi, by[later].put_oi)
+    assert (by[later].call_oi_change, by[later].put_oi_change) == (0, 0)
+
+    # Constant membership: totals move only by real OI changes, never by a leg arriving.
+    tot = [(f.total_call_oi, f.total_put_oi) for f in frames]
+    assert tot == [
+        (150 + 30 + 70, 400 + 900 + 80),
+        (160 + 30 + 70, 450 + 900 + 80),
+        (170 + 35 + 70, 500 + 900 + 80),
+    ], tot
+    assert frames[0].total_put_oi_change == 200, frames[0].total_put_oi_change
+    assert frames[-1].total_call_oi_change == 75, frames[-1].total_call_oi_change
+
+
 # --------------------------------------------------------------------------- runner
 async def _main() -> int:
     tests = [

@@ -1,0 +1,21 @@
+[Unit]
+Description=TrueData archive top-up — post-close, retry, and a next-morning safety net
+
+[Timer]
+# Three firings, because ONE is not enough and the failure is invisible:
+#   17:35 primary — comfortably after the 15:40 F&O close.
+#   21:00 retry   — covers a vendor that had not published the day's bars yet.
+#   06:30 next-morning safety net — this is the run that actually guarantees
+#         "yesterday is backtestable this morning" if both evening runs failed.
+# The script short-circuits to a near-free no-op when the archive is already
+# current, so the extra firings cost nothing on a healthy day.
+OnCalendar=Mon..Fri 17:35 Asia/Kolkata
+OnCalendar=Mon..Fri 21:00 Asia/Kolkata
+OnCalendar=Tue..Sat 06:30 Asia/Kolkata
+# A box that was asleep/rebooting through the slot still catches up on boot —
+# the property that makes the guarantee survive a restart.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

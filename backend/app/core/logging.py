@@ -30,6 +30,14 @@ def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
         stream=sys.stdout,
         level=getattr(logging, level.upper(), logging.INFO),
     )
+    # SECURITY: httpx logs every request at INFO as "HTTP Request: GET <full url>".
+    # Several TrueData hosts take credentials as QUERY PARAMS, so that line put
+    # the live vendor password in plaintext into the container logs (observed
+    # 2026-08-21). Our own call sites scrub their URLs; httpx's logger does not,
+    # and it sits outside structlog entirely. Silencing it also removes the
+    # per-contract request spam that buries real feed events during a backfill.
+    for _noisy in ("httpx", "httpcore", "websockets.client"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OI Structure Engine — HH/HL/LH/LL Range Breakout + Red Candle Rule</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#111823; --panel-2:#161f2c; --panel-3:#1c2636; --border:#232d3d;
+    --text:#e6ebf2; --text-dim:#8a94a6;
+    --blue:#3b82f6; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --purple:#a855f7;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:13px;}
+  .wrap{max-width:1360px;margin:0 auto;padding:20px 18px 60px 18px;}
+  h1{font-size:18px;margin:0 0 4px 0;}
+  .sub{color:var(--text-dim);font-size:12px;margin-bottom:16px;}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+  .card h3{margin:0 0 2px 0;font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px;}
+  .card h3 .hint{font-weight:400;color:var(--text-dim);font-size:11px;}
+  .divider{height:1px;background:var(--border);margin:10px 0;}
+  .info{font-size:11.5px;color:#8fb4ff;background:#0f1524;border:1px solid #232c45;border-radius:6px;padding:8px 12px;margin-bottom:14px;line-height:1.55;}
+  .calc-note{font-size:10.5px;color:var(--text-dim);background:var(--panel-2);border:1px solid var(--border);border-radius:6px;padding:7px 10px;line-height:1.55;}
+  code.i{background:var(--panel-3);padding:1px 5px;border-radius:4px;font-size:11px;color:#38bdf8;}
+
+  .header-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:12px;}
+  .header-bar .field{display:flex;flex-direction:column;gap:4px;}
+  .header-bar .field span{font-size:10px;color:var(--text-dim);}
+  .header-bar select,.header-bar input{background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;}
+  .asof{margin-left:auto;color:var(--text-dim);font-size:11px;}
+
+  .quad{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+  .chart-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
+  .chart-card .chead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
+  .chart-card .ctitle{font-weight:700;font-size:12.5px;display:flex;align-items:center;gap:6px;}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;}
+  .chart-card svg{width:100%;height:220px;display:block;}
+  .smc-toggle{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text-dim);}
+  .kswitch{width:30px;height:16px;border-radius:20px;position:relative;cursor:pointer;flex:0 0 auto;}
+  .kswitch.on{background:var(--green);} .kswitch.off{background:#3a4250;}
+  .kswitch::after{content:"";width:12px;height:12px;background:#fff;border-radius:50%;position:absolute;top:2px;transition:.15s;}
+  .kswitch.on::after{right:2px;} .kswitch.off::after{left:2px;}
+  .fixed-rule-note{font-size:10.5px;color:var(--text-dim);margin-top:6px;}
+  .toggle-line{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+  .toggle-line .name{font-weight:700;font-size:12.5px;}
+  .toggle-line .desc{font-size:10.5px;color:var(--text-dim);margin-top:3px;}
+
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .fg span{display:block;font-size:10.5px;color:var(--text-dim);margin-bottom:5px;}
+  .fg{margin-bottom:10px;}
+  .fg input,.fg select{width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 9px;font-size:12px;}
+
+  table.mtx{width:100%;border-collapse:collapse;font-size:11.5px;}
+  table.mtx th{text-align:left;color:var(--text-dim);font-size:10px;text-transform:uppercase;padding:0 8px 8px 0;}
+  table.mtx td{padding:6px 8px 6px 0;border-top:1px solid var(--border);}
+  table.mtx select{background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 6px;font-size:11px;}
+
+  .badge{font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:10px;}
+  .badge.call{background:#0f1f14;color:var(--green);}
+  .badge.put{background:#2a1414;color:var(--red);}
+  .badge.ignore{background:#1a2230;color:var(--text-dim);}
+  .badge.notrade{background:#241c0c;color:var(--amber);}
+  .badge.lg{font-size:16px;padding:8px 20px;}
+
+  .score-bar{height:8px;border-radius:4px;background:var(--panel-3);overflow:hidden;display:flex;}
+  .score-bar .call{background:var(--green);}
+  .score-bar .put{background:var(--red);}
+
+  .btn{background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:9px 16px;font-size:12.5px;font-weight:600;cursor:pointer;}
+  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff;}
+  .btn.ghost{background:transparent;}
+  .btn-row{display:flex;gap:10px;flex-wrap:wrap;}
+
+  pre.payload{background:#080b10;border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:11px;color:#8fe0a0;overflow-x:auto;max-height:320px;}
+
+  details{background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:8px;}
+  summary{cursor:pointer;font-weight:700;font-size:12.5px;}
+  details p{font-size:11.5px;line-height:1.6;color:var(--text-dim);}
+  details b{color:var(--text);}
+
+  .contrib-row{display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px solid #1a212b;}
+  .contrib-row .pts{font-weight:700;}
+
+  .saved-toast{position:fixed;bottom:20px;right:20px;background:#0f1f14;border:1px solid #1e4029;color:var(--green);padding:11px 18px;border-radius:8px;font-size:12.5px;font-weight:700;z-index:500;box-shadow:0 4px 20px rgba(0,0,0,.5);opacity:0;transform:translateY(10px);transition:.2s;pointer-events:none;}
+  .saved-toast.show{opacity:1;transform:translateY(0);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>OI Structure Engine — Range Breakout (1m) + Red Candle (5m)</h1>
+  <div class="sub">Further simplified per your last note: CHoCH removed entirely, only HH/HL/LH/LL and their range/breakout remain on 1 Min; 5 Min is now a single fixed red-candle rule</div>
+
+  <div class="header-bar">
+    <div class="field"><span>SYMBOL</span><select><option selected>NIFTY 50</option><option>BANK NIFTY</option></select></div>
+    <div class="field"><span>DATE</span><input type="text" value="11-08-2026"></div>
+    <div class="field"><span>&nbsp;</span><select><option selected>Live</option><option>Historical</option></select></div>
+    <div class="field"><span>EXPIRY</span><select><option selected>11 Aug 2026</option></select></div>
+    <div class="field"><span>STRIKES ATM &plusmn;</span><select><option>5</option><option selected>10</option><option>All</option></select></div>
+    <div class="asof" id="asof">as of 14:22:00 IST</div>
+  </div>
+
+  <div class="info">ℹ️ <b>What changed from the last version:</b> CHoCH is gone — there's no more trend-tracking or reversal-vs-continuation logic at all. <b>1 Min</b> now does exactly one thing: track HH/HL/LH/LL, use the latest swing high/low as the range zone, and flag when price breaks above or below that zone. <b>5 Min</b> is no longer part of the structure/matrix system at all — it's a single fixed rule: if the last fully closed 5m candle is <b>red</b>, that candle's own chart (Call or Put) is the side the signal goes to. Green candles do nothing.</div>
+
+  <div class="card" id="killSwitchCard" style="border-color:var(--amber);">
+    <h3>⛔ Engine Master Switches <span class="hint">run on either timeframe alone, or both together</span></h3>
+    <div class="divider"></div>
+    <div class="grid2">
+      <div class="toggle-line" style="border:none;padding:6px 0;">
+        <div>
+          <div class="name" style="font-size:12.5px;">1-Minute Structure Engine</div>
+          <div class="desc" id="oneMinStatus">ON — HH/HL/LH/LL and Range Breakout are contributing to the signal</div>
+        </div>
+        <div class="kswitch on" id="kill-1m" onclick="toggleEngine('1m')"></div>
+      </div>
+      <div class="toggle-line" style="border:none;padding:6px 0;">
+        <div>
+          <div class="name" style="font-size:12.5px;">5-Minute Red Candle Rule</div>
+          <div class="desc" id="fiveMinStatus">ON — the fixed red-candle rule is contributing to the signal</div>
+        </div>
+        <div class="kswitch on" id="kill-5m" onclick="toggleEngine('5m')"></div>
+      </div>
+    </div>
+    <div class="calc-note" id="killSwitchNote" style="margin-top:8px;margin-bottom:0;">Both are ON — the Final Bias below blends 1-Minute structure points with the 5-Minute red-candle rule, exactly as scored in Section 8 of the specification.</div>
+  </div>
+
+  <div class="quad">
+    <div class="chart-card">
+      <div class="chead">
+        <div class="ctitle"><span class="dot" style="background:var(--red);"></span>Call OI Change · 5 Min</div>
+      </div>
+      <svg id="chart-call5" viewBox="0 0 600 220"></svg>
+      <div class="fixed-rule-note" id="call5rule">Last candle: —</div>
+    </div>
+    <div class="chart-card">
+      <div class="chead">
+        <div class="ctitle"><span class="dot" style="background:#38bdf8;"></span>Put OI Change · 5 Min</div>
+      </div>
+      <svg id="chart-put5" viewBox="0 0 600 220"></svg>
+      <div class="fixed-rule-note" id="put5rule">Last candle: —</div>
+    </div>
+    <div class="chart-card">
+      <div class="chead">
+        <div class="ctitle"><span class="dot" style="background:#ff8a8a;"></span>Call OI Change · 1 Min <span class="hint" id="callSwingCount1"></span></div>
+        <div class="smc-toggle">Structure <div class="kswitch on" id="tgl-call1" onclick="toggleSMC('call1')"></div></div>
+      </div>
+      <svg id="chart-call1" viewBox="0 0 600 220"></svg>
+    </div>
+    <div class="chart-card">
+      <div class="chead">
+        <div class="ctitle"><span class="dot" style="background:#93c5fd;"></span>Put OI Change · 1 Min <span class="hint" id="putSwingCount1"></span></div>
+        <div class="smc-toggle">Structure <div class="kswitch on" id="tgl-put1" onclick="toggleSMC('put1')"></div></div>
+      </div>
+      <svg id="chart-put1" viewBox="0 0 600 220"></svg>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:var(--purple);">
+    <h3>🧠 Global Aggregation Result <span class="hint">recomputed live from every setting below</span></h3>
+    <div class="divider"></div>
+    <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px;">Final Bias</div>
+        <span class="badge lg" id="finalBiasBadge">—</span>
+      </div>
+      <div style="flex:1;min-width:220px;">
+        <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-dim);margin-bottom:5px;">
+          <span>CALL <b id="callPtsLbl" style="color:var(--green);">0</b> pts</span>
+          <span>PUT <b id="putPtsLbl" style="color:var(--red);">0</b> pts</span>
+        </div>
+        <div class="score-bar"><div class="call" id="scoreCallBar" style="width:50%;"></div><div class="put" id="scorePutBar" style="width:50%;"></div></div>
+        <div class="calc-note" style="margin-top:8px;">Confidence gate: <span id="gateExplain">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>Contributing Events <span class="hint">every event that scored points, in order detected</span></h3>
+      <div class="divider"></div>
+      <div id="contribList"></div>
+    </div>
+    <div class="card">
+      <h3>Algo Payload <span class="hint">what the engine would hand off to an execution layer</span></h3>
+      <div class="divider"></div>
+      <pre class="payload" id="jsonPayload"></pre>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Interpretation Matrix <span class="hint">HH / HL / LH / LL and range breakout → Call / Put / Ignore — 1 Min only</span></h3>
+    <div class="divider"></div>
+    <table class="mtx">
+      <thead><tr><th>1m Event</th><th>Call Chart →</th><th>Put Chart →</th></tr></thead>
+      <tbody id="microMatrixBody"></tbody>
+    </table>
+    <div class="calc-note" style="margin-top:10px;">5 Min has no matrix row anymore — its rule is fixed (see the info banner above): red candle on a chart routes to that same chart's side, always, with no dropdown to change it.</div>
+  </div>
+
+  <div class="card">
+    <h3>Swing Detection &amp; Range Zone <span class="hint">1 Min only</span></h3>
+    <div class="divider"></div>
+    <div class="grid3">
+      <div class="fg"><span>Left Bars</span><input type="number" id="s-left" value="3" oninput="recompute()"></div>
+      <div class="fg"><span>Right Bars</span><input type="number" id="s-right" value="3" oninput="recompute()"></div>
+      <div class="fg"><span>Min Swing Move (Cr)</span><input type="number" id="s-minmove" value="0.03" step="0.01" oninput="recompute()"></div>
+    </div>
+    <div class="grid2">
+      <div class="fg"><span>EQH / EQL Tolerance (Cr)</span><input type="number" id="s-eqtol" value="0.015" step="0.005" oninput="recompute()"></div>
+      <div class="fg"><span>Range Breakout Buffer (Cr)</span><input type="number" id="s-buffer" value="0.02" step="0.005" oninput="recompute()"></div>
+    </div>
+    <div class="calc-note">A point is a swing high if it's the highest value across <code class="i">Left Bars</code> before it and <code class="i">Right Bars</code> after it (fractal detection, confirmed only once both neighbours are known so nothing repaints) — mirror logic for swing lows. <code class="i">Min Swing Move</code> filters noise between consecutive same-type swings. Two same-type swings within <code class="i">EQH/EQL Tolerance</code> are flagged as an equal high/low. <b>The range zone is simply [latest confirmed swing low, latest confirmed swing high]</b> — nothing else defines it. Price clearing that zone's edge by <code class="i">Range Breakout Buffer</code> is a Range Breakout Up or Range Breakout Down.</div>
+  </div>
+
+  <div class="card">
+    <h3>Signal Intelligence — Scoring Weights</h3>
+    <div class="divider"></div>
+    <div class="grid3">
+      <div class="fg"><span>Swing Event Weight (HH/HL/LH/LL)</span><input type="number" id="w-swing" value="15" oninput="recompute()"></div>
+      <div class="fg"><span>Range Breakout Weight</span><input type="number" id="w-breakout" value="30" oninput="recompute()"></div>
+      <div class="fg"><span>Liquidity Sweep Weight (EQH/EQL)</span><input type="number" id="w-sweep" value="10" oninput="recompute()"></div>
+    </div>
+    <div class="grid3">
+      <div class="fg"><span>Red Candle Weight (5m, fixed rule)</span><input type="number" id="w-red" value="20" oninput="recompute()"></div>
+      <div class="fg"><span>Call+Put Agreement Bonus</span><input type="number" id="w-agree" value="10" oninput="recompute()"></div>
+      <div class="fg"><span>Minimum Confidence Threshold</span><input type="number" id="w-threshold" value="55" oninput="recompute()"></div>
+    </div>
+    <div class="calc-note">Each confirmed HH/HL/LH/LL scores <code class="i">Swing Event Weight</code>, routed Call/Put/Ignore per the matrix above. A live Range Breakout scores <code class="i">Range Breakout Weight</code>, plus <code class="i">Liquidity Sweep Weight</code> if it also cleared a marked EQH/EQL level. Every red 5m candle scores <code class="i">Red Candle Weight</code> straight to its own chart's side — fixed, not routed through the matrix. If Call-stream and Put-stream events agree on the same final side, <code class="i">Agreement Bonus</code> is added once. The leading side only becomes Final Bias if it clears <code class="i">Minimum Confidence Threshold</code> — otherwise the payload reports <b>NO_TRADE</b>.</div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn primary" onclick="confirmAndSave()">Save All Engine Settings</button>
+    <button class="btn" onclick="recompute()">Re-run Engine Now</button>
+    <button class="btn ghost" onclick="resetDefaults()">Reset to Defaults</button>
+  </div>
+
+  <div class="card" style="margin-top:22px;">
+    <h3>📘 How This Engine Executes</h3>
+    <div class="divider"></div>
+
+    <details open>
+      <summary>1. Swings → HH / HL / LH / LL (1 Min only)</summary>
+      <p><b>Function:</b> <code class="i">findSwings()</code> then <code class="i">classifyStructure()</code>. Fractal swing test using Left/Right Bars; each new swing compared to the previous same-type swing: higher high → <b>HH</b>, lower high → <b>LH</b>, higher low → <b>HL</b>, lower low → <b>LL</b>. Two same-type swings within <code class="i">EQH/EQL Tolerance</code> are relabelled <b>EQH</b>/<b>EQL</b> — a liquidity pool, not fresh structure. This is the only detection running on the 1 Min charts now.</p>
+    </details>
+
+    <details>
+      <summary>2. Range zone &amp; breakout — the only "event" beyond the raw swings</summary>
+      <p><b>Functions:</b> <code class="i">getZone()</code>, <code class="i">detectRangeBreakout()</code>. The zone is <code class="i">[most recent confirmed swing low, most recent confirmed swing high]</code> — redrawn as a shaded box every time a new swing confirms, no independent lookback or width setting. If the latest closed 1m value clears the zone's high by <code class="i">Range Breakout Buffer</code>, that's a <b>Range Breakout Up</b>; clearing the low is a <b>Range Breakout Down</b>. There is no trend-tracking, no reversal/continuation distinction, no CHoCH — a breakout is just a breakout, either direction, always eligible to score.</p>
+    </details>
+
+    <details>
+      <summary>3. 5 Minute — one fixed rule, not part of the matrix</summary>
+      <p><b>Function:</b> <code class="i">checkRedCandle()</code>. This checks only the most recently <i>closed</i> 5m candle. If it's red on the Call chart, that scores straight to <b>Call</b>. If it's red on the Put chart, that scores straight to <b>Put</b>. Green candles are not evaluated at all — there is nothing to configure here, which is why 5 Min no longer has a settings row in the Interpretation Matrix.</p>
+    </details>
+
+    <details>
+      <summary>4. Interpretation Matrix &amp; scoring</summary>
+      <p>HH, HL, LH, LL, Range Breakout Up, and Range Breakout Down are each just a labelled fact from the 1m stream — the matrix is the only place a fact becomes Call/Put/Ignore, per chart. <code class="i">computeScore()</code> sums <code class="i">Swing Event Weight</code> per confirmed swing, <code class="i">Range Breakout Weight</code> (+ <code class="i">Liquidity Sweep Weight</code> if applicable) for an active breakout, and <code class="i">Red Candle Weight</code> for the fixed 5m rule — then gates the leading side against <code class="i">Minimum Confidence Threshold</code>.</p>
+    </details>
+
+    <details>
+      <summary>5. Engine Master Switches — run either timeframe alone</summary>
+      <p><b>Function:</b> <code class="i">toggleEngine()</code>. The 1-Minute Structure Engine and the 5-Minute Red Candle Rule each have their own independent kill switch, separate from the per-chart "Structure" display toggles (which only hide/show swing markers visually and never affect scoring). Turning a kill switch OFF removes that timeframe's contribution to <code class="i">computeScore()</code> entirely for the current cycle — its charts keep rendering for reference, but zero points reach either the CALL or PUT tally from it. Both switches can be off at once, in which case Final Bias is always <b>NO_TRADE</b> since nothing is left to score. The current state of both switches is also written into the Algo Payload as <code class="i">engineActive</code>, so a downstream consumer always knows which timeframe(s) actually produced a given signal.</p>
+    </details>
+
+    <div class="calc-note">Data is still a seeded synthetic session (see <code class="i">generateSeries()</code>) — swap its output for real per-minute Call/Put OI-Δ arrays to go live; every function downstream is unchanged.</div>
+  </div>
+
+</div>
+
+<script>
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function generateSeries(seed, peak, n){
+  const rng = mulberry32(seed);
+  const arr = [];
+  let v = 0;
+  for(let i=0;i<n;i++){
+    const progress = i/n;
+    const envelope = Math.sin(Math.min(progress*1.6,1)*Math.PI/2) * peak * (1 - Math.max(0,progress-0.75)*0.6);
+    const noise = (rng()-0.5) * peak * 0.035;
+    v = envelope + noise + (rng()-0.5)*peak*0.02*Math.sin(i*0.3);
+    arr.push(Math.round(v*100)/100);
+  }
+  return arr;
+}
+const N1M = 180;
+const callSeries1 = generateSeries(11, 6.0, N1M);
+const putSeries1  = generateSeries(22, 4.2, N1M);
+
+function to5m(series1m){
+  const out = [];
+  for(let i=0;i<series1m.length;i+=5){
+    const chunk = series1m.slice(i,i+5);
+    if(chunk.length===0) break;
+    out.push({o:chunk[0], h:Math.max(...chunk), l:Math.min(...chunk), c:chunk[chunk.length-1]});
+  }
+  return out;
+}
+const callSeries5 = to5m(callSeries1);
+const putSeries5  = to5m(putSeries1);
+
+function findSwings(series, left, right, minMove){
+  const raw = [];
+  for(let i=left;i<series.length-right;i++){
+    const win = series.slice(i-left, i+right+1);
+    const v = series[i];
+    if(v === Math.max(...win)) raw.push({index:i, value:v, type:'high'});
+    else if(v === Math.min(...win)) raw.push({index:i, value:v, type:'low'});
+  }
+  const filtered = [];
+  for(const s of raw){
+    if(filtered.length===0){ filtered.push(s); continue; }
+    const prev = filtered[filtered.length-1];
+    if(prev.type === s.type){
+      if((s.type==='high' && s.value>=prev.value) || (s.type==='low' && s.value<=prev.value)) filtered[filtered.length-1]=s;
+      continue;
+    }
+    if(Math.abs(s.value - prev.value) < minMove) continue;
+    filtered.push(s);
+  }
+  return filtered;
+}
+function classifyStructure(swings, eqTol){
+  const out = [];
+  for(let i=0;i<swings.length;i++){
+    const s = swings[i];
+    let label = s.type==='high' ? 'H' : 'L';
+    let prevSame = null;
+    for(let j=i-1;j>=0;j--){ if(swings[j].type===s.type){ prevSame = swings[j]; break; } }
+    if(prevSame){
+      const diff = s.value - prevSame.value;
+      if(Math.abs(diff) <= eqTol){ label = s.type==='high' ? 'EQH' : 'EQL'; }
+      else if(s.type==='high'){ label = diff>0 ? 'HH' : 'LH'; }
+      else { label = diff>0 ? 'HL' : 'LL'; }
+    }
+    out.push({...s, label});
+  }
+  return out;
+}
+function getZone(structured){
+  let lastHigh=null,lastLow=null;
+  for(const s of structured){
+    if(s.type==='high') lastHigh=s; else lastLow=s;
+  }
+  if(!lastHigh || !lastLow) return null;
+  return {hi: Math.max(lastHigh.value,lastLow.value), lo: Math.min(lastHigh.value,lastLow.value)};
+}
+function detectRangeBreakout(series, zone, buffer){
+  if(!zone) return {direction:null};
+  const last = series[series.length-1];
+  if(last > zone.hi + buffer) return {direction:'up', value:last};
+  if(last < zone.lo - buffer) return {direction:'down', value:last};
+  return {direction:null};
+}
+function checkRedCandle(candles){
+  if(candles.length<2) return false;
+  const last = candles[candles.length-2]; // last fully closed
+  return last.c < last.o;
+}
+
+const MICRO_EVENTS = [
+  {id:'HH', label:'Higher High (HH)'},
+  {id:'HL', label:'Higher Low (HL)'},
+  {id:'LH', label:'Lower High (LH)'},
+  {id:'LL', label:'Lower Low (LL)'},
+  {id:'BREAKOUT_UP', label:'Range Breakout Up'},
+  {id:'BREAKOUT_DOWN', label:'Range Breakout Down'}
+];
+let matrix = {
+  call: { HH:'Call', HL:'Call', LH:'Put', LL:'Put', BREAKOUT_UP:'Call', BREAKOUT_DOWN:'Put' },
+  put:  { HH:'Put',  HL:'Put',  LH:'Call', LL:'Call', BREAKOUT_UP:'Put', BREAKOUT_DOWN:'Call' }
+};
+
+function renderLine(svgId, series, color, swings, zone, showSMC){
+  const svg = document.getElementById(svgId);
+  const W=600,H=220,pad=28;
+  const min = Math.min(...series), max = Math.max(...series);
+  const xScale = i => pad + (i/(series.length-1))*(W-pad*1.5);
+  const yScale = v => H-pad - ((v-min)/(max-min||1))*(H-pad*1.8);
+  let svgHtml = '';
+  for(let g=0; g<=2; g++){
+    const yy = pad + g*(H-pad*1.8)/2;
+    svgHtml += '<line x1="'+pad+'" y1="'+yy.toFixed(1)+'" x2="'+(W-6)+'" y2="'+yy.toFixed(1)+'" stroke="#1c2636" stroke-width="1"/>';
+  }
+  if(showSMC && zone){
+    const yHi = yScale(zone.hi), yLo = yScale(zone.lo);
+    svgHtml += '<rect x="'+pad+'" y="'+yHi.toFixed(1)+'" width="'+(W-pad*1.5-6)+'" height="'+Math.max(1,(yLo-yHi)).toFixed(1)+'" fill="#a855f7" fill-opacity="0.08" stroke="#a855f7" stroke-opacity="0.3" stroke-dasharray="3,3"/>';
+  }
+  let path = series.map((v,i)=> (i===0?'M':'L') + xScale(i).toFixed(1) + ',' + yScale(v).toFixed(1)).join(' ');
+  svgHtml += '<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="1.6"/>';
+  if(showSMC){
+    for(const s of swings){
+      if(s.index>=series.length) continue;
+      const cx=xScale(s.index), cy=yScale(s.value);
+      const isEq = s.label==='EQH'||s.label==='EQL';
+      const col = s.type==='high' ? '#f87171' : '#4ade80';
+      svgHtml += '<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+(isEq?4:3)+'" fill="'+(isEq?'#f59e0b':col)+'"/>';
+      svgHtml += '<text x="'+cx.toFixed(1)+'" y="'+(cy + (s.type==='high'?-7:14)).toFixed(1)+'" font-size="8.5" fill="'+(isEq?'#f59e0b':col)+'" text-anchor="middle">'+s.label+'</text>';
+    }
+  }
+  svg.innerHTML = svgHtml;
+}
+function renderCandles(svgId, candles, upColor, downColor){
+  const svg = document.getElementById(svgId);
+  const W=600,H=220,pad=28;
+  const allVals = candles.flatMap(c=>[c.h,c.l]);
+  const min = Math.min(...allVals), max = Math.max(...allVals);
+  const bw = (W-pad*1.5)/candles.length;
+  const xScale = i => pad + i*bw + bw/2;
+  const yScale = v => H-pad - ((v-min)/(max-min||1))*(H-pad*1.8);
+  let svgHtml = '';
+  for(let g=0; g<=2; g++){
+    const yy = pad + g*(H-pad*1.8)/2;
+    svgHtml += '<line x1="'+pad+'" y1="'+yy.toFixed(1)+'" x2="'+(W-6)+'" y2="'+yy.toFixed(1)+'" stroke="#1c2636" stroke-width="1"/>';
+  }
+  candles.forEach((c,i)=>{
+    const up = c.c >= c.o;
+    const col = up ? upColor : downColor;
+    const x = xScale(i);
+    svgHtml += '<line x1="'+x.toFixed(1)+'" y1="'+yScale(c.h).toFixed(1)+'" x2="'+x.toFixed(1)+'" y2="'+yScale(c.l).toFixed(1)+'" stroke="'+col+'" stroke-width="1"/>';
+    const yTop = yScale(Math.max(c.o,c.c)), yBot = yScale(Math.min(c.o,c.c));
+    svgHtml += '<rect x="'+(x-bw*0.32).toFixed(1)+'" y="'+yTop.toFixed(1)+'" width="'+(bw*0.64).toFixed(1)+'" height="'+Math.max(1,yBot-yTop).toFixed(1)+'" fill="'+col+'"/>';
+  });
+  svg.innerHTML = svgHtml;
+}
+
+function computeScore(callSwings1, putSwings1, callBreak, putBreak, callRed, putRed, weights, mtx, engineOn){
+  let callPts=0, putPts=0;
+  const contrib=[];
+  const eqCall = callSwings1.filter(s=>s.label==='EQH'||s.label==='EQL').map(s=>s.value);
+  const eqPut  = putSwings1.filter(s=>s.label==='EQH'||s.label==='EQL').map(s=>s.value);
+
+  function routeSwings(swings, chart){
+    for(const s of swings){
+      if(s.label==='EQH'||s.label==='EQL'||s.label==='H'||s.label==='L') continue;
+      const pts = weights.swing;
+      const side = mtx[chart][s.label];
+      if(side==='Call') callPts+=pts; else if(side==='Put') putPts+=pts;
+      contrib.push({label:(chart==='call'?'Call':'Put')+' 1m '+s.label, side, points:pts});
+    }
+  }
+  function routeBreakout(bo, chart, eqLevels){
+    if(!bo.direction) return;
+    let pts = weights.breakout;
+    const swept = eqLevels.some(v => Math.abs(v - bo.value) < 0.05);
+    if(swept) pts += weights.sweep;
+    const evId = bo.direction==='up' ? 'BREAKOUT_UP' : 'BREAKOUT_DOWN';
+    const side = mtx[chart][evId];
+    if(side==='Call') callPts+=pts; else if(side==='Put') putPts+=pts;
+    contrib.push({label:(chart==='call'?'Call':'Put')+' Range Breakout '+bo.direction.toUpperCase()+(swept?' (swept EQ level)':''), side, points:pts});
+  }
+  if(engineOn.oneMin){
+    routeSwings(callSwings1,'call');
+    routeSwings(putSwings1,'put');
+    routeBreakout(callBreak,'call',eqCall);
+    routeBreakout(putBreak,'put',eqPut);
+  } else {
+    contrib.push({label:'1-Minute Structure Engine is OFF — HH/HL/LH/LL and Range Breakout excluded', side:'Ignore', points:0});
+  }
+
+  if(engineOn.fiveMin){
+    if(callRed){ callPts += weights.red; contrib.push({label:'Call 5m last candle (Red, fixed rule)', side:'Call', points:weights.red}); }
+    if(putRed){ putPts += weights.red; contrib.push({label:'Put 5m last candle (Red, fixed rule)', side:'Put', points:weights.red}); }
+  } else {
+    contrib.push({label:'5-Minute Red Candle Rule is OFF — excluded regardless of candle colour', side:'Ignore', points:0});
+  }
+
+  if(callPts>0 && putPts>0){
+    const leader = callPts>=putPts ? 'call' : 'put';
+    if(leader==='call') callPts += weights.agree; else putPts += weights.agree;
+    contrib.push({label:'Call+Put agreement bonus', side: leader==='call'?'Call':'Put', points:weights.agree});
+  }
+
+  return {callPts:Math.round(callPts*10)/10, putPts:Math.round(putPts*10)/10, contrib};
+}
+
+function sideOptions(sel){
+  return ['Call','Put','Ignore'].map(v=>'<option '+(sel===v?'selected':'')+'>'+v+'</option>').join('');
+}
+function renderMicroMatrix(){
+  document.getElementById('microMatrixBody').innerHTML = MICRO_EVENTS.map(e=>
+    '<tr><td>'+e.label+'</td>'+
+    '<td><select onchange="matrix.call[\''+e.id+'\']=this.value;recompute()">'+sideOptions(matrix.call[e.id])+'</select></td>'+
+    '<td><select onchange="matrix.put[\''+e.id+'\']=this.value;recompute()">'+sideOptions(matrix.put[e.id])+'</select></td></tr>'
+  ).join('');
+}
+
+let smcOn = {call1:true, put1:true};
+function toggleSMC(key){
+  smcOn[key] = !smcOn[key];
+  document.getElementById('tgl-'+key).className = 'kswitch ' + (smcOn[key]?'on':'off');
+  recompute();
+}
+
+let engineOn = {oneMin:true, fiveMin:true};
+function toggleEngine(which){
+  const key = which==='1m' ? 'oneMin' : 'fiveMin';
+  engineOn[key] = !engineOn[key];
+  document.getElementById('kill-'+which).className = 'kswitch ' + (engineOn[key]?'on':'off');
+
+  document.getElementById('oneMinStatus').textContent = engineOn.oneMin
+    ? 'ON — HH/HL/LH/LL and Range Breakout are contributing to the signal'
+    : 'OFF — 1-Minute structure is fully excluded from scoring (still shown on the charts for reference)';
+  document.getElementById('fiveMinStatus').textContent = engineOn.fiveMin
+    ? 'ON — the fixed red-candle rule is contributing to the signal'
+    : 'OFF — 5-Minute red candles no longer add any points, regardless of colour';
+
+  let noteText;
+  if(engineOn.oneMin && engineOn.fiveMin) noteText = 'Both are ON — the Final Bias below blends 1-Minute structure points with the 5-Minute red-candle rule, exactly as scored in Section 8 of the specification.';
+  else if(engineOn.oneMin) noteText = 'Running on <b>1-Minute structure only</b> — the 5-Minute red-candle rule is killed and contributes nothing this cycle.';
+  else if(engineOn.fiveMin) noteText = 'Running on <b>5-Minute red candles only</b> — all 1-Minute HH/HL/LH/LL and Range Breakout scoring is killed this cycle.';
+  else noteText = '<b>Both engines are OFF.</b> Nothing can score, so the Final Bias will always be NO_TRADE until at least one is switched back on.';
+  document.getElementById('killSwitchNote').innerHTML = noteText;
+
+  recompute();
+}
+
+function recompute(){
+  const left = +document.getElementById('s-left').value;
+  const right = +document.getElementById('s-right').value;
+  const minMove = +document.getElementById('s-minmove').value;
+  const eqTol = +document.getElementById('s-eqtol').value;
+  const buffer = +document.getElementById('s-buffer').value;
+
+  const weights = {
+    swing: +document.getElementById('w-swing').value,
+    breakout: +document.getElementById('w-breakout').value,
+    sweep: +document.getElementById('w-sweep').value,
+    red: +document.getElementById('w-red').value,
+    agree: +document.getElementById('w-agree').value
+  };
+  const confThreshold = +document.getElementById('w-threshold').value;
+
+  const callSwings1 = classifyStructure(findSwings(callSeries1, left, right, minMove), eqTol);
+  const putSwings1 = classifyStructure(findSwings(putSeries1, left, right, minMove), eqTol);
+  const callZone = getZone(callSwings1);
+  const putZone = getZone(putSwings1);
+  const callBreak = detectRangeBreakout(callSeries1, callZone, buffer);
+  const putBreak = detectRangeBreakout(putSeries1, putZone, buffer);
+
+  renderLine('chart-call1', callSeries1, '#ff8a8a', callSwings1, callZone, smcOn.call1);
+  renderLine('chart-put1', putSeries1, '#93c5fd', putSwings1, putZone, smcOn.put1);
+  renderCandles('chart-call5', callSeries5, '#4ade80', '#ef4444');
+  renderCandles('chart-put5', putSeries5, '#4ade80', '#3b82f6');
+
+  const callRed = checkRedCandle(callSeries5);
+  const putRed = checkRedCandle(putSeries5);
+  document.getElementById('call5rule').textContent = 'Last candle: ' + (callRed ? 'RED -> routes to Call' : 'Green -> ignored');
+  document.getElementById('put5rule').textContent = 'Last candle: ' + (putRed ? 'RED -> routes to Put' : 'Green -> ignored');
+
+  document.getElementById('callSwingCount1').textContent = '· ' + callSwings1.length + ' swings' + (callBreak.direction ? ', breakout ' + callBreak.direction.toUpperCase() : '');
+  document.getElementById('putSwingCount1').textContent = '· ' + putSwings1.length + ' swings' + (putBreak.direction ? ', breakout ' + putBreak.direction.toUpperCase() : '');
+
+  const score = computeScore(callSwings1, putSwings1, callBreak, putBreak, callRed, putRed, weights, matrix, engineOn);
+
+  const total = Math.max(score.callPts + score.putPts, 1);
+  document.getElementById('scoreCallBar').style.width = (score.callPts/total*100).toFixed(1)+'%';
+  document.getElementById('scorePutBar').style.width = (score.putPts/total*100).toFixed(1)+'%';
+  document.getElementById('callPtsLbl').textContent = score.callPts;
+  document.getElementById('putPtsLbl').textContent = score.putPts;
+
+  const leaderSide = score.callPts >= score.putPts ? 'Call' : 'Put';
+  const leaderPts = Math.max(score.callPts, score.putPts);
+  const gated = leaderPts < confThreshold;
+  const finalBias = gated ? 'NO_TRADE' : leaderSide.toUpperCase();
+
+  const badge = document.getElementById('finalBiasBadge');
+  badge.className = 'badge lg ' + (gated ? 'notrade' : leaderSide.toLowerCase());
+  badge.textContent = finalBias;
+  document.getElementById('gateExplain').textContent = gated
+    ? 'Leading side ('+leaderSide+', '+leaderPts+' pts) is below the '+confThreshold+' threshold -> NO_TRADE.'
+    : leaderSide+' leads with '+leaderPts+' pts, clearing the '+confThreshold+' threshold.';
+
+  document.getElementById('contribList').innerHTML = score.contrib.length ? score.contrib.map(c=>
+    '<div class="contrib-row"><span>'+c.label+' <span class="badge '+c.side.toLowerCase()+'" style="margin-left:6px;">'+c.side+'</span></span><span class="pts">'+c.points+' pts</span></div>'
+  ).join('') : '<div class="calc-note">No qualifying events in the current window.</div>';
+
+  const payload = {
+    timestamp: new Date().toISOString(),
+    signal: finalBias,
+    confidence: Math.min(100, Math.round(leaderPts)),
+    rawDirection: leaderSide.toUpperCase(),
+    engineActive: { oneMinute: engineOn.oneMin, fiveMinute: engineOn.fiveMin },
+    zones: { call1m: callZone, put1m: putZone },
+    breakouts: { call1m: callBreak.direction, put1m: putBreak.direction },
+    redCandle5m: { call: callRed, put: putRed },
+    scores: { call: score.callPts, put: score.putPts }
+  };
+  document.getElementById('jsonPayload').textContent = JSON.stringify(payload, null, 2);
+}
+
+function confirmAndSave(){
+  if(!confirm('Are you sure you want to submit these settings?')) return;
+  let t = document.getElementById('savedToast');
+  if(!t){ t=document.createElement('div'); t.id='savedToast'; t.className='saved-toast'; t.textContent='✔ Settings saved'; document.body.appendChild(t); }
+  t.classList.add('show');
+  clearTimeout(window._tt);
+  window._tt = setTimeout(function(){ t.classList.remove('show'); }, 2200);
+}
+function resetDefaults(){
+  if(!confirm('Reset every setting on this page to defaults?')) return;
+  document.getElementById('s-left').value=3; document.getElementById('s-right').value=3; document.getElementById('s-minmove').value=0.03;
+  document.getElementById('s-eqtol').value=0.015; document.getElementById('s-buffer').value=0.02;
+  document.getElementById('w-swing').value=15; document.getElementById('w-breakout').value=30;
+  document.getElementById('w-sweep').value=10; document.getElementById('w-red').value=20;
+  document.getElementById('w-agree').value=10; document.getElementById('w-threshold').value=55;
+  recompute();
+}
+
+renderMicroMatrix();
+recompute();
+</script>
+</body>
+</html>

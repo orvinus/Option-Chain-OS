@@ -64,7 +64,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const { strikeMin, strikeMax, atm } = useMemo(() => {
     if (spot == null) return { strikeMin: null, strikeMax: null, atm: null };
     const a = atmRound(spot, step);
-    // "All" (atmWindow<0) → full window; otherwise one fewer strike each side than picked.
+    // "All" (atmWindow<0) → full window; otherwise exactly ATM ± the picked N.
     const w = atmWindow < 0 ? ATM_MAX_WINDOW : effectiveAtmWindow(atmWindow);
     return { strikeMin: a - w * step, strikeMax: a + w * step, atm: a };
   }, [spot, step, atmWindow]);

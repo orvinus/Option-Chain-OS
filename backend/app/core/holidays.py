@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from functools import lru_cache
 
 from .config import PROJECT_ROOT
 from .logging import get_logger
@@ -24,18 +23,28 @@ log = get_logger("holidays")
 
 HOLIDAY_FILE = PROJECT_ROOT / "data" / "nse_holidays.json"
 
+# mtime-keyed cache (was @lru_cache(maxsize=1)): the trading engine now
+# consults this file as a holiday backstop, so an operator adding a date must
+# take effect WITHOUT a process restart. The stat() per call is ~µs.
+_cache: tuple[float, frozenset[str]] | None = None
 
-@lru_cache(maxsize=1)
+
 def _load() -> frozenset[str]:
+    global _cache
+    try:
+        mtime = HOLIDAY_FILE.stat().st_mtime
+    except OSError:
+        return frozenset()
+    if _cache is not None and _cache[0] == mtime:
+        return _cache[1]
     try:
         raw = json.loads(HOLIDAY_FILE.read_text(encoding="utf-8"))
-        days = raw.get("holidays", [])
-        return frozenset(str(d) for d in days)
-    except FileNotFoundError:
-        return frozenset()
+        days = frozenset(str(d) for d in raw.get("holidays", []))
     except Exception as e:  # malformed file must never break health
         log.warning("holidays.load_failed", error=str(e))
-        return frozenset()
+        days = frozenset()
+    _cache = (mtime, days)
+    return days
 
 
 def is_nse_holiday(d: date) -> bool:

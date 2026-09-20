@@ -14,6 +14,7 @@ import { changeColor, sideColor, sideLabel } from "../utils/ui";
 import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { callPutRatio } from "../utils/ratio";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
+import { LoadingBlock } from "../components/Loading";
 
 const ATM_MAX_WINDOW = 50;
 
@@ -42,7 +43,7 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
     symbol: fnoEligible ? symbol : null,
     expiry,
     asOf,
-    // Send the EFFECTIVE window (ATM ± (N−1)) so the summed strikes match the
+    // Send the EFFECTIVE window (ATM ± N) so the summed strikes match the
     // footer label and the Charts/Ratio/OI-Change windows. Sentinels pass
     // through: 0 → ATM only, <0 → full chain.
     atmWindow: effectiveAtmWindow(atmWindow),
@@ -122,7 +123,21 @@ export function MultiTimeframePage({ mc }: { mc: MarketContextValue }) {
                   );
                 })}
                 {!data && loading && (
-                  <tr><td colSpan={7} className="py-6 text-center text-muted text-xs">Loading…</td></tr>
+                  <tr>
+                    <td colSpan={7} className="py-6">
+                      <LoadingBlock />
+                    </td>
+                  </tr>
+                )}
+                {/* There was no empty state at all: a result with zero rows,
+                    and a fetch that had not started, both rendered a blank
+                    tbody that looked identical to loading. */}
+                {!loading && (data?.rows.length ?? 0) === 0 && (
+                  <tr>
+                    <td colSpan={7} className="py-6 text-center text-muted text-xs">
+                      No timeframe rows for this expiry.
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>

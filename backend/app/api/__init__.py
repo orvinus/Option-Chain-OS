@@ -1,6 +1,12 @@
 from fastapi import APIRouter
 
 from . import (
+    algo_auth,
+    algo_backtest,
+    algo_config,
+    algo_engines,
+    algo_export,
+    algo_trades,
     auth,
     expiries,
     health,
@@ -21,6 +27,12 @@ from . import (
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(auth.router)
+api_router.include_router(algo_auth.router)
+api_router.include_router(algo_config.router)
+api_router.include_router(algo_backtest.router)
+api_router.include_router(algo_engines.router)
+api_router.include_router(algo_trades.router)
+api_router.include_router(algo_export.router)
 api_router.include_router(health.router)
 api_router.include_router(spot.router)
 api_router.include_router(expiries.router)

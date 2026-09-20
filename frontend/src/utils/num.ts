@@ -19,3 +19,8 @@ export function signedCompact(n: number | null | undefined): string {
 export function fmt2(n: number | null | undefined): string {
   return n == null || Number.isNaN(n) ? "—" : n.toFixed(2);
 }
+
+/** Fixed 4-decimal display, or an em dash for null/undefined/NaN. */
+export function fmt4(n: number | null | undefined): string {
+  return n == null || Number.isNaN(n) ? "—" : n.toFixed(4);
+}

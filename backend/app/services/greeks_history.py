@@ -8,7 +8,7 @@ compute time). Populated going forward by ``_greeks_history_loop`` in main.py.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
@@ -33,7 +33,9 @@ _UPSERT_GREEKS_SQL = text(
 _GREEKS_SERIES_SQL = text(
     """
     SELECT
-        time_bucket_gapfill((:step_iv)::interval, ts, :start, :end) AS bucket,
+        -- :gap_end = :end + 1µs: same inclusive-end rule as the OI replay query, so the
+        -- greeks bucket holding :end is locf-complete and lines up with the OI frame.
+        time_bucket_gapfill((:step_iv)::interval, ts, :start, :gap_end) AS bucket,
         strike, option_type,
         locf(last(iv, ts))    AS iv,
         locf(last(delta, ts)) AS delta,
@@ -108,7 +110,14 @@ async def fetch_greeks_series(
         rows = (
             await s.execute(
                 _GREEKS_SERIES_SQL,
-                {"step_iv": step_iv, "symbol": symbol, "expiry": expiry, "start": start, "end": end},
+                {
+                    "step_iv": step_iv,
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "start": start,
+                    "end": end,
+                    "gap_end": end + timedelta(microseconds=1),
+                },
             )
         ).mappings().all()
     out: dict[datetime, dict[tuple[int, str], dict]] = {}

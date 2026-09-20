@@ -2,6 +2,7 @@ import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { ChartDrawingOverlay } from "./ChartDrawingOverlay";
+import { echartsCategoryAnchor } from "./charts/drawingAnchors";
 import type { OITimeseriesPoint } from "../types";
 import {
   baselineLabel,
@@ -11,6 +12,7 @@ import {
   type OISide,
 } from "../utils/oiCandles";
 import { compact as compactNum } from "../utils/num";
+import { OI_CANDLE_THEME } from "./charts/chartTheme";
 
 interface Props {
   points: OITimeseriesPoint[] | null;
@@ -29,11 +31,9 @@ interface Props {
 }
 
 // Call = red theme, Put = blue theme. Up candle (close ≥ open) = bright fill,
-// down candle = muted fill — same palette family as OIChangeChart.
-const THEME: Record<OISide, { up: string; down: string; upBorder: string; downBorder: string; line: string }> = {
-  call: { up: "#f75c5c", down: "#7f3a3a", upBorder: "#ff8c8c", downBorder: "#a85555", line: "#f75c5c" },
-  put: { up: "#4da6ff", down: "#2a4a7f", upBorder: "#7fc1ff", downBorder: "#3a6aaf", line: "#4da6ff" },
-};
+// down candle = muted fill — same palette family as OIChangeChart. The values
+// live in charts/chartTheme.ts (shared with the engine panels); pure move.
+const THEME = OI_CANDLE_THEME;
 
 export function OICandleChart({ points, side, interval, title, isLoading = false, liveTotal, liveOn = false }: Props) {
   const theme = THEME[side];
@@ -50,6 +50,11 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
   const xLabels = useMemo(
     () => (isLine ? toLineSeries(series).labels : bucketToCandles(series, interval).map((c) => c.label)),
     [series, isLine, interval],
+  );
+
+  const drawAnchor = useMemo(
+    () => echartsCategoryAnchor(() => chartRef.current?.getEchartsInstance() ?? null, xLabels),
+    [xLabels],
   );
 
   // Pixel → data readout used by the drawing overlay to show the value/level being
@@ -235,7 +240,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
             style={{ height: 420, width: "100%" }}
             opts={{ renderer: "canvas" }}
           />
-          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} toolbarContainer={toolbarSlot} />
+          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} toolbarContainer={toolbarSlot} anchor={drawAnchor} />
 
           {liveTotal != null && (
             <div

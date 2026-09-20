@@ -62,6 +62,10 @@ class ReplayFrame:
     rows: list[ReplayRow]
 
 
+# Added to a window's end to make gapfill's EXCLUSIVE finish bound behave inclusively,
+# matching the `ts <= :end` row filter. See _REPLAY_SERIES_SQL.
+_GAPFILL_INCLUSIVE = timedelta(microseconds=1)
+
 # All frames in one pass. ``locf`` carries each strike's last-known OI forward into
 # every bucket (so the book is complete at each instant, mirroring the old
 # per-cursor ``DISTINCT ON`` snapshot). Buckets before a strike's first tick stay
@@ -75,7 +79,13 @@ _REPLAY_SERIES_SQL = text(
     """
     WITH per_strike AS (
         SELECT
-            time_bucket_gapfill((:step_iv)::interval, ts, :start, :end) AS bucket,
+            -- :gap_end = :end + 1µs. gapfill's finish is EXCLUSIVE but the row filter
+            -- below is inclusive, so with :end on a bucket boundary the rows stamped
+            -- exactly at :end opened a bucket OUTSIDE the gapfill range: no locf, only
+            -- the legs that ticked at that instant. The final frame then lost whole
+            -- strikes and zeroed others (2026-09-11 15:40: 3 of 21 strikes gone, 6
+            -- legs at 0, cum Call -42.55L instead of +66.87L).
+            time_bucket_gapfill((:step_iv)::interval, ts, :start, :gap_end) AS bucket,
             strike,
             option_type,
             locf(last(oi, ts)) AS oi,
@@ -166,7 +176,14 @@ async def fetch_replay(
         rows = (
             await s.execute(
                 _REPLAY_SERIES_SQL,
-                {"step_iv": step_iv, "symbol": symbol, "expiry": expiry, "start": start, "end": end},
+                {
+                    "step_iv": step_iv,
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "start": start,
+                    "end": end,
+                    "gap_end": end + _GAPFILL_INCLUSIVE,
+                },
             )
         ).mappings().all()
         # Session-open baseline — ONE query for the whole replay, not one per frame.
@@ -206,7 +223,10 @@ async def fetch_replay(
             spot_by_bucket[b] = None
             spot_ts_by_bucket[b] = None
             buckets.append(b)
-        by_bucket[b].setdefault(r["strike"], {"CE": 0, "PE": 0})[r["option_type"]] = int(r["oi"])
+        # Only legs that actually have a value. Defaulting the other leg to 0 here made
+        # a strike whose CE had ticked but whose PE had not yet read "PE OI = 0" — see
+        # the first-seen seeding below.
+        by_bucket[b].setdefault(r["strike"], {})[r["option_type"]] = int(r["oi"])
         if r.get("ltp") is not None:
             ltp_by_bucket[b].setdefault(r["strike"], {})[r["option_type"]] = float(r["ltp"])
         # Take the frame's spot from the FRESHEST leg. Rows arrive in strike order, so
@@ -236,6 +256,26 @@ async def fetch_replay(
             slot = base_book.setdefault(strike, {})
             for leg, oi in v.items():
                 slot.setdefault(leg, oi)
+
+    # Constant membership: a leg's buckets BEFORE its first tick in the window take
+    # that first value (so zero change), the same first-seen seeding
+    # `oi_timeseries._TIMESERIES_SQL` uses. locf cannot fill them — there is nothing
+    # earlier in the window to carry — and the query drops NULL legs, so they used to
+    # be absent (or, for the other leg of a ticking strike, 0). Contracts that only
+    # start trading mid-morning then ENTERED the sums partway through: on 2026-09-11,
+    # 24 of 148 NIFTY legs first ticked after 09:16 and the full-chain totals were
+    # wrong on 149 of 386 frames (Put OI -15.7L at 09:15), and each late leg's whole
+    # OI surfaced as fake buildup — while row changes read 0 - baseline before it.
+    # Legs with no tick anywhere in the window stay absent: there is nothing to show.
+    first_in_window: dict[tuple[int, str], int] = {}
+    for b in buckets:
+        for strike, legs in by_bucket[b].items():
+            for leg, oi in legs.items():
+                first_in_window.setdefault((strike, leg), oi)
+    for b in buckets:
+        book = by_bucket[b]
+        for (strike, leg), oi0 in first_in_window.items():
+            book.setdefault(strike, {}).setdefault(leg, oi0)
 
     frames: list[ReplayFrame] = []
     for b in buckets:

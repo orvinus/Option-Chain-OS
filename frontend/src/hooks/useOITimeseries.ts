@@ -40,6 +40,11 @@ export function useOITimeseries(
     }
 
     let cancelled = false;
+    // A new symbol / expiry / ATM window / date is a new question: clear the
+    // previous answer so `isLoading && !points` at the call site is TRUE and
+    // the chart shows a loading state, instead of drawing the previous
+    // window's candles under the new window's heading.
+    setData(null);
     const load = (initial: boolean) => {
       if (initial) setLoading(true);
       api

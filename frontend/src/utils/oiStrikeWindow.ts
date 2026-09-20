@@ -22,17 +22,24 @@ export function atmRound(spot: number, step: number): number {
   return Math.round(spot / step) * step;
 }
 
-/** Effective strike window: one fewer strike on each side than the picked value,
- *  while preserving the sentinels (0 = ATM only, <0 = All). So a picked N shows
- *  ATM ± (N-1). */
+/** Effective strike window: a picked N means EXACTLY ATM ± N strikes, with the
+ *  sentinels preserved (0 = ATM only, <0 = All).
+ *
+ *  Until 2026-09-14 this returned N-1 ("one fewer each side than picked"). Algo
+ *  Config never did that — its `strikes_atm_window` is a literal ATM ± N
+ *  (`series._resolve_strike_basket`) — so the same "10" summed 19 strikes on the
+ *  dashboard and 21 in Algo Config, and the SAME ratio crossover read 10:16 on
+ *  Replay against 10:15 in Algo Config. Every dashboard page reads the window
+ *  through this one function, so this is the single place that keeps them equal.
+ *  Do not reintroduce an offset here without changing the engine to match. */
 export function effectiveAtmWindow(atmWindow: number): number {
-  return atmWindow > 0 ? atmWindow - 1 : atmWindow;
+  return atmWindow;
 }
 
 /** Strike ladder window filter.
  *  atmWindow = -1  → all rows (no filter)
  *  atmWindow =  0  → ATM strike only
- *  atmWindow =  N  → ATM ± (N-1) strikes  (one fewer each side than the picked N)
+ *  atmWindow =  N  → ATM ± N strikes  (same basket as Algo Config's ATM ± N)
  *  stepHint: the symbol's registry strike_step; inferred from the first two
  *  strikes only as a fallback (inference breaks if the ladder has a gap).
  */

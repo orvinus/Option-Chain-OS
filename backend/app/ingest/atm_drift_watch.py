@@ -23,10 +23,25 @@ CHECK_INTERVAL_S = 60.0
 DRIFT_THRESHOLD_FRACTION = 0.4
 
 
+async def _effective_window() -> int:
+    """Today's configured data window (Daily Trading Config), falling back to
+    the STRIKE_WINDOW setting — same resolution the subscribe path uses."""
+    try:
+        from ..market.scripmaster_td import _configured_data_window
+
+        return await _configured_data_window()
+    except Exception:
+        return settings.strike_window
+
+
 async def run_atm_drift_watch() -> None:
-    """Background task: resubscribe when ATM drifts out of the subscribed window."""
+    """Background task: resubscribe when ATM drifts out of the subscribed
+    window — or when the operator CHANGES the configured window size (so a
+    Daily Trading Config edit takes effect within one check interval, not on
+    the next reconnect)."""
     rt = get_runtime()
     last_sub_spot: float | None = None
+    last_sub_window: int | None = None
 
     # Delay first check to allow the initial subscription to settle.
     await asyncio.sleep(CHECK_INTERVAL_S)
@@ -47,12 +62,28 @@ async def run_atm_drift_watch() -> None:
 
             reg_entry = get_registry().get(rt.active_symbol)
             step = reg_entry.strike_step if reg_entry and reg_entry.strike_step > 0 else settings.strike_step
-            window = settings.strike_window
+            window = await _effective_window()
             # Half-window in points: how far ATM can move before we resubscribe.
             threshold_pts = window * step * DRIFT_THRESHOLD_FRACTION
 
             if last_sub_spot is None:
                 last_sub_spot = spot
+                last_sub_window = window
+                await asyncio.sleep(CHECK_INTERVAL_S)
+                continue
+
+            if last_sub_window is not None and window != last_sub_window:
+                log.info(
+                    "atm_drift.window_changed_resubscribing",
+                    old_window=last_sub_window, new_window=window,
+                )
+                try:
+                    from ..ingest.symbol_controller import switch_active_symbol
+                    await switch_active_symbol(rt.active_symbol)
+                    last_sub_spot = spot
+                    last_sub_window = window
+                except Exception as e:
+                    log.warning("atm_drift.resubscribe_error", error=str(e))
                 await asyncio.sleep(CHECK_INTERVAL_S)
                 continue
 
@@ -70,6 +101,7 @@ async def run_atm_drift_watch() -> None:
                     from ..ingest.symbol_controller import switch_active_symbol
                     await switch_active_symbol(rt.active_symbol)
                     last_sub_spot = spot
+                    last_sub_window = window
                     log.info("atm_drift.resubscribed", new_spot=round(spot, 2))
                 except Exception as e:
                     log.warning("atm_drift.resubscribe_error", error=str(e))

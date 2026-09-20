@@ -17,6 +17,14 @@ RUN pip install -r /app/requirements.txt
 COPY backend /app
 COPY .env.example /app/.env.example
 COPY data/symbols.json /data/symbols.json
+# The NSE holiday file was never shipped: inside the image known_holidays()
+# was silently EMPTY (fail-open), so the holiday union in the orchestrator,
+# the gap-fill day grid and the hold-last window never knew a holiday
+# (found 2026-09-09 while verifying the frozen platform_holidays snapshot).
+COPY data/nse_holidays.json /data/nse_holidays.json
+# The boot-time gap fill (app/ingest/gapfill.py) runs the archive puller as a
+# subprocess, so the scripts directory ships inside the image.
+COPY scripts /app/scripts
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

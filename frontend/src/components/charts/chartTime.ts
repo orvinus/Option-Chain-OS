@@ -8,7 +8,7 @@ import type { UTCTimestamp } from "lightweight-charts";
  * add the fixed +5:30 offset to the real epoch: the chart then labels the point
  * with its IST wall-clock time regardless of the viewer's local timezone.
  */
-const IST_OFFSET_SEC = 5.5 * 3600;
+export const IST_OFFSET_SEC = 5.5 * 3600;
 
 export function istIsoToChartTime(iso: string): UTCTimestamp {
   const epoch = Date.parse(iso);

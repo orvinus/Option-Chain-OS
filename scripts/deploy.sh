@@ -124,6 +124,28 @@ case "${1:-}" in
   down) RECREATES=1 ;;
 esac
 
+# ----- network split guard ---------------------------------------------------
+# The compose network is a PINNED subnet (so `warp-proxy` always resolves to the
+# same gateway). The first deploy after that change moves services onto a NEW
+# network named `nifty-oi` — and Compose only moves the services it is asked to
+# recreate. Deploying a single service therefore strands the others on the old
+# network, where `backend:8000` no longer resolves and nginx serves
+# **502 Bad Gateway** for the whole site. Reproduced locally 2026-08-13.
+#
+# So: if the containers are split across networks, force a full recreate.
+if [[ $# -gt 0 && "${1:-}" == "up" ]]; then
+  nets=$(docker inspect $(docker ps -q --filter "label=com.docker.compose.project" 2>/dev/null) \
+         --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null \
+         | sort -u | grep -c . || echo 0)
+  if [[ "${nets:-0}" -gt 1 ]]; then
+    echo "!! containers are split across $nets networks — recreating ALL services"
+    echo "   (a partial deploy here leaves nginx unable to reach backend:8000 => 502)"
+    set -- "$@" --force-recreate
+    # Drop any explicit service argument so every service moves together.
+    set -- $(printf '%s\n' "$@" | grep -vE '^(backend|frontend|timescaledb)$' | tr '\n' ' ')
+  fi
+fi
+
 if [[ $RECREATES -eq 1 ]]; then
   snapshot_logs predeploy
   # Grace marker for the oi-sentinel (harmless when the sentinel isn't installed).

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from ..auth import get_session_manager
+from ..core.config import settings
 from ..core.logging import get_logger
 from ..core.time_utils import now_ist
 from ..market.scripmaster import InstrumentToken, resolve_option_universe
@@ -232,9 +233,16 @@ async def _switch_active_symbol_locked(symbol: str) -> SwitchResult:
         same_symbol_spot = rt.latest_spot if rt.active_symbol == sym else None
         spot_for_window = spot or db_spot or same_symbol_spot or 1.0
         try:
-            tokens, expiries = await resolve_option_universe(
-                spot=spot_for_window, symbol=sym
-            )
+            if settings.feed_vendor in ("truedata", "td_relay"):
+                from ..market.scripmaster_td import resolve_td_option_universe
+
+                tokens, expiries = await resolve_td_option_universe(
+                    spot=spot_for_window, symbol=sym
+                )
+            else:
+                tokens, expiries = await resolve_option_universe(
+                    spot=spot_for_window, symbol=sym
+                )
             expiries_iso = [e.isoformat() for e in expiries]
             rt.expiries = expiries
         except Exception as e:
@@ -242,7 +250,10 @@ async def _switch_active_symbol_locked(symbol: str) -> SwitchResult:
             tokens, expiries_iso = [], []
             rt.expiries = []
 
-    if feed is not None and spot_token is not None:
+    # TrueData subscribes its reference instrument BY NAME on the same socket, so
+    # it has no spot_token to resolve and must not be gated on one — requiring it
+    # would silently skip every subscription swap under the new vendor.
+    if feed is not None and (spot_token is not None or settings.feed_vendor in ("truedata", "td_relay")):
         await feed.swap_subscription(tokens, spot_token, sym, spot_seg)
 
     rt.tokens = tokens

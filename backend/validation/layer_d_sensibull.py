@@ -283,11 +283,18 @@ async def run(symbol: str, round_id: int = 1) -> list[Finding]:
             tol="±0.1% (few-second skew)", verdict="PASS" if p <= 0.1 else "FAIL",
             ts_theirs=str(meta.get("last_updated_at")), note=""))
 
-    # ---- token identity: XTS exchangeInstrumentID == NSE/BSE exchange_token ----
-    if exch_map:
-        uni = common.todays_universe(symbol)
-        matched = sum(1 for u in uni if exch_map.get((u.strike, u.option_type)) == u.token)
-        with_ref = sum(1 for u in uni if (u.strike, u.option_type) in exch_map)
+    # ---- token identity ----
+    # XTS tokens are NSE/BSE exchange ids -> compare against Kite exchange_token.
+    # TrueData tokens are synthetic 'td:SYM:yymmdd:strike:TYPE' -> no external id
+    # to join on; instead prove the token's embedded contract fields match the
+    # row they were stored under (mapping self-consistency), and that the token's
+    # expiry equals the expiry under comparison.
+    uni = common.todays_universe(symbol, vendor="all")
+    numeric = [u for u in uni if u.token.isdigit()]
+    td_uni = [u for u in uni if u.token.startswith("td:")]
+    if exch_map and numeric:
+        matched = sum(1 for u in numeric if exch_map.get((u.strike, u.option_type)) == u.token)
+        with_ref = sum(1 for u in numeric if (u.strike, u.option_type) in exch_map)
         findings.append(Finding(
             layer="layer_d", metric="token_identity", key=symbol,
             ours=f"{matched}/{with_ref} XTS tokens == exchange_token",
@@ -295,6 +302,20 @@ async def run(symbol: str, round_id: int = 1) -> list[Finding]:
             verdict="PASS" if matched == with_ref and with_ref > 0 else "FAIL",
             note="XTS exchangeInstrumentID vs Kite exchange_token per (strike, type) — "
                  "proves we subscribe the exact NSE contracts Zerodha maps"))
+    if td_uni:
+        bad = []
+        for u in td_uni:
+            parts = u.token.split(":")
+            expect = f"td:{u.symbol}:{u.expiry[2:4]}{u.expiry[5:7]}{u.expiry[8:10]}:{u.strike}:{u.option_type}"
+            if len(parts) != 5 or u.token != expect:
+                bad.append(u.token)
+        findings.append(Finding(
+            layer="layer_d", metric="token_identity_td", key=symbol,
+            ours=f"{len(td_uni) - len(bad)}/{len(td_uni)} td tokens self-consistent",
+            theirs="all consistent", diff=len(bad), tol="100%",
+            verdict="PASS" if not bad else "FAIL",
+            note="TrueData synthetic token fields (sym/expiry/strike/type) vs stored row "
+                 f"fields{'; bad: ' + ', '.join(bad[:5]) if bad else ''}"))
 
     oi_tol = OI_TOL_PCT[state]
     ltp_abs, ltp_pct = LTP_TOL[state]

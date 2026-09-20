@@ -160,6 +160,55 @@ async def test_open_buckets_bounded_under_db_outage() -> None:
         agg_mod.MAX_OPEN_BUCKETS = orig_cap
 
 
+# --------------------------------------------------------------------------- 7
+async def test_late_tick_for_already_flushed_bucket_is_dropped() -> None:
+    """Idempotency: once a (token, bucket) has been flushed, a tick stamping an
+    OLDER bucket must not re-create it (its re-flush would overwrite the
+    socket's persisted OI unconditionally)."""
+    ts = datetime(2026, 8, 6, 5, 0, 0, tzinfo=timezone.utc)
+    q: asyncio.Queue = asyncio.Queue()
+    db_log: list = []
+    orig_scope = agg_mod.session_scope
+    agg_mod.session_scope = _FakeScope(db_log)  # type: ignore[assignment]
+    try:
+        aggregator = MinuteAggregator(q)
+        aggregator._absorb(_tick("t1", ts + timedelta(minutes=2), origin="ws", oi=222))
+        await aggregator._flush_closed(ts + timedelta(minutes=10), force_all=True)
+        assert len(db_log) == 1
+        # a delayed poller row for an older bucket
+        aggregator._absorb(_tick("t1", ts, origin="poller", oi=999))
+        assert aggregator.late_dropped == 1
+        assert not aggregator._open_buckets
+        # the SAME bucket may still be re-upserted (failover poller re-stamps the vendor minute)
+        aggregator._absorb(_tick("t1", ts + timedelta(minutes=2), origin="poller", oi=223))
+        assert len(aggregator._open_buckets) == 1
+        # and a NEWER bucket is of course accepted
+        aggregator._absorb(_tick("t1", ts + timedelta(minutes=3), origin="ws", oi=224))
+        assert len(aggregator._open_buckets) == 2
+    finally:
+        agg_mod.session_scope = orig_scope  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- 8
+async def test_failed_flush_does_not_advance_last_flushed() -> None:
+    class _Boom(_FakeScope):
+        async def execute(self, sql, rows):
+            raise RuntimeError("db down")
+
+    ts = datetime(2026, 8, 6, 5, 0, 0, tzinfo=timezone.utc)
+    q: asyncio.Queue = asyncio.Queue()
+    orig_scope = agg_mod.session_scope
+    agg_mod.session_scope = _Boom([])  # type: ignore[assignment]
+    try:
+        aggregator = MinuteAggregator(q)
+        aggregator._absorb(_tick("t1", ts, oi=1))
+        await aggregator._flush_closed(ts + timedelta(minutes=10), force_all=True)
+        assert aggregator._last_flushed == {}
+        assert len(aggregator._open_buckets) == 1       # retried next iteration
+    finally:
+        agg_mod.session_scope = orig_scope  # type: ignore[assignment]
+
+
 # --------------------------------------------------------------------------- runner
 async def _main() -> int:
     import inspect

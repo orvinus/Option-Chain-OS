@@ -245,17 +245,37 @@ class UniverseRow:
     option_type: str
 
 
-def todays_universe(symbol: str) -> list[UniverseRow]:
+def todays_universe(symbol: str, vendor: str = "xts") -> list[UniverseRow]:
+    """Contracts seen today, optionally restricted to one vendor's token space.
+
+    ``vendor`` matters because layer A and the smoke test cast ``int(token)`` to
+    build XTS instrument ids. XTS tokens are bare numerics; TrueData's are
+    ``td:NIFTY:260828:24500:CE``. Once a TrueData feed writes into the same table,
+    an unfiltered universe makes those casts raise ValueError and the whole
+    harness dies — precisely when it is needed to judge the new feed.
+
+    "xts"      — numeric tokens only (safe for the int() casts)
+    "truedata" — 'td:' tokens only
+    "all"      — everything; callers must not assume a token is numeric
+    """
     day_start_utc = market_open_today().astimezone(timezone.utc) - timedelta(minutes=30)
+    vendor = (vendor or "xts").lower()
+    if vendor == "xts":
+        token_filter = "AND token ~ '^[0-9]+$'"
+    elif vendor in ("truedata", "td"):
+        token_filter = "AND token LIKE 'td:%'"
+    else:
+        token_filter = ""
     eng = sync_engine()
     try:
         with eng.connect() as conn:
             rows = conn.execute(
                 text(
-                    """
+                    f"""
                     SELECT DISTINCT ON (token) token, symbol, expiry, strike, option_type
                     FROM option_oi_snapshots
                     WHERE symbol = :symbol AND ts >= :day_start
+                      {token_filter}
                     ORDER BY token, ts DESC
                     """
                 ),
