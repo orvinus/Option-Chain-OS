@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Guide — Algo Config &amp; Backtesting</title>
+<style>
+  :root { --bg:#0b0f17; --panel:#111827; --border:#253044; --text:#d1d5db; --muted:#8b98ab;
+          --accent:#38bdf8; --green:#34d399; --red:#f87171; --amber:#fbbf24; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font:14px/1.7 -apple-system,"Segoe UI",Roboto,sans-serif; margin:0; padding:0 16px 90px; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:26px; color:#fff; border-bottom:2px solid var(--accent); padding-bottom:10px; margin-top:28px; }
+  h2 { font-size:20px; color:var(--accent); margin-top:46px; border-bottom:1px solid var(--border); padding-bottom:6px; }
+  h3 { font-size:16px; color:#e5e7eb; margin-top:30px; }
+  h4 { font-size:13.5px; color:var(--amber); margin:20px 0 6px; text-transform:uppercase; letter-spacing:.04em; }
+  .muted { color:var(--muted); }
+  code,kbd { background:#1f2937; border:1px solid var(--border); border-radius:4px; padding:1px 5px; font-size:12.5px; color:#e5e7eb; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 18px; margin:14px 0; }
+  .note { border-left:3px solid var(--accent); } .warn { border-left:3px solid var(--amber); }
+  .danger { border-left:3px solid var(--red); } .ok { border-left:3px solid var(--green); }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:12.5px; }
+  th,td { border:1px solid var(--border); padding:6px 9px; text-align:left; vertical-align:top; }
+  th { background:#16202f; color:#cbd5e1; }
+  td.lbl { color:#fff; font-weight:600; white-space:nowrap; }
+  .toc { columns:2; gap:32px; } .toc a { color:var(--accent); text-decoration:none; display:block; padding:2px 0; }
+  .toc a:hover { text-decoration:underline; }
+  .g{color:var(--green)} .r{color:var(--red)} .a{color:var(--amber)} .b{color:var(--accent)}
+  .btn { display:inline-block; background:#1e293b; border:1px solid #334155; border-radius:8px; padding:1px 9px; font-size:12px; color:#e2e8f0; }
+  .q { border-left:3px solid var(--muted); padding-left:12px; color:#cbd5e1; font-style:italic; margin:8px 0; }
+  .plain { background:#0d1520; border:1px dashed #2b3a52; border-radius:8px; padding:10px 14px; margin:10px 0; }
+  .plain b { color:var(--green); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>📘 Deep Guide — Algo Config &amp; Backtesting</h1>
+<p class="muted">Every screen, every button, every box, every dropdown, every warning — explained in plain English.
+If you have never seen this platform before, start at section 1 and read straight down.
+Nothing here assumes you know trading jargon; anything technical is explained the first time it appears.</p>
+
+<p class="muted">This guide covers <b>Algo Config</b> and <b>Backtesting</b> only. For the other tabs — the dashboard, OI charts, Multi-TF, Ratio and Replay — see the <a href="/platform-guide.html">Platform Guide →</a></p>
+
+<div class="card toc">
+  <a href="#idea">1. The big idea — how the whole thing works</a>
+  <a href="#furniture">2. The controls you will see everywhere</a>
+  <a href="#saving">3. How saving works (read before touching anything)</a>
+  <a href="#signin">4. Signing in</a>
+  <a href="#topbar">5. The top bar</a>
+  <a href="#daily">6. Daily Trading Config</a>
+  <a href="#copy">7. The Copy Settings dialog</a>
+  <a href="#eng-oi">8. Engine — OI Change</a>
+  <a href="#eng-mtf">9. Engine — Multi-TF</a>
+  <a href="#eng-ratio">10. Engine — Ratio</a>
+  <a href="#eng-ump">11. Engine — Ultra Master Pro</a>
+  <a href="#paper">12. Paper Trading</a>
+  <a href="#holidays">13. Holiday Calendar</a>
+  <a href="#broker">14. Integrations &amp; Broker</a>
+  <a href="#security">15. Security &amp; Backups</a>
+  <a href="#validation">16. Validation Summary</a>
+  <a href="#trace">17. Decision Trace</a>
+  <a href="#strip">18. The Live Strip</a>
+  <a href="#bt">19. Backtesting — the whole workspace</a>
+  <a href="#bt-form">20. Creating a backtest run</a>
+  <a href="#bt-presets">21. Overrides &amp; the 7 scenario presets</a>
+  <a href="#bt-results">22. Reading the results</a>
+  <a href="#bt-replay">23. Day Replay</a>
+  <a href="#bt-export">24. Exporting</a>
+  <a href="#dialogs">25. Every confirmation box</a>
+  <a href="#messages">26. Every error &amp; warning, translated</a>
+  <a href="#glossary">27. Glossary</a>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="idea">1. The big idea — how the whole thing works</h2>
+
+<p>Before any button makes sense, you need the shape of the system. It is simpler than it looks.</p>
+
+<div class="plain">
+<b>In one paragraph:</b> The platform watches the option market every minute. Three "filter" engines each
+look at the data and say <b>CALL</b>, <b>PUT</b>, or <b>nothing</b>. If they agree (you choose what "agree"
+means), the system starts <i>hunting</i>. A fourth engine — Ultra Master Pro — then decides the exact moment
+to buy, and later the exact moment to sell. Everything else on these screens is you telling those four
+engines how to behave.
+</div>
+
+<h4>The four engines, and the one rule that matters</h4>
+<table>
+<tr><th>Engine</th><th>Tab name</th><th>Its one job</th></tr>
+<tr><td class="lbl">OI Structure</td><td>OI Change</td><td>Reads the shape of open-interest movement. Votes CALL / PUT / nothing.</td></tr>
+<tr><td class="lbl">MTF Ratio</td><td>Multi-TF</td><td>Compares call vs put OI across ten timeframes. Votes CALL / PUT / nothing.</td></tr>
+<tr><td class="lbl">MQAE</td><td>Ratio</td><td>Scores five models on the PCR and ratio lines. Votes CALL / PUT / nothing.</td></tr>
+<tr><td class="lbl">Ultra Master Pro</td><td>Ultra Master Pro</td><td>Does <b>not</b> vote. It executes — picks the entry moment, and owns every exit.</td></tr>
+</table>
+
+<div class="card note">
+<b>The rule to remember:</b> the first three decide <i>whether</i> to trade and in <i>which direction</i>.
+Ultra Master Pro decides <i>when</i> to get in and <i>when</i> to get out.
+<b>Once a trade is open, the first three stop mattering entirely</b> — if they all flip to the opposite
+direction mid-trade, nothing happens. Only Ultra Master Pro's exit ladder (or the day's End-Exit) closes a position.
+</div>
+
+<h4>Day → Zone → Engine</h4>
+<p>Settings are organised in three nested levels. Almost every screen is somewhere in this tree:</p>
+<table>
+<tr><td class="lbl">Weekday</td><td>Monday to Friday. Each weekday has its own index (NIFTY, SENSEX…), its own money limits, and its own on/off switch. <b>They are completely independent</b> — Monday's settings have nothing to do with Tuesday's.</td></tr>
+<tr><td class="lbl">Zone</td><td>Each weekday has three time windows: <b>Z1, Z2, Z3</b>. A zone is a slice of the trading day (e.g. 09:20–10:30) with its own price band, its own trade limit, and its own engine settings.</td></tr>
+<tr><td class="lbl">Engine settings</td><td>Inside each zone, all four engines have their own full parameter set. So the same engine can behave differently in Z1 and Z3 on the same day.</td></tr>
+</table>
+<p class="muted">That means there are 5 weekdays × 3 zones = <b>15 independent zone configurations</b>, each holding four complete engine setups. This is why the Copy tools (section 7) exist.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="furniture">2. The controls you will see everywhere</h2>
+<p>Five widgets make up nearly every screen. Learn them once.</p>
+
+<table>
+<tr><th>Looks like</th><th>What it is</th><th>What you need to know</th></tr>
+<tr><td class="lbl">Small pill toggle</td><td>Switch</td>
+<td><span class="g">Green</span> = on. Grey = off. <span class="r">Red</span> = on <i>and dangerous</i> (kill switches, Config Lock, Aggressive mode). Faded and un-clickable = disabled, and something else is controlling it — hover to see why.</td></tr>
+<tr><td class="lbl">Number box</td><td>NumField</td>
+<td><b>Important:</b> these boxes have no built-in minimum or maximum. Some are clamped invisibly when you type (noted per control below), but many accept any number at all. An extreme value is treated as a deliberate trading decision, not an error. Typing letters simply does nothing.</td></tr>
+<tr><td class="lbl">Dropdown</td><td>SelectField</td><td>Plain picker. No surprises.</td></tr>
+<tr><td class="lbl">Grey box of text</td><td>CalcNote</td><td>Live help. Many of them <b>recalculate as you type</b> — e.g. the risk box shows your actual rupee limits.</td></tr>
+<tr><td class="lbl">Amber box of text</td><td>Warning note</td><td>Something is unusual but allowed. Always worth reading.</td></tr>
+</table>
+
+<div class="card warn">
+<b>Hover everything.</b> Nearly every label in this platform has a tooltip explaining itself. If a control
+confuses you, rest the mouse on it for a second before looking it up here.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="saving">3. How saving works — read this before touching anything</h2>
+
+<div class="plain">
+<b>Nothing you click is live until you press Save.</b> Every change — including kill switches — goes into a
+local <i>draft</i>. The engine keeps running on the last saved version until you commit.
+</div>
+
+<table>
+<tr><td class="lbl">Draft</td><td>Your unsaved edits. The top bar shows "<b>3 unsaved changes</b>" in amber.</td></tr>
+<tr><td class="lbl">Discard</td><td>Throws the draft away and returns to the saved version. <b>No confirmation box</b> — it is instant.</td></tr>
+<tr><td class="lbl">Save…</td><td>Opens the confirmation dialog showing exactly which fields change, old value → new value.</td></tr>
+<tr><td class="lbl">Version</td><td>Every save creates a numbered version (v41, v42…). Nothing is ever overwritten; you can restore any earlier one.</td></tr>
+</table>
+
+<h4>The confirmation dialog</h4>
+<p>Titled <b>"Are you sure you want to submit these settings?"</b>, it shows
+"<i>N field(s) will change. The save is atomic — confirmed changes are written as one new config version and
+audited field-by-field.</i>" and a three-column table: <b>Setting · Old · New</b>.
+Field names are written in plain form — <code>days.monday.zones.Z1.premium_max</code> appears as
+<b>"Monday · Z1 · premium max"</b>. You can add an optional note for the history.</p>
+<p class="muted">You can turn this dialog off in Security &amp; Backups → Config Lock. The save that turns it
+off is <i>itself</i> still confirmed — deliberately.</p>
+
+<div class="card danger">
+<b>If someone else saved while you were editing</b>, your save is refused (error 409), the dialog closes, and
+the latest config is reloaded so you can re-apply your edits on top. Nothing is silently overwritten — ever.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="signin">4. Signing in</h2>
+<p>Algo Config asks for its own username and password, separate from the main dashboard login.</p>
+<table>
+<tr><td class="lbl">Heading</td><td>"Algo Config — Admin"</td></tr>
+<tr><td class="lbl">Sub-text</td><td><i>"Server-side session required. Every sign-in (and every failed attempt) is recorded in the audit log."</i></td></tr>
+<tr><td class="lbl">If not set up</td><td>Amber banner: <i>"Algo admin login is not configured. Set ALGO_ADMIN_USER and ALGO_ADMIN_PASSWORD in .env and restart the backend."</i></td></tr>
+<tr><td class="lbl">If it expires</td><td><i>"Session expired (backend restarted?) — please sign in again."</i> Your draft is lost; sign in and redo.</td></tr>
+</table>
+<p class="muted">This password is stored properly scrambled (hashed). Nobody — including support — can read it back. If it is lost, it must be reset, not recovered.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="topbar">5. The top bar</h2>
+<p>Always visible, in this exact order:</p>
+<p><span class="btn">Daily Trading Config</span> <span class="btn">OI Change</span> <span class="btn">Multi-TF</span>
+<span class="btn">Ratio</span> <span class="btn">Ultra Master Pro</span> <span class="btn">P&amp;L Summary</span>
+<span class="btn">Paper Trading</span> <span class="btn">Holiday Calendar</span> <span class="btn">Integrations &amp; Broker</span>
+<span class="btn">Security &amp; Backups</span> <span class="btn">Validation Summary</span></p>
+
+<table>
+<tr><td class="lbl">v41 · admin</td><td>Which config version is live, and who you are signed in as.</td></tr>
+<tr><td class="lbl">🔑 Change password</td><td>Jumps to Security and scrolls to the password form.</td></tr>
+<tr><td class="lbl">Sign out</td><td>Ends the session.</td></tr>
+<tr><td class="lbl"><span class="r">■ MASTER KILL ACTIVE</span></td><td>Red badge. Only appears when the master kill is on. <b>Nothing will trade.</b></td></tr>
+<tr><td class="lbl"><span class="a">■ PAPER MODE</span></td><td>Amber badge. Orders are simulated, not real.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="daily">6. Daily Trading Config</h2>
+<p>The main control room. Top to bottom:</p>
+
+<h3>6.1 Master Kill Switch</h3>
+<p>A red-bordered panel at the very top.</p>
+<div class="card danger">
+<b>What it really does</b> (verbatim from the screen): <i>"Overrides every day/zone switch below. When killed,
+no trade is evaluated or executed regardless of any other setting, <b>and an open position is squared off at
+market on the next evaluated minute</b>. Day and zone kills only stop new entries — they never close an open trade."</i>
+<p style="margin:8px 0 0">In plain terms: <b>Master Kill is the only switch that closes a trade you already have.</b>
+Day kills and zone kills just stop new ones starting.</p>
+</div>
+
+<h3>6.2 Overnight Carry</h3>
+<p>An amber panel. Two very different behaviours:</p>
+<table>
+<tr><th></th><th>What happens</th></tr>
+<tr><td class="lbl">ON <span class="muted">(default)</span></td><td>Exactly like TradingView. Only Ultra Master Pro's exit ladder closes a position. It <b>stays open overnight</b>, End-Exit is ignored, and the only automatic close is the expiry-day 15:25 force-close.</td></tr>
+<tr><td class="lbl">OFF</td><td>The position is force-closed at the end of the day (End-Exit).</td></tr>
+</table>
+<div class="card warn">While this is ON, <b>every</b> zone's End-Exit switch is greyed out and labelled "End-Exit ignored". That is not a bug — carry overrides it.</div>
+
+<h3>6.3 Live Decision Snapshot</h3>
+<p>Refreshes every 5 seconds. Six tiles: <b>Engine State</b>, <b>Active Zone</b>, <b>Direction</b>,
+<b>Trades Today</b>, <b>Day P&amp;L</b>, <b>Position</b>. Below them, one badge per engine showing its current
+vote. An amber line "<b>⚠ …</b>" lists anything currently blocking trading. If the engine has paused itself you
+get a red "<b>⏸ reason</b>" and a <span class="btn">Resume engine</span> button.</p>
+<p class="muted">If the card is missing entirely, the engine loop is not running in this backend (replay mode, or not started).</p>
+
+<h3>6.4 Master Kill Grid</h3>
+<p>A 5×4 grid of coloured dots — the fastest way to see what is switched on. Rows are Monday–Friday;
+columns are <b>Z1 · Z2 · Z3 · Day</b>. <span class="r">Red</span> = killed, <span class="g">green</span> = live.
+Click any dot to toggle it. Hover to read "Monday Z1: live".</p>
+
+<h3>6.5 Account &amp; Position Sizing</h3>
+<table>
+<tr><td class="lbl">Demat Account Balance (₹)</td><td>Default <b>30000</b>. A placeholder until the broker supplies it live.</td></tr>
+<tr><td class="lbl">Paper Trading Mode</td><td>Send orders to the simulator instead of the broker. Same switch as the Paper tab.</td></tr>
+</table>
+<div class="card note">
+<b>How position size is decided</b> (verbatim): <i>"No minimum capital. Each day picks All-In (100% of remaining
+balance) or an allocation %. Lots at entry = allocated capital ÷ (live premium × lot size) — never a fixed input.
+Max concurrent positions: 1 (fixed)."</i>
+<p style="margin:8px 0 0">So you never type a lot count anywhere. You set a <i>budget</i>, and the system works
+out the lots from the live price. And you can only ever hold <b>one position at a time</b>.</p>
+</div>
+
+<h3>6.6 Zone Config</h3>
+<p>First the day-level row:</p>
+<table>
+<tr><td class="lbl">Index for {Day}</td><td>NIFTY · SENSEX · BANKNIFTY · FINNIFTY · MIDCPNIFTY. Each weekday can trade a different index.</td></tr>
+<tr><td class="lbl">Data strikes ATM ±</td><td>Default <b>11</b>, allowed 1–60. How many strikes each side of the money the feed <i>collects</i>. Takes effect about a minute after saving. <b>Careful:</b> the data plan caps at roughly 50 instruments, so beyond ±12 the outer strikes are silently trimmed (you get a warning on save).</td></tr>
+<tr><td class="lbl">Day kill</td><td>Red switch. Stops this weekday trading entirely.</td></tr>
+</table>
+
+<p>Then one row per zone:</p>
+<table>
+<tr><th>Control</th><th>Meaning</th><th>Typical default</th></tr>
+<tr><td class="lbl">Start / End</td><td>The zone's time window. The zone with the <b>latest End time</b> is the "last" zone and is the only one that owns End-Exit.</td><td>Z1 09:20–10:30<br>Z2 11:45–13:00<br>Z3 14:15–15:25</td></tr>
+<tr><td class="lbl">Prem Min / Prem Max</td><td>The price band. The system only considers option contracts whose premium sits inside this range.</td><td>75–125 / 60–100 / 55–90</td></tr>
+<tr><td class="lbl">Strikes</td><td>How many in-band strikes to hunt <b>in parallel</b>, nearest the band middle first. First valid entry wins. <b>1</b> = original single-strike behaviour. Allowed 1–10.</td><td>3</td></tr>
+<tr><td class="lbl">Max Trades</td><td>How many trades this zone may take today.</td><td>2 / 2 / 1</td></tr>
+<tr><td class="lbl">End-Exit</td><td>Only on the last zone. Force-closes an open trade when that zone's End candle closes. Shows "<b>End-Exit ignored</b>" in amber and is disabled while Overnight Carry is on. Other zones show a grey dash.</td><td>on</td></tr>
+<tr><td class="lbl">Killed / Live</td><td><b>Inverted switch</b> — green means <i>live</i>. Turning it off kills the zone.</td><td>live</td></tr>
+</table>
+
+<h3>6.7 Risk &amp; Alerts</h3>
+<p>These are per-weekday money limits.</p>
+<table>
+<tr><td class="lbl">All In</td><td>Use 100% of whatever balance remains. When on, the allocation box below is disabled.</td></tr>
+<tr><td class="lbl">Capital Allocation %</td><td>What share of the balance this day may use.</td></tr>
+<tr><td class="lbl">Max Loss Per Day (%)</td><td>Of the <i>allocated</i> amount, not the whole account. Hitting it kills the day.</td></tr>
+<tr><td class="lbl">Max Profit Lock (%)</td><td>Stop trading once you are this far ahead. Protects a good day.</td></tr>
+<tr><td class="lbl">Max Consecutive Losses</td><td>How many losses in a row before the engine pauses itself.</td></tr>
+<tr><td class="lbl">Max Consecutive Loss (%)</td><td>The same idea in money — pause if a losing streak costs this much.</td></tr>
+<tr><td class="lbl">Telegram alert on trade entry/exit</td><td>Entry and exit fills, kill switches, and the 15:45 daily summary. Telegram is the only alert channel.</td></tr>
+</table>
+<div class="card ok">Under these boxes a live line does the arithmetic for you, e.g.
+<b>"≈ ₹15,000 allocated · max loss ≈ ₹3,000 · profit lock ≈ ₹4,500 · streak cap ≈ ₹3,750"</b>.
+Watch it change as you type — it is the quickest way to sanity-check a percentage.</div>
+
+<h3>6.8 Indicator Settings</h3>
+<p>One block per zone. This is where you choose which engines vote and how their votes are counted.</p>
+
+<table>
+<tr><td class="lbl">Reeval</td><td><b>Every candle</b> (re-decide each minute) or <b>Once at start</b> (decide at the zone open and stick with it).</td></tr>
+<tr><td class="lbl">Hold</td><td>Experimental. Keeps a hunt alive this many minutes through brief "no direction" flickers. An <i>opposite</i> signal still cancels immediately. 0 = strict. Allowed 0–375.</td></tr>
+<tr><td class="lbl">Each engine row</td><td>A switch (vote / don't vote), a <b>strikes</b> dropdown (ATM ±5 / ±10 / ±15 / ±20 / All strikes) controlling how much of the chain that engine sums, a <b>↗</b> link to its dashboard, and a <b>⧉</b> button to copy its parameters elsewhere.</td></tr>
+</table>
+
+<h4>The Combine row — how votes become a decision</h4>
+<table>
+<tr><td class="lbl">Combine</td><td><b>Unanimous</b>: every switched-on engine that has a direction must agree. <b>Majority</b>: the side with more votes wins; a tie is No Trade.</td></tr>
+<tr><td class="lbl">Neutral =</td><td><b>Blocker</b>: a switched-on engine with no direction stops the trade. <b>Abstention</b>: it is ignored and the others decide.</td></tr>
+</table>
+<div class="card warn">If you pick Majority with an <b>even</b> number of engines enabled, an amber note appears:
+"<i>2 enabled — a split vote ties, and a tie is No Trade</i>". Majority works best with an odd number.</div>
+<p>Below the row, a sentence tells you the current rule in words — e.g.
+"<i>Rule: 3 of 3 enabled — all must agree on CALL or PUT, otherwise No Trade. A switched-on indicator with no
+direction blocks the trade.</i>" <b>Always read this line after changing anything here.</b></p>
+
+<h4>Strategy Active</h4>
+<p>On the Ultra Master Pro row. Turning it <b>off</b> puts the zone in observation mode: the filters still run
+and record their signals, but the execution engine is locked — no hunts, no entries.</p>
+
+<h3>6.9 Copy and Reset</h3>
+<table>
+<tr><td class="lbl">Copy {Day} to: [weekday]</td><td>Makes the target day <b>identical</b> — zone times, bands, strikes, max trades, kills, risk, index and every engine parameter.</td></tr>
+<tr><td class="lbl">Copy settings…</td><td>Opens the full dialog (section 7) with a preview.</td></tr>
+<tr><td class="lbl">Reset {Day} to Default</td><td>Replaces the day with the reference defaults. Disabled if the defaults could not be loaded. <b>No confirmation</b> — but it only stages in the draft.</td></tr>
+<tr><td class="lbl">copy {Zn} to: [zone]</td><td>Copies band, trades and all engine settings. Times stay as they are when the zone id differs.</td></tr>
+<tr><td class="lbl">{Zn} on all days</td><td>Copies this zone onto the same zone number on every other day. <b>Times do copy</b> in this case.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="copy">7. The Copy Settings dialog</h2>
+<p>The safe way to copy, because it shows you exactly what will change first.</p>
+<ol>
+<li><b>Choose what to copy</b> — whole day, one zone, or one indicator.</li>
+<li><b>Choose the source</b> — which day, which zone, which engine.</li>
+<li><b>Choose targets</b> — tick cells in a grid, or use the quick pills ("all days", "all 15", "same zone on all days"). The source cell is disabled so you cannot copy onto itself.</li>
+<li><b>Read the preview</b> — one expandable row per target: "<b>▸ Tuesday Z1 — 14 fields change</b>" or "<i>— already identical</i>". Expand to see every field, old value in red, new in green.</li>
+<li><b>Copy into draft</b> — still needs a Save.</li>
+</ol>
+<div class="card warn">
+<b>Watch for the amber ⚠ lines.</b> Two warnings can appear:
+<ul>
+<li>"<i>Index changes: Tuesday (SENSEX) will switch to NIFTY — the whole day copies, including its index.</i>"</li>
+<li>"<i>Index mismatch: NIFTY parameters onto Tuesday (SENSEX) — strike windows and premium bands may not suit that index.</i>"</li>
+</ul>
+Both matter: NIFTY and SENSEX have different price levels, so a band that works for one may be empty for the other.
+</div>
+<p class="muted">In whole-day scope there is a tick box "<b>Keep each target day's own zone start/end times</b>",
+off by default — meaning a day copy replaces the times too.</p>
+
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="eng-oi">8. Engine — OI Change (OI Structure)</h2>
+<p class="muted">Full name on screen: <b>"OI Structure Engine — the 'OI Change' entry filter"</b>.</p>
+
+<div class="plain">
+<b>What it does in one line:</b> it treats open-interest movement like a price chart — looking for higher highs,
+lower lows and breakouts — scores what it finds, and votes CALL or PUT if the score clears a threshold.
+</div>
+
+<h3>8.1 The shared engine bar (on all four engine pages)</h3>
+<table>
+<tr><td class="lbl">Zone context</td><td>A weekday dropdown and a zone dropdown. <b>These pick which zone you are editing AND evaluating.</b> Get this wrong and you will edit the wrong zone.</td></tr>
+<tr><td class="lbl">Index badge</td><td>Read-only. The index this weekday trades.</td></tr>
+<tr><td class="lbl">Expiry</td><td>"current (auto)" or any listed expiry. For inspection only.</td></tr>
+<tr><td class="lbl">Date</td><td>Blank = live. Set a date to study a past session.</td></tr>
+<tr><td class="lbl">At</td><td>Appears once a date is set. Stops the evaluation at that minute — a time machine. <span class="btn">Live</span> clears both.</td></tr>
+<tr><td class="lbl">💾 Save All Engine Settings</td><td>Same confirm-diff save as everywhere else. Greyed out when nothing changed.</td></tr>
+<tr><td class="lbl">▶ Re-run Engine Now</td><td>Re-calculates without saving.</td></tr>
+<tr><td class="lbl">Reset {Zn} to Defaults</td><td>Copies this engine's reference defaults into the draft. No confirmation.</td></tr>
+<tr><td class="lbl">Copy {Zn} to…</td><td>Copy this engine's parameters to another day × zone, with a preview.</td></tr>
+</table>
+<div class="card warn">While you have unsaved edits, every engine page shows:
+<i>"Unsaved engine parameters — the evaluation below reflects the <b>saved</b> config. Save to apply your edits."</i>
+The numbers you are looking at are from the <b>old</b> settings until you save.
+<span class="muted">(The Ratio engine is the exception — it previews your edits live. See section 10.)</span></div>
+
+<h3>8.2 Engine Master Switches</h3>
+<table>
+<tr><td class="lbl">1-Minute Structure Engine</td><td>On: higher-high / lower-low patterns and range breakouts contribute. Off: 1-minute structure is excluded from scoring entirely.</td></tr>
+<tr><td class="lbl">5-Minute Red Candle Rule</td><td>On: the red-candle rule contributes. Off: red candles add nothing regardless of colour.</td></tr>
+</table>
+<p class="muted">Turning both off means this engine can never produce a signal.</p>
+
+<h3>8.3 Global Aggregation Result (read-only)</h3>
+<p>A big <b>CALL</b> / <b>PUT</b> / <b>NO_TRADE</b> badge, the two point totals with a bar, and a plain-English
+verdict — either "<i>Confidence gate: leading side (42 pts) is below the 55 threshold → NO_TRADE</i>" or
+"<i>Confidence gate: CALL leads with 70 pts, clearing 55</i>".</p>
+
+<h3>8.4 Interpretation Matrix</h3>
+<p>Six rows, two columns of dropdowns (Call / Put / Ignore). <b>This is the only place an event acquires a side.</b></p>
+<table>
+<tr><th>Event</th><th>On the Call chart</th><th>On the Put chart</th></tr>
+<tr><td class="lbl">Higher High (HH)</td><td>Call</td><td>Put</td></tr>
+<tr><td class="lbl">Higher Low (HL)</td><td>Call</td><td>Put</td></tr>
+<tr><td class="lbl">Lower High (LH)</td><td>Put</td><td>Call</td></tr>
+<tr><td class="lbl">Lower Low (LL)</td><td>Put</td><td>Call</td></tr>
+<tr><td class="lbl">Range Breakout Up</td><td>Call</td><td>Put</td></tr>
+<tr><td class="lbl">Range Breakout Down</td><td>Put</td><td>Call</td></tr>
+</table>
+<p class="muted">Note the mirror: rising call OI is bullish, but rising <i>put</i> OI means the opposite. That is
+why the two columns are inverted. Set anything to "Ignore" to make that event score nothing.</p>
+
+<h3>8.5 Swing Detection &amp; Range Zone</h3>
+<table>
+<tr><th>Box</th><th>Default</th><th>What it changes</th></tr>
+<tr><td class="lbl">Left Bars / Right Bars</td><td>3 / 3</td><td>How many bars either side a point must beat to count as a turning point. Higher = fewer, more significant swings.</td></tr>
+<tr><td class="lbl">Min Swing Move (Cr)</td><td>0.03</td><td>Noise filter. Movements smaller than this are not a swing.</td></tr>
+<tr><td class="lbl">EQH/EQL Tolerance (Cr)</td><td>0.015</td><td>How close two highs must be to count as "equal" rather than higher/lower.</td></tr>
+<tr><td class="lbl">Breakout Buffer (Cr)</td><td>0.02</td><td>How far past the range edge price must go before it counts as a breakout.</td></tr>
+<tr><td class="lbl">Strikes ATM ± (−1 = All)</td><td>10</td><td>Same setting as the "strikes" dropdown on the Daily tab.</td></tr>
+</table>
+
+<h3>8.6 Scoring Weights</h3>
+<table>
+<tr><th>Box</th><th>Default</th><th>What it is worth</th></tr>
+<tr><td class="lbl">Swing Event Weight</td><td>15</td><td>Points for each HH/HL/LH/LL.</td></tr>
+<tr><td class="lbl">Range Breakout Weight</td><td>30</td><td>Points for a breakout — worth twice a swing by default.</td></tr>
+<tr><td class="lbl">Liquidity Sweep Weight</td><td>10</td><td>Bonus when a breakout also sweeps an equal-high/low level.</td></tr>
+<tr><td class="lbl">Red Candle Weight (5m)</td><td>20</td><td>Points from the candle rule.</td></tr>
+<tr><td class="lbl">Call+Put Agreement Bonus</td><td>10</td><td>Extra when both charts point the same way.</td></tr>
+<tr><td class="lbl">Min Confidence Threshold</td><td>55</td><td>The leading side must reach this or the answer is NO_TRADE.</td></tr>
+</table>
+
+<h3>8.7 Swing Scoring Lookback</h3>
+<p>One box: <b>Lookback (bars, 0 = whole session)</b>, default <b>0</b>, allowed 0–375.</p>
+<table>
+<tr><td class="lbl">0</td><td><i>"Whole session. Every swing confirmed since the open keeps scoring, so the point totals climb all day and the 55 threshold is cleared easily by the afternoon. This is the original behaviour."</i></td></tr>
+<tr><td class="lbl">e.g. 30</td><td><i>"Only swings confirmed in the last 30 bars score, which keeps the 55 threshold meaningful late in the session. The range zone and the breakout test still read the complete structure."</i></td></tr>
+</table>
+<div class="card note"><b>Why this exists.</b> With 0, points only ever accumulate — by lunchtime the total is in the
+hundreds and the threshold stops filtering anything. A lookback makes the score reflect <i>recent</i> structure.
+Crucially it only filters <b>scoring</b>: the range zone and breakout test still see the whole day, so a short
+lookback never erases a level formed this morning.</div>
+
+<h3>8.8 Candle Rule</h3>
+<table>
+<tr><td class="lbl">Candle Size (1-min bars)</td><td>Default <b>5</b>, allowed 2–60. How many one-minute bars fold into one candle.</td></tr>
+<tr><td class="lbl">Candle Read</td><td><b>Last fully closed candle</b> (default) — stable, never changes once set. <b>Current forming candle</b> — live, and its colour can flip while the candle is still building.</td></tr>
+</table>
+<p class="muted">The panel spells out the active choice underneath, e.g. "<i>Reading 5-bar candle, last closed.</i>"</p>
+
+<h3>8.9 The rest of the page</h3>
+<table>
+<tr><td class="lbl">Four charts</td><td>Call and Put, at 5-minute and 1-minute. The two 1-minute charts have a <b>Structure</b> switch that draws the swing labels — this is a <i>view</i> setting saved in your browser only. It never changes the config.</td></tr>
+<tr><td class="lbl">Contributing Events</td><td>Every event that scored, in the order found, with its side and points. This is how you audit a score.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="eng-mtf">9. Engine — Multi-TF (MTF Ratio)</h2>
+<p class="muted">On screen: <b>"MTF Ratio — the 'Multi-TF' entry filter"</b>.</p>
+
+<div class="plain">
+<b>In one line:</b> it measures how call and put open interest changed over ten different time windows, then runs
+<i>your</i> rules against those numbers. It is the only engine you program yourself.
+</div>
+
+<h3>9.1 The table</h3>
+<p>Columns: <b>Timeframe · Call OI Δ · Put OI Δ · Call : Put · Lowest OI Side</b>.</p>
+<div class="card note"><b>"Lowest OI Side" is the key column.</b> It is the side with the <i>lower signed</i>
+change — and it is what the rules filter on. It is deliberately counter-intuitive: the side people are
+<i>not</i> piling into is often the direction that follows.</div>
+
+<h3>9.2 Timeframe rows computed</h3>
+<p>Ten pills: <b>1 Min · 3 Min · 5 Min · 10 Min · 15 Min · 30 Min · 1 Hr · 2 Hrs · 3 Hrs · Full Day</b>.
+All on by default. Switching one off removes that row — and any rule that references it shows
+"<b>(not computed)</b>" beside the timeframe.</p>
+
+<h3>9.3 Writing rules</h3>
+<p>Each rule is: a name, an on/off switch, a <b>THEN</b> result (Call / Put / Neutral), and a list of conditions
+joined by <b>AND</b>. Rules run top to bottom; <b>the first rule that fully matches wins and evaluation stops.</b></p>
+<p>A condition reads left to right:</p>
+<table>
+<tr><th>Column</th><th>Choices</th><th>Meaning</th></tr>
+<tr><td class="lbl">Timeframe</td><td>any of the ten</td><td>Which row to test.</td></tr>
+<tr><td class="lbl">Lowest-OI Side</td><td>Any / Call / Put</td><td>Which side must be the lower one.</td></tr>
+<tr><td class="lbl">Operator</td><td>Any / Above / Below</td><td>How to compare the ratio. "Above" catches capitulation (a wide imbalance); "Below" catches tight ranges; "Any" ignores size.</td></tr>
+<tr><td class="lbl">Threshold</td><td>Any, 1:1, 1:1.2, 1:1.5, 1:2, 1:3, 1:4, or custom</td><td>The ratio to compare against. Choose "custom… (type 1:N)" to type e.g. <code>1:2.5</code>. The box border turns <span class="r">red</span> until the format is valid; press Enter to commit. The <b>▾</b> button returns to the preset list.</td></tr>
+<tr><td class="lbl">Call Sign / Put Sign</td><td>Any / Positive (+) / Negative (−)</td><td>Whether that side's change must be rising or falling.</td></tr>
+</table>
+<div class="card warn">A rule with <b>no</b> conditions shows "<i>No conditions — this rule can never match</i>".
+<b>Delete</b> removes a whole rule and <b>✕</b> removes one condition — neither asks for confirmation, but both
+are only draft changes until you Save.</div>
+
+<h3>9.4 The three rules shipped by default</h3>
+<table>
+<tr><th>Name</th><th>Result</th><th>Condition</th></tr>
+<tr><td class="lbl">Massive Call Capitulation (Above 1:2)</td><td>Call</td><td>1 Min, lowest side Call, Above 1:2, both signs negative</td></tr>
+<tr><td class="lbl">Tight Consolidation (Below 1:2)</td><td>Put</td><td>5 Min, any side, Below 1:2</td></tr>
+<tr><td class="lbl">Pure Direction Bias (Any Threshold)</td><td>Call</td><td>15 Min, lowest side Call, call sign positive</td></tr>
+</table>
+
+<h3>9.5 "Why this result?"</h3>
+<p>Every rule listed with its verdict — <span class="muted">OFF</span>, <span class="r">failed</span>, or
+<span class="g">MATCH → Call</span> — and under each, a ✓ or ✗ per condition. <b>This is the panel to open when
+a rule is not firing and you cannot see why.</b></p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="eng-ratio">10. Engine — Ratio (MQAE)</h2>
+<p class="muted">On screen: <b>"Master Quantitative Action Engine — the 'Ratio' entry filter"</b>.</p>
+
+<div class="plain">
+<b>In one line:</b> five independent models each score the PCR line and the ratio line. The scores are added up,
+and if the total clears a threshold, that is the vote.
+</div>
+
+<div class="card ok"><b>This engine previews your edits live.</b> Unlike the others, the scores and chart update
+as you type — but <i>"Live trading still uses the saved config until you Save."</i></div>
+
+<h3>10.1 Execution Risk Profile</h3>
+<table>
+<tr><td class="lbl"><span class="r">AGGRESSIVE MODE</span></td><td>Early entry. Velocity &amp; Order Blocks weighted ×3. Sets the threshold to <b>3</b>. <i>(Default.)</i></td></tr>
+<tr><td class="lbl"><span class="g">CONSERVATIVE MODE</span></td><td>Safe entry. SMC &amp; Crossover weighted ×3. Sets the threshold to <b>6</b>.</td></tr>
+</table>
+<p class="muted">They are mutually exclusive — you cannot switch both off; clicking the active one does nothing.
+Switching mode <b>rewrites the threshold</b>, but you can still edit it afterwards.</p>
+
+<h3>10.2 The five models</h3>
+<p>Each card has a switch, a live chip (<b>OFF</b> / <b>BULLISH +N</b> / <b>BEARISH −N</b> / <b>NEUTRAL</b>) and its own boxes. A switched-off model dims.</p>
+<table>
+<tr><th>Model</th><th>Boxes</th><th>Looks for</th></tr>
+<tr><td class="lbl">1. Kinetic Velocity</td><td>RoC Period <b>8</b>, Surge Threshold <b>0.012</b></td><td>Sudden acceleration in the ratio.</td></tr>
+<tr><td class="lbl">2. Order Blocks</td><td>Impulse Trigger <b>0.02</b>, Zone Width <b>0.01</b></td><td>Price zones where big moves began.</td></tr>
+<tr><td class="lbl">3. SMC Structure</td><td>Swing Bars <b>3</b>, Min Move <b>0.025</b></td><td>Market-structure turning points.</td></tr>
+<tr><td class="lbl">4. Macro Trend Rider</td><td>Trail Period <b>15</b>, Buffer <b>0.04</b></td><td>The larger trend, as a trailing line.</td></tr>
+<tr><td class="lbl">5. Crossover Momentum</td><td>none</td><td>Green vs Yellow line comparison. ×3 in Conservative mode.</td></tr>
+</table>
+
+<h3>10.3 Reading the result</h3>
+<p><b>Signal Synthesis</b> shows three pills — <b>Green (PCR) Net</b>, <b>Yellow (Ratio) Net</b>,
+<b>Crossover</b> — then the verdict box (<b>CALL EXECUTION</b> / <b>PUT EXECUTION</b> / <b>NO TRADE</b>) and
+"<b>Total +7 vs ±3 threshold</b>".</p>
+<p><b>Live Algorithmic Weight Matrix</b> breaks that total down line by line, so you can see exactly which model
+contributed what. <b>Chronological Execution History</b> lists every time the signal changed today.</p>
+
+<h3>10.4 Two controls that are easy to mistake</h3>
+<table>
+<tr><td class="lbl">TIME-REPLAY slider</td><td>Scrubs the evaluation back through the day. <b>View only</b> — changes nothing. <span class="btn">▶ LIVE</span> returns to now.</td></tr>
+<tr><td class="lbl">Chart timeframe pills</td><td><b>These DO change the config.</b> 1m / 5m / 10m / 15m / 30m / Full Day sets the candle the five models actually run on. Not a display option.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="eng-ump">11. Engine — Ultra Master Pro</h2>
+<p class="muted">On screen: <b>"NIFTY Ultra Master Pro — execution engine (entries + all exits)"</b>.</p>
+
+<div class="plain">
+<b>In one line:</b> this engine never votes on direction. Once the filters say CALL or PUT, it maps important
+price levels, waits for a precise setup, enters — and from then on it alone decides when to exit.
+</div>
+
+<h3>11.1 Data-Ready Gate</h3>
+<p>Four dots — <b>{N}m feed · Daily feed (2/3) · Weekly feed · 1H feed</b> — green when satisfied. Then the
+verdict: <b class="g">GATE OPEN — entries permitted</b> or <b class="a">GATE CLOSED — entries blocked until all
+feeds resolve</b>.</p>
+<div class="card note">A closed gate is the single most common reason a fresh contract takes no trades. The
+engine needs enough history to build its levels, and it refuses to guess.</div>
+
+<h3>11.2 Strike selector</h3>
+<table>
+<tr><td class="lbl">auto (band pick)</td><td>The strike the engine would really hunt — the premium-band pick.</td></tr>
+<tr><td class="lbl">HUNTED — in band</td><td>Its parallel multi-strike set, nearest band-middle first.</td></tr>
+<tr><td class="lbl">ALL STRIKES</td><td>Any contract on the chain, for manual inspection.</td></tr>
+</table>
+<p>A badge shows which you are on: <b class="g">BAND</b>, <b class="b">MANUAL</b>, or
+<b class="a">ATM fallback</b> (no strike currently sits inside the band). <b>View only</b> — it never changes config.</p>
+
+<h3>11.3 Entry Model State Machine</h3>
+<p>Shows <b class="g">IN TRADE</b> / <b class="a">WATCHING</b> / idle, and when in a trade the sub-scenario,
+entry price and base level.</p>
+<div class="card note"><i>"Retest entries (R1/R2) fire only on Structural, Discovery &amp; Bridge levels — Median
+is excluded (synthetic, lower confidence). The filter layer opens the door; only price action (or the day's
+End-Exit) closes it."</i></div>
+
+<h3>11.4 Exit &amp; Trail System — priority order</h3>
+<p><b>First to fire wins.</b> This is the ladder that closes every trade:</p>
+<table>
+<tr><th>Priority</th><th>Name</th><th>When it fires</th></tr>
+<tr><td class="lbl">P1</td><td>Max SL (Hard Cap)</td><td>Always armed. The absolute worst loss you will take on the trade.</td></tr>
+<tr><td class="lbl">P2</td><td>Trail Exit (System A)</td><td>A trailing stop that ratchets up in quarter steps as profit grows.</td></tr>
+<tr><td class="lbl">P2b</td><td>Zone Trail (System B)</td><td>A staged trail on body-closing entries only.</td></tr>
+<tr><td class="lbl">P3</td><td>Target Hit</td><td>The profit objective.</td></tr>
+<tr><td class="lbl">P4</td><td>Base SL</td><td>The original stop. Automatically disabled once a trail sits above it.</td></tr>
+</table>
+<p class="muted">When a trade is live you also see the System A quarter rungs (Q1/Q2/Q3) with the current trail highlighted in amber.</p>
+
+<h3>11.5 Zone Settings — the 26 Pine inputs</h3>
+<p class="muted">Hint on screen: <i>"all 26 Pine inputs + entry timeframe &amp; per-kind switches,
+TradingView-style · numeric fields carry no min/max — extreme values are trading decisions"</i>.</p>
+
+<h4>🏛️ Institutional Master Laws</h4>
+<table>
+<tr><th>Box</th><th>Default (Z1·Z2·Z3)</th><th>Meaning</th></tr>
+<tr><td class="lbl">Expansion Law (20% Spacing)</td><td>18 · 20 · 24</td><td>How far apart discovered levels must sit.</td></tr>
+<tr><td class="lbl">Bridge Law (50% Void)</td><td>45 · 50 · 55</td><td>How big a gap must be before a bridge level is placed in it.</td></tr>
+<tr><td class="lbl">Median Law (Gap %)</td><td>45 · 50 · 55</td><td>When a median level is created inside a gap.</td></tr>
+<tr><td class="lbl">Price Floor (₹ Stop)</td><td>40 · 50 · 60</td><td>The lowest premium the engine will work with.</td></tr>
+</table>
+
+<h4>🔍 Structural Detection</h4>
+<table>
+<tr><td class="lbl">Body Match (pts)</td><td>1.8 · 2.2 · 2.6 — how closely two candle bodies must align to count as structure.</td></tr>
+<tr><td class="lbl">1H Scan Depth (Bars)</td><td>200 · 250 · 300 — how far back the hourly scan looks.</td></tr>
+</table>
+
+<h4>📐 Entry Model</h4>
+<table>
+<tr><td class="lbl">Trade Entry Timeframe</td><td>5-Minute (default) or 15-Minute. <i>"Changes ONLY the candle the trigger / test-candle / retest logic evaluates. Key levels are unchanged."</i></td></tr>
+<tr><td class="lbl">Max SL % (Hard Cap)</td><td>8 · 10 · 12 — the P1 stop, as a percent of premium.</td></tr>
+<tr><td class="lbl">Trigger Timeout (bars)</td><td>4 · 6 · 8 — how long an armed trigger stays valid.</td></tr>
+<tr><td class="lbl">Enable LONG entries (▲)</td><td>Master switch for the eight body-closing entry kinds.</td></tr>
+<tr><td class="lbl">Enable RETEST entries (▲R)</td><td>Master switch for R1 and R2.</td></tr>
+<tr><td class="lbl">Show Entry Signals / SL Lines / Trail Labels</td><td><b>Drawing only.</b> These change the chart, never the trading.</td></tr>
+</table>
+
+<h4>The ten entry kinds</h4>
+<p><b>Body-Closing:</b> S1A S1B S1C S2A S2B S3A S3B S3C &nbsp;·&nbsp; <b>Retest:</b> R1 R2</p>
+<p>Each is a button. Coloured = allowed; <s>struck through and grey</s> = switched off.
+Hover: <i>"S1A — ON. A disabled kind is refused at the entry commit; the trigger stays armed for a later candle."</i></p>
+<div class="card warn">If a group's master switch is off, the heading gains "<b>master switch OFF — none of these
+can fire</b>" and the whole grid dims. Individual buttons then do nothing.</div>
+
+<h4>📊 Dashboard &amp; 🎨 Visual</h4>
+<p>Show Dashboard and Show Key Levels add or remove the two read-out cards at the top of the page.
+Dashboard Position and Levels Position actually move them. The Visual group (Zone Width, line widths,
+extensions, offsets, the four "Show …" switches and Median Color) affects <b>only the chart drawing</b>.</p>
+<p class="muted">A colour that is not a valid <code>#RRGGBB</code> hex falls back to gold <code>#FFD700</code> and produces a warning on save.</p>
+
+<div class="card ok">Standing note on this page: <i>"Every calculation on this page is conformance-audited
+line-by-line against the Pine source (zero divergences)."</i> In plain terms — this engine is a faithful port of
+the TradingView script, not an approximation.</div>
+
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="paper">12. Paper Trading</h2>
+<div class="plain"><b>Paper trading means practice trading.</b> Every order goes to a simulator instead of the
+broker. Same engines, same rules, same fees — only the execution is pretend. It is how you test without risking money.</div>
+
+<h3>12.1 Virtual Capital</h3>
+<table>
+<tr><td class="lbl">Paper mode ON / OFF</td><td>The switch label <b>changes with the state</b>. ON: "<i>Every order goes to the simulator.</i>" OFF: "<i>Orders go to the LIVE broker with real money.</i>"</td></tr>
+<tr><td class="lbl">⚠ LIVE MODE banner</td><td>Black on red. Appears the moment paper mode is off: "<i>LIVE MODE — orders will hit the broker once saved</i>".</td></tr>
+<tr><td class="lbl">Virtual Balance (₹)</td><td>Default 30000. Completely separate from the real demat balance.</td></tr>
+<tr><td class="lbl">Read-out tiles</td><td>Session realized P&amp;L · Current virtual balance · Open position · Unrealized · Equity. Hover each for detail.</td></tr>
+<tr><td class="lbl">Reset Paper Session</td><td>Red button. <b>Asks first:</b> "<i>Reset the paper session? This clears ALL paper trade history and restarts the session today. The live ledger is untouched.</i>"</td></tr>
+<tr><td class="lbl">Shadow Mode</td><td>Mirrors every live signal into a parallel paper trade with identical settings — so you can compare live and simulated side by side.</td></tr>
+</table>
+
+<h3>12.2 Simulated Order Execution</h3>
+<table>
+<tr><td class="lbl">Slippage (%)</td><td>Default 0.5. Always applied <b>against</b> you, as in real life.</td></tr>
+<tr><td class="lbl">Simulated latency (ms)</td><td>Default 250, capped at 2000. In live paper trading the simulator <b>really waits</b> this long before committing the fill.</td></tr>
+<tr><td class="lbl">Fill source</td><td>Read-only: "Live LTP (OI Algo feed)". <i>The feed stores last-traded-price only, so bid/ask mid cannot be simulated.</i></td></tr>
+</table>
+<div class="card note">Backtests always use deterministic minute-close fills — latency is recorded but never simulated there.
+Fees are identical for paper and live, so both always speak the same costs.</div>
+
+<h3>12.3 Brokerage Calculator</h3>
+<p>A what-if calculator. <b>It writes nothing to the config.</b> Type a buy premium, sell premium, lots and lot
+size; it shows brokerage, STT, exchange charges, SEBI, IPFT, GST, stamp duty, the total, gross P&amp;L, net
+P&amp;L, and the sentence that matters most:</p>
+<p class="q">"Breakeven: the premium must move ₹X in your favour just to cover charges."</p>
+<p class="muted">Rates come live from the Integrations tab — edit them there and this calculator follows.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="holidays">13. Holiday Calendar</h2>
+<p>A listed date acts as an automatic day-level kill switch. The engine skips it entirely.</p>
+<table>
+<tr><td class="lbl">Exchange Holidays</td><td>One row per date with its occasion and a red <b>✕ remove</b>. <b>No confirmation</b> — but it is only a draft change.</td></tr>
+<tr><td class="lbl">Add Holiday</td><td>Pick a Date, type an Occasion, press <b>Add to calendar</b>. The button stays disabled until a date is chosen.</td></tr>
+</table>
+<p class="muted">The list is seeded from the official NSE holiday file. Remember to Save.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="broker">14. Integrations &amp; Broker</h2>
+
+<h3>14.1 Connected Systems</h3>
+<table>
+<tr><td class="lbl">OI Algo — OI Data Feed</td><td>This platform's own data ingestion. Always shown connected.</td></tr>
+<tr><td class="lbl">Lakshmishree Broking</td><td>Order execution. <b>Test Interactive login</b> probes the session; <b>Reconcile positions</b> compares the broker's positions against ours and reports <b>✔</b> or <b>✗ MISMATCH</b>.</td></tr>
+<tr><td class="lbl">Telegram Bot — Alerts</td><td>Shows the bot name and masked chat id. <b>Send test message</b> (disabled until configured) and <b>Re-check</b>.</td></tr>
+</table>
+
+<h3>14.2 Brokerage &amp; Statutory Charges</h3>
+<table>
+<tr><th>Field</th><th>Default</th></tr>
+<tr><td class="lbl">Brokerage per executed order (₹)</td><td>17.0</td></tr>
+<tr><td class="lbl">STT — sell-side premium (%)</td><td>0.1</td></tr>
+<tr><td class="lbl">Exchange transaction (%)</td><td>0.03503</td></tr>
+<tr><td class="lbl">SEBI turnover (%)</td><td>0.0001</td></tr>
+<tr><td class="lbl">IPFT (%)</td><td>0.0005</td></tr>
+<tr><td class="lbl">GST on charges (%)</td><td>18.0</td></tr>
+<tr><td class="lbl">Stamp duty — buy side (%)</td><td>0.003</td></tr>
+</table>
+<div class="card warn"><b>Keep these honest.</b> They drive the paper simulator, the live P&amp;L <i>and</i> every
+backtest. If they are wrong, every profit figure on the platform is wrong in the same direction — and always
+optimistically, because charges only ever subtract.</div>
+
+<h3>14.3 Manual order test</h3>
+<p>Places one real entry through the engine's own code, so you can prove the order path works end to end.</p>
+<table>
+<tr><td class="lbl">Side</td><td>BUY CALL (CE) or BUY PUT (PE).</td></tr>
+<tr><td class="lbl">Premium min / max (₹)</td><td>Defaults 0.5 and 2 — deliberately cheap contracts.</td></tr>
+<tr><td class="lbl">Max notional (₹, ≤ 1000)</td><td>Hard capped at ₹1,000 by the server.</td></tr>
+<tr><td class="lbl">Place test entry</td><td><b>Asks first</b>, and the wording changes: "<i>Place a PAPER (simulated) test CALL entry?</i>" or "<i>LIVE — a REAL order at the broker</i>".</td></tr>
+<tr><td class="lbl">Square off</td><td>"<i>Square off the open position now? A LIVE position sends a REAL market sell.</i>"</td></tr>
+</table>
+<p>The result block is unusually detailed: contract, premium at decision, fill price, lots × lot size, notional,
+broker order id, broker status, zone, <b>and two latency measurements</b> (click→response, and server total).</p>
+
+<h3>14.4 Live Account</h3>
+<p>Read-only broker state: cash available, net margin, margin utilised, collateral, open positions and today's orders.</p>
+<div class="card note">Two columns are ours, not the broker's: <b>"Last price (ours)"</b> and <b>"MTM (ours, gross)"</b>.
+They exist because <i>"the broker's margin figures can lag a fill by a few minutes and its MTM fields often read 0.00"</i>.
+Trust our columns for what is happening now.</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="security">15. Security &amp; Backups</h2>
+
+<h3>15.1 Change sign-in ID &amp; password</h3>
+<p>Two steps: confirm who you are (current ID and password, typed twice), then choose the new pair.
+Each password box has a <b>Show / Hide</b> button and a live helper — "Matches", "Does not match the password
+above", "At least 8 characters", "3 more character(s) needed".</p>
+<p>The button stays disabled until everything is valid, and <b>tells you exactly why</b>. On success:
+"<i>Changed. Signing you out so the new credentials take effect…</i>"</p>
+<div class="card danger"><b>The new password cannot be recovered.</b> It is stored one-way. Write it down before
+you press the button — nobody can read it back out of the system, ever.</div>
+
+<h3>15.2 Config Lock</h3>
+<table>
+<tr><td class="lbl">Lock config during market hours</td><td><span class="r">Red switch.</span> Refuses every save between 09:15–15:40 IST on trading days — <b>except turning the lock off</b>, which always works. <b>Kill switches are saves too</b>, so you could lock yourself out of using them mid-session. Use deliberately.</td></tr>
+<tr><td class="lbl">Require confirmation on save</td><td>On by default. Off means Save posts immediately with no diff shown. Recommended: leave it on.</td></tr>
+</table>
+
+<h3>15.3 Version History &amp; Backups</h3>
+<p>The last 25 versions with timestamp, who saved, and their note. <b>Restore</b> asks
+"<i>Restore configuration v41? It is re-saved as a new version.</i>"</p>
+<div class="card ok">Restoring never rewinds history — the old version is re-saved as a <i>new</i> one. You can
+always go forward again. This is your undo button for any change, however old.</div>
+
+<h3>15.4 Full Audit Log</h3>
+<p>Every login and every change, per user, timestamped. Filter by username. Changed fields appear as
+<b>"{field}: {old} → {new}"</b> with old in red and new in green. Failed logins are red; successful ones green.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="validation">16. Validation Summary</h2>
+<p>Two cards, refreshed automatically after every save.</p>
+<table>
+<tr><td class="lbl">Pre-Save Checklist</td><td>"<b>✔ All checks passed</b>" or a list of <b class="r">✘ errors</b> (which block the save) and <b class="a">⚠ warnings</b> (which do not).</td></tr>
+<tr><td class="lbl">Runtime Safety Gate</td><td>"<b>✔ All 15 zones pass the completeness gate</b>", or per-zone red blocks headed "<b>{zone} — BLOCKED FROM TRADING</b>" with the reasons.</td></tr>
+</table>
+<div class="card note"><b>Check this tab after any big edit.</b> A zone can be perfectly saveable and still be
+unable to trade — for example if it has no engines enabled. The second card is the one that tells you.</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="trace">17. Decision Trace</h2>
+<p>One row per evaluated minute — the single best tool for answering "<i>why did nothing happen?</i>"</p>
+<p>Filter pills: <b>all · reject · accept · with candidates</b>. Columns: <b>Time · Zone · Stage · Dir ·
+Readings · Cands · Age · Decision · Reason</b>.</p>
+<p><b>Click any row to expand it.</b> You then see every engine's full working for that minute:</p>
+<ul>
+<li><b>OI Structure</b> — call/put points, confidence, the OI deltas, breakouts, and a chip per scoring event.</li>
+<li><b>MTF Ratio</b> — the full timeframe table, then each rule with ✔ / ✗ / ○ and the reason it passed or failed.</li>
+<li><b>MQAE</b> — the total, the green/yellow/crossover split, and one chip per model.</li>
+<li><b>Candidates</b> — every strike considered, whether it was in band, whether the engine was ready, and which one fired.</li>
+<li><b>Footer</b> — data age, whether the engines agreed, config version, sizing arithmetic, and the zone's exact rule settings.</li>
+</ul>
+<div class="card ok">If you only learn one diagnostic screen, learn this one. Every "why didn't it trade?" question
+is answered here, minute by minute, with the evidence attached.</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="strip">18. The Live Strip</h2>
+<p>The one-line status bar in the header. All read-only.</p>
+<table>
+<tr><th>Badge</th><th>Meaning</th></tr>
+<tr><td class="lbl"><span class="g">● LIVE</span></td><td>Fresh data arriving.</td></tr>
+<tr><td class="lbl"><span class="a">▲ STALE DATA</span></td><td>Data is arriving but is old. Entries are blocked while stale.</td></tr>
+<tr><td class="lbl">■ MARKET CLOSED</td><td>Outside session hours.</td></tr>
+<tr><td class="lbl"><span class="a">▲ FEED ON ANOTHER SYMBOL</span></td><td>The feed is watching a different index than this page.</td></tr>
+<tr><td class="lbl"><span class="r">▲ NO DATA ARRIVING</span></td><td>Something is wrong. Investigate.</td></tr>
+</table>
+<h4>The two bases — this trips people up</h4>
+<table>
+<tr><td class="lbl"><b>LIVE</b> group</td><td>Recomputed on the <b>forming</b> candle. <b>Display only — the engine does not trade on this.</b></td></tr>
+<tr><td class="lbl"><b>TRADED</b> group</td><td>The <b>closed-candle</b> basis. <b>This is what the orchestrator actually trades on.</b></td></tr>
+<tr><td class="lbl"><span class="a">LIVE ≠ TRADED</span></td><td>Amber warning that the two disagree right now — normal mid-candle, and precisely why the engine waits for the close.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h1 id="bt" style="margin-top:60px">Part Two — Backtesting</h1>
+<div class="plain"><b>Backtesting means replaying history.</b> The system takes your exact settings and runs the
+<i>same</i> engine code over stored past data, minute by minute, to show what would have happened. It is how you
+test an idea before risking anything.</div>
+
+<h2>19. The workspace</h2>
+<div class="card ok"><b>The sandbox can never touch live trading.</b> Backtesting has its own separate copy of
+the config, in its own storage. Paper mode is force-enabled for every backtest. Nothing you do here can affect
+the live engine — that is guaranteed in the code, not by convention.</div>
+
+<h3>19.1 The tabs</h3>
+<p><span class="btn">Runs &amp; Results</span> <span class="btn">Daily Trading Config</span>
+<span class="btn">OI Change</span> <span class="btn">Multi-TF</span> <span class="btn">Ratio</span>
+<span class="btn">Ultra Master Pro</span> <span class="btn">P&amp;L Summary</span>
+<span class="btn">Security &amp; Audit</span> <span class="btn">Validation Summary</span></p>
+<p class="muted">The config and engine tabs are <b>the same screens</b> as Algo Config — sections 6 to 11 apply
+exactly. The difference is they edit the sandbox, not live.</p>
+
+<h3>19.2 The sandbox banner</h3>
+<p>Amber, always visible: <b>■ SANDBOX CONFIG</b> — "<i>nothing here can affect live trading · last saved … by …</i>"</p>
+<table>
+<tr><td class="lbl">⟳ Copy from live</td><td>Pulls the current live config into the sandbox. <b>Asks first:</b> "<i>Overwrite the sandbox with the CURRENT LIVE config?</i>"</td></tr>
+<tr><td class="lbl">Save Sandbox…</td><td>Same confirm-diff dialog as live.</td></tr>
+<tr><td class="lbl">Discard</td><td>Throws away unsaved sandbox edits.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bt-form">20. Creating a backtest run</h2>
+<p>Press <b>＋ New Backtest Run</b>.</p>
+
+<h3>20.1 Identity and range</h3>
+<table>
+<tr><td class="lbl">Label</td><td>Your name for the run, e.g. "Feb–Aug baseline". Optional but strongly advised once you have a few.</td></tr>
+<tr><td class="lbl">From / To</td><td>Date pickers, <b>clamped to the data that actually exists</b>. Maximum range about 13 months.</td></tr>
+<tr><td class="lbl">Configuration</td><td><b>Sandbox config</b> (this workspace), <b>Current live config</b>, or <b>A saved version…</b>. Picking a version reveals a second dropdown; until you choose one, both Start buttons stay disabled.</td></tr>
+</table>
+
+<h3>20.2 Money and coverage</h3>
+<table>
+<tr><td class="lbl">Balance mode</td><td><b>Compounding</b> — each day starts from the previous day's closing equity (matches live paper). <b>Fixed per day</b> — every day sizes from the same starting balance.</td></tr>
+<tr><td class="lbl">Starting balance</td><td>0 means "use the config's virtual balance".</td></tr>
+<tr><td class="lbl">Min minutes/day</td><td>Default 300, allowed 1–385. Days with less stored data than this are skipped as unreliable.</td></tr>
+<tr><td class="lbl">Index filter</td><td>All indices, NIFTY days only, or SENSEX days only.</td></tr>
+</table>
+
+<h3>20.3 Simulation settings</h3>
+<table>
+<tr><td class="lbl">Slippage % per side</td><td>Blank uses the base config. Allowed 0–10.</td></tr>
+<tr><td class="lbl">Brokerage ₹/order</td><td>Blank uses the base config. Allowed 0–1000.</td></tr>
+<tr><td class="lbl">use base values</td><td>Clears both overrides.</td></tr>
+<tr><td class="lbl">Record decision trace</td><td><b>On by default.</b> One row per simulated minute. <b>Turning it off means the Day Replay has no Decision Trace</b> — and that is the tool you will want when the results surprise you.</td></tr>
+</table>
+
+<h3>20.4 Exclusions</h3>
+<table>
+<tr><td class="lbl">Skip catalogued bad-data days</td><td><b>On by default.</b> Excludes days where the data vendor is known to have supplied damaged data. <b>Leave this on</b> unless you are specifically investigating those days.</td></tr>
+<tr><td class="lbl">Carry the consecutive-loss pause across days</td><td>Off by default — each day auto-resumes, like a morning manual resume.</td></tr>
+<tr><td class="lbl">Extra excluded days</td><td>Type dates as YYYY-MM-DD. <b>Anything not in that exact format is silently dropped</b> — check your list took effect in the preflight.</td></tr>
+</table>
+
+<h3>20.5 The three buttons</h3>
+<table>
+<tr><td class="lbl">Run Preflight</td><td><b>Always do this first.</b> It creates nothing and shows exactly which days will run and why any will be skipped.</td></tr>
+<tr><td class="lbl">▶ Start Backtest</td><td>Creates and queues the run, then opens it.</td></tr>
+<tr><td class="lbl">🧪 Run scenario suite (7)</td><td>Queues <b>seven runs</b>, one per preset, over the same base and dates. The fastest way to find out which style of configuration suits your data.</td></tr>
+</table>
+<p class="muted">Only one run simulates at a time. Extra runs sit in <b>queued</b> and start automatically, oldest first.</p>
+
+<h3>20.6 Reading the preflight</h3>
+<p>Headline: "<b class="g">42</b> day(s) will run, <b class="a">6</b> skipped." Then a table with a verdict per day.</p>
+<table>
+<tr><th>Skip reason</th><th>Plain meaning</th></tr>
+<tr><td class="lbl">no {weekday} config</td><td>That weekday has no configuration.</td></tr>
+<tr><td class="lbl">config holiday / platform holiday</td><td>A holiday — correctly skipped.</td></tr>
+<tr><td class="lbl">excluded by run settings</td><td>You listed it in Extra excluded days.</td></tr>
+<tr><td class="lbl">catalogued bad-data day (OI collapse)</td><td>Known vendor data damage.</td></tr>
+<tr><td class="lbl">no stored data</td><td>Nothing was recorded that day.</td></tr>
+<tr><td class="lbl">insufficient coverage (N min &lt; M)</td><td>Too few minutes stored — raise or lower Min minutes/day.</td></tr>
+<tr><td class="lbl">suspect timestamps</td><td>The stored times look wrong; the day is skipped for safety.</td></tr>
+<tr><td class="lbl">symbol {SYM} filtered out</td><td>Your Index filter excluded it.</td></tr>
+</table>
+<div class="card warn">Preflight also warns you about things that would waste a run — for example
+"<i>master_kill is ON in this config — the run will place zero trades</i>". <b>Read the amber lines.</b></div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bt-presets">21. Overrides &amp; the 7 scenario presets</h2>
+<p>Overrides apply to <b>every day and every zone</b> on top of the chosen config. Use them to ask
+"what if?" without editing anything.</p>
+
+<h3>21.1 The seven presets</h3>
+<table>
+<tr><th>Preset</th><th>What it does</th></tr>
+<tr><td class="lbl">Baseline (as configured)</td><td>No overrides — exactly your config.</td></tr>
+<tr><td class="lbl">OI Change only</td><td>One indicator decides. No unanimity flicker.</td></tr>
+<tr><td class="lbl">Multi-TF only</td><td>One indicator decides.</td></tr>
+<tr><td class="lbl">Ratio only</td><td>One indicator decides.</td></tr>
+<tr><td class="lbl">Zone-start cadence</td><td>Direction frozen at zone start — hunts live the whole zone.</td></tr>
+<tr><td class="lbl">Direction-hold 15m</td><td>Every-candle signals, but hunts survive flickers for 15 minutes.</td></tr>
+<tr><td class="lbl">Wide open (max entries)</td><td>Ratio-only + every-candle + 60m hold + band ₹1–₹100000 + 10 trades + one wide zone + retest on. Deliberately extreme — use it to prove the machinery can fire at all.</td></tr>
+</table>
+
+<h3>21.2 The individual overrides</h3>
+<p>Every dropdown defaults to <b>"as configured"</b> and every number to <b>0 = keep</b>. Touching any of them
+switches the preset selector to <b>Custom…</b>.</p>
+<table>
+<tr><td class="lbl">Indicators</td><td>Force one engine, or all three.</td></tr>
+<tr><td class="lbl">Re-eval cadence</td><td>Once at zone start, or every candle.</td></tr>
+<tr><td class="lbl">Direction-hold</td><td>off / 5 / 10 / 15 / 30 / 60 minutes.</td></tr>
+<tr><td class="lbl">Zone layout</td><td>"one wide zone 09:20–15:10" — merges the day into a single long window.</td></tr>
+<tr><td class="lbl">Band min / max ₹</td><td>Force a premium band everywhere.</td></tr>
+<tr><td class="lbl">Max trades/zone</td><td>Force a trade cap.</td></tr>
+<tr><td class="lbl">Strike scan</td><td>1 / top 2 / top 3 / top 5 parallel strikes.</td></tr>
+<tr><td class="lbl">Allocation</td><td>25% / 50% / 90% / ALL-IN.</td></tr>
+<tr><td class="lbl">UMP long, retest, entry timeframe</td><td>Force those on or off.</td></tr>
+<tr><td class="lbl">Day kills</td><td>"clear all (every day trades)" — useful when a kill switch is hiding your data.</td></tr>
+</table>
+<p>A collapsible section holds the <b>nine Ultra Master Pro numerics</b> (expansion law, bridge law, median law,
+price floor, body match, scan depth, zone width, max SL, trigger timeout) plus <b>ten toggle pills</b> to switch
+off individual entry kinds (S1A…R2).</p>
+<p class="muted">Whatever you set is summarised on an amber line — e.g. "<i>Overrides → indicators: ratio ·
+direction-hold: 60m · band: 1–100000</i>" — and stored with the run, so you can always see what a run actually tested.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bt-results">22. Reading the results</h2>
+
+<h3>22.1 The runs table</h3>
+<table>
+<tr><th>Status</th><th>Meaning</th></tr>
+<tr><td class="lbl"><span class="a">queued</span></td><td>Waiting — another run holds the slot. It will start on its own.</td></tr>
+<tr><td class="lbl"><span class="a">running</span></td><td>Simulating now.</td></tr>
+<tr><td class="lbl"><span class="g">done</span></td><td>Finished.</td></tr>
+<tr><td class="lbl"><span class="r">error</span></td><td>Failed, or was orphaned by a restart. Use <b>↻ Resume</b>.</td></tr>
+<tr><td class="lbl">cancelled</td><td>You stopped it. Also resumable.</td></tr>
+</table>
+<p class="muted">The <b>Config</b> column shows <code>v12</code> for a saved version, or <code>inline</code> for a
+sandbox run or any run with overrides.</p>
+
+<h3>22.2 Settings used</h3>
+<p>Everything the run actually simulated, frozen at launch: config source, balance mode, starting balance,
+min minutes, index filter, exclusions, lot sizes, strike steps, slippage, brokerage, overnight carry, holidays,
+decision trace on/off, and the full override list.</p>
+<div class="card ok"><b>Everything is frozen at launch</b> — config, lot sizes, strike steps, holiday list. A run
+resumed months later reproduces the same sizing and fees. This is why an old run remains meaningful.</div>
+
+<h3>22.3 The eight stat tiles</h3>
+<table>
+<tr><td class="lbl">Net P&amp;L</td><td>Sum of every closed trade, after fees.</td></tr>
+<tr><td class="lbl">Final Equity</td><td>Where the balance ended, and where it started.</td></tr>
+<tr><td class="lbl">Win Rate</td><td>Winners as a share of closed trades. <b>Break-even counts as a loss.</b></td></tr>
+<tr><td class="lbl">Max Drawdown</td><td>The largest peak-to-trough fall, in ₹ and as a percent of the peak, with the dates.</td></tr>
+<tr><td class="lbl">Profit Factor</td><td>Gross won ÷ gross lost. Above 1 is profitable. "—" means nothing was lost.</td></tr>
+<tr><td class="lbl">Total Fees</td><td>What the trading cost you. Compare against Net P&amp;L — it is often sobering.</td></tr>
+<tr><td class="lbl">Days</td><td>How many ran and how many were skipped.</td></tr>
+<tr><td class="lbl">Avg Win / Loss</td><td>The average size of a winner and of a loser.</td></tr>
+</table>
+
+<h3>22.4 Entry Funnel — the "why so few trades?" card</h3>
+<p>Five tiles tracking direction → hunt → trigger → entry: <b>Days with direction</b>, <b>Hunts started</b>,
+<b>Hunts discarded</b>, <b>Trigger-armed minutes</b>, <b>Entries</b>.</p>
+<p>Underneath, the platform diagnoses itself with one of three sentences:</p>
+<table>
+<tr><td class="lbl">Hunts die fast</td><td>"<i>…the unanimous signal flickers before the UMP's 5-minute machinery can complete a setup. Try zone-start cadence, a single indicator, or direction-hold.</i>"</td></tr>
+<tr><td class="lbl">No hunts at all</td><td>"<i>…the enabled indicators never agreed inside a zone window. Loosen indicators/zones in the overrides.</i>"</td></tr>
+<tr><td class="lbl">Hunts live long enough</td><td>"<i>…entry frequency is governed by the UMP engine's own setup requirements.</i>"</td></tr>
+</table>
+<div class="card note"><b>This card usually answers the question before you ask it.</b> Zero trades almost always
+means the filters never agreed, not that something is broken.</div>
+
+<h3>22.5 Zero trades</h3>
+<p class="q">"The run completed with ZERO trades — the unanimous rule, premium band or risk gates never let an
+entry through under this configuration. Open any day's replay to watch exactly why."</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bt-replay">23. Day Replay</h2>
+<p>Click any completed day. This is a minute-by-minute reconstruction of that session.</p>
+<div class="card ok">After the first load, <b>every playhead move is instant</b> — nothing is fetched again.
+Scrub freely.</div>
+
+<h3>23.1 Transport</h3>
+<table>
+<tr><td class="lbl">⏮ ◀ ▶ Play ▶</td><td>Restart, step back, play/pause, step forward.</td></tr>
+<tr><td class="lbl">Speed 1× 2× 5× 10× 15×</td><td><b>Minutes of market time per real second.</b> Default 5×.</td></tr>
+<tr><td class="lbl">Clock</td><td><b>10:42:00 · 88/385</b> — the time, and which minute of the session.</td></tr>
+<tr><td class="lbl">Scrub bar</td><td>Jump anywhere instantly.</td></tr>
+</table>
+<p class="muted">The replay opens at the <b>end</b> of the day, fully played out. Drag back to watch it unfold.</p>
+
+<h3>23.2 The zone strip</h3>
+<p>A bar showing the day's zones in position. The active zone is brighter; an <b class="a">amber vertical line</b>
+is the playhead.</p>
+
+<h3>23.3 The four state cards</h3>
+<table>
+<tr><td class="lbl">Engine State</td><td>idle / hunting / in_trade / gated / killed — colour-coded.</td></tr>
+<tr><td class="lbl">Active Zone</td><td>Which zone, its times, its band, its trade cap.</td></tr>
+<tr><td class="lbl">Signals</td><td>What each engine said at that exact minute, plus the combined result.</td></tr>
+<tr><td class="lbl">Equity</td><td>Balance at the playhead. It steps at each trade's <b>exit</b>.</td></tr>
+</table>
+
+<h3>23.4 The charts</h3>
+<table>
+<tr><td class="lbl">OI Change — Call vs Put</td><td>Green and red lines. <b>Translucent green bands</b> mark windows where the combined signal was CALL; red bands, PUT. <b>▲</b> marks an entry, <b>▼</b> an exit with its reason.</td></tr>
+<tr><td class="lbl">PCR / Ratio</td><td>The two lines the Ratio engine scores, with the same markers.</td></tr>
+<tr><td class="lbl">UMP candlestick</td><td>The traded contract's own candles, with the level ladder drawn as dashed lines — <span class="r">red = 1H-STRUCT</span>, <span class="a">amber = DISCOVERY</span>, <span class="g">green = BRIDGE</span>, indigo = MEDIAN. Green triangles are entries and trail events; red diamonds are exits.</td></tr>
+</table>
+<div class="card ok"><b>No cheating is possible.</b> The levels shown are the ones that existed <i>at that
+minute</i>, not the final set. The replay cannot see the future, exactly like the live engine.</div>
+
+<h3>23.5 Trades and Alerts</h3>
+<p>The <b>Trades</b> table lists every trade with entry, exit, reason and P&amp;L. Click the entry time to jump
+the playhead there; click <b>↗</b> beside a strike to open Ultra Master Pro on that exact contract.</p>
+<p>The <b>Alerts</b> card shows "<i>exactly what Telegram would have received</i>" — data-gap warnings,
+force-closes, overnight carries — so you can see what you would have been told, and when.</p>
+
+<h3>23.6 Badges to take seriously</h3>
+<table>
+<tr><td class="lbl"><span class="a">SPOT-LESS DAY</span></td><td>No underlying price that day; the engine fell back to the full chain — exactly as live would.</td></tr>
+<tr><td class="lbl"><span class="a">EOD FORCE-CLOSE</span></td><td>A position was still open at the session end and was closed there.</td></tr>
+<tr><td class="lbl"><span class="a">N DATA GAP(S)</span></td><td>Stretches with no data. Entries were blocked while stale. Hover to see the exact times.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bt-export">24. Exporting</h2>
+<p>Seven datasets: <b>Trades · Decisions · Signals · Days · Equity · Summary · Settings</b>.
+Format CSV or Excel. Range defaults to the run's own dates.</p>
+<div class="card warn"><b>Decisions is enormous</b> — one row per simulated minute. Over a long run that is
+hundreds of thousands of rows. The dialog warns you, and anything above 200,000 rows is delivered as CSV even if
+you asked for Excel, because Excel cannot cope.</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="dialogs">25. Every confirmation box</h2>
+<p>These are the only actions that stop and ask. Everything else either stages in the draft or acts immediately.</p>
+<table>
+<tr><th>Where</th><th>Exact wording</th></tr>
+<tr><td class="lbl">Any Save</td><td>"Are you sure you want to submit these settings?" — with the full field diff.</td></tr>
+<tr><td class="lbl">Paper → Reset</td><td>"Reset the paper session? This clears ALL paper trade history and restarts the session today. The live ledger is untouched."</td></tr>
+<tr><td class="lbl">Manual order test</td><td>"Place a PAPER (simulated) test CALL entry? Premium band ₹0.5–₹2, max ₹1000 notional." — or "LIVE — a REAL order at the broker".</td></tr>
+<tr><td class="lbl">Square off</td><td>"Square off the open position now? A LIVE position sends a REAL market sell."</td></tr>
+<tr><td class="lbl">Security → Restore</td><td>"Restore configuration v41? It is re-saved as a new version."</td></tr>
+<tr><td class="lbl">Sandbox → Copy from live</td><td>"Overwrite the sandbox with the CURRENT LIVE config?"</td></tr>
+</table>
+<div class="card warn"><b>No confirmation at all:</b> Discard · every "Reset to Default" · every copy pill ·
+removing a holiday · deleting an MTF rule or condition · cancelling, resuming or <b>deleting a backtest run</b>.
+The config ones are safe because they only change the draft. <b>Deleting a run is permanent.</b></div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="messages">26. Every error &amp; warning, translated</h2>
+
+<h4>Errors — these block the save</h4>
+<table>
+<tr><th>Message</th><th>What to do</th></tr>
+<tr><td class="lbl">{day} {zone}: start … must be before end …</td><td>The zone's times are backwards.</td></tr>
+<tr><td class="lbl">… falls outside 09:15–15:45</td><td>A zone runs outside market hours.</td></tr>
+<tr><td class="lbl">{day}: zones Z1 and Z2 overlap</td><td>Two zones share time. Separate them.</td></tr>
+<tr><td class="lbl">premium min must be &gt; 0 and &lt; premium max</td><td>The band is inverted or zero.</td></tr>
+<tr><td class="lbl">Paper Mode is OFF but the demat balance is not set</td><td>Live sizing needs a real balance.</td></tr>
+<tr><td class="lbl">Paper Mode is OFF but no broker is connected</td><td>Connect the broker or turn paper mode back on.</td></tr>
+<tr><td class="lbl">fees: {label} is negative</td><td>A fee cannot be below zero.</td></tr>
+</table>
+
+<h4>Warnings — the save is allowed, but read them</h4>
+<table>
+<tr><th>Message</th><th>Why it matters</th></tr>
+<tr><td class="lbl">no entry-filter indicator enabled</td><td><b>That zone can never trade.</b></td></tr>
+<tr><td class="lbl">majority rule with an even number of enabled indicators</td><td>A split vote ties, and a tie is No Trade.</td></tr>
+<tr><td class="lbl">majority + neutral-abstain is the loosest combination</td><td>One engine alone can decide the zone.</td></tr>
+<tr><td class="lbl">EXPERIMENTAL direction-hold is ON</td><td>Hunts survive flickers — a relaxation of the strict rule.</td></tr>
+<tr><td class="lbl">strike scan count 7 means 7 parallel engine warmups</td><td>Expect slower minute passes.</td></tr>
+<tr><td class="lbl">UMP max SL exceeds the day max-loss cap</td><td><b>One trade can lose more than the whole day is allowed to.</b> Fix this.</td></tr>
+<tr><td class="lbl">data strike window wants 81+ instruments</td><td>Beyond the feed cap — the outer strikes get trimmed.</td></tr>
+<tr><td class="lbl">End-Exit is OFF</td><td>A position reaching the last zone's end will <b>not</b> be closed. Overnight risk.</td></tr>
+<tr><td class="lbl">OVERNIGHT CARRY is ON</td><td>Positions ride the overnight gap un-stopped. The only automatic close is the expiry-day 15:25 force-close.</td></tr>
+</table>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="glossary">27. Glossary</h2>
+<table>
+<tr><td class="lbl">Premium</td><td>The price of one unit of the option contract.</td></tr>
+<tr><td class="lbl">Strike</td><td>The price level an option is written at, e.g. 23600.</td></tr>
+<tr><td class="lbl">CE / PE</td><td>Call option / Put option.</td></tr>
+<tr><td class="lbl">ATM</td><td>"At the money" — the strike nearest the current index level.</td></tr>
+<tr><td class="lbl">OI (Open Interest)</td><td>How many contracts are currently held open. Rising OI means new money entering.</td></tr>
+<tr><td class="lbl">PCR</td><td>Put-Call Ratio — put OI divided by call OI.</td></tr>
+<tr><td class="lbl">Lot</td><td>Options trade in fixed bundles. One NIFTY lot is 65 units.</td></tr>
+<tr><td class="lbl">Band</td><td>The premium range a zone will consider. Contracts outside it are ignored.</td></tr>
+<tr><td class="lbl">Hunt</td><td>The engine watching a chosen strike, waiting for its entry setup.</td></tr>
+<tr><td class="lbl">Unanimous</td><td>Every switched-on engine with a direction agrees.</td></tr>
+<tr><td class="lbl">Slippage</td><td>The gap between the price you expected and the price you got. Always modelled against you.</td></tr>
+<tr><td class="lbl">Drawdown</td><td>The fall from a peak to the following trough. The usual measure of "how bad did it get".</td></tr>
+<tr><td class="lbl">Ledger</td><td>Which book a trade belongs to — PAPER or LIVE. They are kept entirely separate.</td></tr>
+</table>
+
+<div class="card note" style="margin-top:40px">
+<b>Three habits worth forming.</b><br>
+1. Hover before you guess — almost every control explains itself.<br>
+2. Read the live sentence under a setting after you change it; several of them recalculate and will tell you
+if you have done something unintended.<br>
+3. When something does not trade, open the <b>Decision Trace</b> or the <b>Entry Funnel</b> before changing
+anything. The platform almost always already knows why.
+</div>
+
+</div>
+</body>
+</html>
