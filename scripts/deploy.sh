@@ -62,7 +62,10 @@ in_watch_window() {
   local dow hm
   dow=$(TZ=Asia/Kolkata date +%u)   # 1..7
   hm=$(TZ=Asia/Kolkata date +%H%M)
-  [[ $dow -le 5 && $hm -ge 0855 && $hm -le 1545 ]]
+  # 10# forces base 10. Without it bash reads a leading-zero HHMM as octal and
+  # the literal 0855 is not even valid octal, so this test ERRORED on every
+  # run at every hour -- silently disabling the strict probe below.
+  [[ $dow -le 5 && $((10#$hm)) -ge 855 && $((10#$hm)) -le 1545 ]]
 }
 
 health_gate() {
