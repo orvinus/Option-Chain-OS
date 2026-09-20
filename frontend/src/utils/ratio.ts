@@ -1,16 +1,22 @@
-/** Standardized Call:Put ratio used across the app (Multi-TF, Change-in-OI, Ratio page).
+/** Standardized Call:Put ratio + dominant Side used across the app (Multi-TF,
+ * Change-in-OI, Replay).
  *
- * The ratio is normalized so the SMALLER side is always 1 and shown in Call : Put
- * order (e.g. 2L call / 10L put -> "1 : 5"). "Side" is the DOMINANT side — whichever
- * OI change has the larger magnitude (Call larger -> CALL, Put larger -> PUT, equal
- * or both flat -> NEUTRAL). Inputs are OI *changes* (in whole contracts) and may be
- * negative (unwinding); magnitudes drive the ratio/side.
+ * The ratio TEXT is normalized so the SMALLER side is always 1 and shown in
+ * Call : Put order (e.g. 2L call / 10L put -> "1 : 5"); it is driven by
+ * MAGNITUDES and is unchanged by the Side rule below.
+ *
+ * "Side" is the DOMINANT side per the finalized spec: the side whose *signed*
+ * OI change is the SMALLER (lower) value — signs included. So the more-negative
+ * (or less-positive) side wins: Call smaller -> CALL, Put smaller -> PUT, equal
+ * -> NEUTRAL. Examples: +4Cr/+2Cr -> PUT, +4Cr/-2Cr -> PUT, -4Cr/-2Cr -> CALL,
+ * +3Cr/+3Cr -> NEUTRAL. Inputs are OI *changes* (in whole contracts) and may be
+ * negative (unwinding).
  */
 
 export type DominantSide = "CALL" | "PUT" | "NEUTRAL";
 
 export interface CallPutRatio {
-  /** Whichever side has the larger |OI change|. */
+  /** Dominant side = whichever OI change is the SMALLER *signed* value (Neutral on tie). */
   side: DominantSide;
   /** Normalized "Call : Put" text with the smaller side pinned to 1 (e.g. "1 : 5", "5 : 1", "1 : 1"). */
   text: string;
@@ -34,10 +40,11 @@ export function callPutRatio(callChange: number, putChange: number): CallPutRati
   const a = Math.abs(callChange);
   const b = Math.abs(putChange);
 
+  // Dominant Side = the side with the SMALLER *signed* OI change (Neutral on a
+  // tie). Note this is independent of the magnitude-based ratio text below.
   let side: DominantSide;
-  if (a < EPS && b < EPS) side = "NEUTRAL";
-  else if (a === b) side = "NEUTRAL";
-  else side = a > b ? "CALL" : "PUT";
+  if (Math.abs(callChange - putChange) < EPS) side = "NEUTRAL";
+  else side = callChange < putChange ? "CALL" : "PUT";
 
   const callPerPut = b > 0 ? a / b : null;
   const putPerCall = a > 0 ? b / a : null;

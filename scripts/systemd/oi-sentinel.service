@@ -1,0 +1,10 @@
+[Unit]
+Description=OI dead-man sentinel (one monitoring cycle)
+Wants=docker.service
+After=docker.service network-online.target
+OnFailure=oi-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oi-sentinel
+TimeoutStartSec=120

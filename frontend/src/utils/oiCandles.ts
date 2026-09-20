@@ -29,15 +29,15 @@ function pick(p: OITimeseriesPoint, side: OISide): number {
 }
 
 /** NSE/BSE regular session open (09:15 IST) in minutes-from-midnight. */
-const SESSION_OPEN_MIN = 9 * 60 + 15;
+export const SESSION_OPEN_MIN = 9 * 60 + 15;
 
 /** Minutes-from-midnight from an "HH:MM" label. */
-function labelToMin(label: string): number {
+export function labelToMin(label: string): number {
   const [hh, mm] = label.split(":").map(Number);
   return hh * 60 + mm;
 }
 
-function minToLabel(min: number): string {
+export function minToLabel(min: number): string {
   const hh = Math.floor(min / 60);
   const mm = min % 60;
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;

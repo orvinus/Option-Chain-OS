@@ -110,12 +110,29 @@ Write-Step "Starting stack (docker compose up). Press Ctrl+C to stop everything.
 Write-Host ""
 
 $composeFile = Join-Path $RepoRoot "docker\docker-compose.yml"
+
+# ALWAYS layer the local override when it exists. It pins RUN_MODE=replay, which
+# keeps this PC from logging in to the broker. The XTS market-data API allows only
+# ONE session per app-key, so a dev machine running live silently invalidates the
+# VPS's token and corrupts production's feed. Compose `environment:` beats
+# `env_file:`, so this wins even if .env still says RUN_MODE=live.
+$composeArgs = @("-f", $composeFile)
+$overrideFile = Join-Path $RepoRoot "docker\docker-compose.override.yml"
+if (Test-Path $overrideFile) {
+    $composeArgs += @("-f", $overrideFile)
+    Write-Host "    local override active -> RUN_MODE=replay (broker login disabled)" -ForegroundColor DarkGray
+} else {
+    Write-Host "    WARNING: docker\docker-compose.override.yml not found." -ForegroundColor Yellow
+    Write-Host "             If .env has RUN_MODE=live this PC will fight the VPS for the" -ForegroundColor Yellow
+    Write-Host "             single XTS session. Set RUN_MODE=replay in .env before continuing." -ForegroundColor Yellow
+}
+
 try {
-    docker compose --env-file $envPath -f $composeFile up --build
+    docker compose --env-file $envPath @composeArgs up --build
 } finally {
     Write-Host ""
     Write-Step "Tearing down containers..."
-    docker compose --env-file $envPath -f $composeFile down
+    docker compose --env-file $envPath @composeArgs down
     if ($browserJob) {
         Stop-Job   $browserJob -ErrorAction SilentlyContinue
         Remove-Job $browserJob -ErrorAction SilentlyContinue

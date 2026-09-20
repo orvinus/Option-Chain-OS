@@ -41,6 +41,12 @@ export function useRatioTimeseries({
     }
     let cancelled = false;
     const live = !toTs;
+    // See useMultiTimeframe: re-arm on a dependency change so switching the
+    // bucket pill, date, symbol or ATM window shows a loading state instead of
+    // silently leaving the PREVIOUS bucket's line on screen under the new
+    // bucket's heading. Outside `fetchOnce` so the 20s live poll stays silent.
+    hasData.current = false;
+    setPoints([]);
     const fetchOnce = async () => {
       if (!hasData.current) setLoading(true);
       try {

@@ -1,0 +1,580 @@
+{
+ "rowDump": [
+  {
+   "tf": "1m",
+   "side": "Call",
+   "text": "1 : 4.64",
+   "factor": 4.641891891891892,
+   "lowest": "Put"
+  },
+  {
+   "tf": "3m",
+   "side": "Call",
+   "text": "1 : 3.76",
+   "factor": 3.759581881533101,
+   "lowest": "Put"
+  },
+  {
+   "tf": "5m",
+   "side": "Call",
+   "text": "1 : 1.23",
+   "factor": 1.228533685601057,
+   "lowest": "Put"
+  },
+  {
+   "tf": "15m",
+   "side": "Call",
+   "text": "1 : 1.23",
+   "factor": 1.228533685601057,
+   "lowest": "Put"
+  },
+  {
+   "tf": "full_day",
+   "side": "Put",
+   "text": "1.90 : 1",
+   "factor": 1.9042904290429044,
+   "lowest": "Put"
+  }
+ ],
+ "fixtures": [
+  {
+   "name": "seed_defaults",
+   "data": [
+    {
+     "tf": "1m",
+     "call": -444000,
+     "put": -2061000
+    },
+    {
+     "tf": "3m",
+     "call": -574000,
+     "put": -2158000
+    },
+    {
+     "tf": "5m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "15m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "full_day",
+     "call": 115400000,
+     "put": 60600000
+    }
+   ],
+   "rules": [
+    {
+     "name": "Massive Call Capitulation (Above 1:2)",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Call",
+       "operator": "Above",
+       "threshold": "1:2",
+       "call_sign": "Negative",
+       "put_sign": "Negative"
+      }
+     ]
+    },
+    {
+     "name": "Tight Consolidation (Below 1:2)",
+     "on": true,
+     "out": "Put",
+     "conditions": [
+      {
+       "timeframe": "5m",
+       "side": "Any",
+       "operator": "Below",
+       "threshold": "1:2",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    },
+    {
+     "name": "Pure Direction Bias (Any Threshold)",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "15m",
+       "side": "Call",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Positive",
+       "put_sign": "Any"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Call",
+    "matched": "Massive Call Capitulation (Above 1:2)"
+   },
+   "expected_lowest_side": {
+    "direction": "Put",
+    "matched": "Tight Consolidation (Below 1:2)"
+   }
+  },
+  {
+   "name": "first_rule_off_falls_through",
+   "data": [
+    {
+     "tf": "1m",
+     "call": -444000,
+     "put": -2061000
+    },
+    {
+     "tf": "3m",
+     "call": -574000,
+     "put": -2158000
+    },
+    {
+     "tf": "5m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "15m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "full_day",
+     "call": 115400000,
+     "put": 60600000
+    }
+   ],
+   "rules": [
+    {
+     "name": "Massive Call Capitulation (Above 1:2)",
+     "on": false,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Call",
+       "operator": "Above",
+       "threshold": "1:2",
+       "call_sign": "Negative",
+       "put_sign": "Negative"
+      }
+     ]
+    },
+    {
+     "name": "Tight Consolidation (Below 1:2)",
+     "on": true,
+     "out": "Put",
+     "conditions": [
+      {
+       "timeframe": "5m",
+       "side": "Any",
+       "operator": "Below",
+       "threshold": "1:2",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    },
+    {
+     "name": "Pure Direction Bias (Any Threshold)",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "15m",
+       "side": "Call",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Positive",
+       "put_sign": "Any"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Put",
+    "matched": "Tight Consolidation (Below 1:2)"
+   },
+   "expected_lowest_side": {
+    "direction": "Put",
+    "matched": "Tight Consolidation (Below 1:2)"
+   }
+  },
+  {
+   "name": "neutral_passes_side_filter",
+   "data": [
+    {
+     "tf": "1m",
+     "call": -500000,
+     "put": -500000
+    }
+   ],
+   "rules": [
+    {
+     "name": "neutral-side",
+     "on": true,
+     "out": "Put",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Call",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Negative",
+       "put_sign": "Negative"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Put",
+    "matched": "neutral-side"
+   },
+   "expected_lowest_side": {
+    "direction": "Put",
+    "matched": "neutral-side"
+   }
+  },
+  {
+   "name": "zero_fails_sign_filter",
+   "data": [
+    {
+     "tf": "1m",
+     "call": 0,
+     "put": -500000
+    }
+   ],
+   "rules": [
+    {
+     "name": "zero-sign",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Any",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Negative",
+       "put_sign": "Negative"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Neutral",
+    "matched": null
+   },
+   "expected_lowest_side": {
+    "direction": "Neutral",
+    "matched": null
+   }
+  },
+  {
+   "name": "below_boundary_exact_factor_fails",
+   "data": [
+    {
+     "tf": "1m",
+     "call": 1000000,
+     "put": 2000000
+    }
+   ],
+   "rules": [
+    {
+     "name": "below-2",
+     "on": true,
+     "out": "Put",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Any",
+       "operator": "Below",
+       "threshold": "1:2",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Neutral",
+    "matched": null
+   },
+   "expected_lowest_side": {
+    "direction": "Neutral",
+    "matched": null
+   }
+  },
+  {
+   "name": "above_boundary_exact_factor_passes",
+   "data": [
+    {
+     "tf": "1m",
+     "call": 1000000,
+     "put": 2000000
+    }
+   ],
+   "rules": [
+    {
+     "name": "above-2",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Any",
+       "operator": "Above",
+       "threshold": "1:2",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Call",
+    "matched": "above-2"
+   },
+   "expected_lowest_side": {
+    "direction": "Call",
+    "matched": "above-2"
+   }
+  },
+  {
+   "name": "missing_row_fails_rule",
+   "data": [
+    {
+     "tf": "5m",
+     "call": -100000,
+     "put": 400000
+    }
+   ],
+   "rules": [
+    {
+     "name": "needs-1m",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Any",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    },
+    {
+     "name": "takes-5m",
+     "on": true,
+     "out": "Put",
+     "conditions": [
+      {
+       "timeframe": "5m",
+       "side": "Call",
+       "operator": "Any",
+       "threshold": "Any",
+       "call_sign": "Negative",
+       "put_sign": "Positive"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Put",
+    "matched": "takes-5m"
+   },
+   "expected_lowest_side": {
+    "direction": "Put",
+    "matched": "takes-5m"
+   }
+  },
+  {
+   "name": "empty_rule_never_matches",
+   "data": [
+    {
+     "tf": "1m",
+     "call": -444000,
+     "put": -2061000
+    },
+    {
+     "tf": "3m",
+     "call": -574000,
+     "put": -2158000
+    },
+    {
+     "tf": "5m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "15m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "full_day",
+     "call": 115400000,
+     "put": 60600000
+    }
+   ],
+   "rules": [
+    {
+     "name": "empty",
+     "on": true,
+     "out": "Call",
+     "conditions": []
+    }
+   ],
+   "expected": {
+    "direction": "Neutral",
+    "matched": null
+   },
+   "expected_lowest_side": {
+    "direction": "Neutral",
+    "matched": null
+   }
+  },
+  {
+   "name": "infinite_factor_above_passes",
+   "data": [
+    {
+     "tf": "1m",
+     "call": 0,
+     "put": 900000
+    }
+   ],
+   "rules": [
+    {
+     "name": "inf-above",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Call",
+       "operator": "Above",
+       "threshold": "1:4",
+       "call_sign": "Any",
+       "put_sign": "Positive"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Call",
+    "matched": "inf-above"
+   },
+   "expected_lowest_side": {
+    "direction": "Call",
+    "matched": "inf-above"
+   }
+  },
+  {
+   "name": "infinite_factor_below_fails",
+   "data": [
+    {
+     "tf": "1m",
+     "call": 0,
+     "put": 900000
+    }
+   ],
+   "rules": [
+    {
+     "name": "inf-below",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Any",
+       "operator": "Below",
+       "threshold": "1:4",
+       "call_sign": "Any",
+       "put_sign": "Any"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Neutral",
+    "matched": null
+   },
+   "expected_lowest_side": {
+    "direction": "Neutral",
+    "matched": null
+   }
+  },
+  {
+   "name": "and_conditions_all_must_pass",
+   "data": [
+    {
+     "tf": "1m",
+     "call": -444000,
+     "put": -2061000
+    },
+    {
+     "tf": "3m",
+     "call": -574000,
+     "put": -2158000
+    },
+    {
+     "tf": "5m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "15m",
+     "call": 1514000,
+     "put": -1860000
+    },
+    {
+     "tf": "full_day",
+     "call": 115400000,
+     "put": 60600000
+    }
+   ],
+   "rules": [
+    {
+     "name": "and-rule",
+     "on": true,
+     "out": "Call",
+     "conditions": [
+      {
+       "timeframe": "1m",
+       "side": "Call",
+       "operator": "Above",
+       "threshold": "1:2",
+       "call_sign": "Negative",
+       "put_sign": "Negative"
+      },
+      {
+       "timeframe": "full_day",
+       "side": "Put",
+       "operator": "Above",
+       "threshold": "1:3",
+       "call_sign": "Positive",
+       "put_sign": "Positive"
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "direction": "Neutral",
+    "matched": null
+   },
+   "expected_lowest_side": {
+    "direction": "Neutral",
+    "matched": null
+   }
+  }
+ ]
+}

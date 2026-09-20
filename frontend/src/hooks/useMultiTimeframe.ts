@@ -35,6 +35,15 @@ export function useMultiTimeframe({
     }
     let cancelled = false;
     const live = !asOf;
+    // A DEPENDENCY CHANGE is a new question: drop the previous answer and show
+    // a loading state. Before this, `hasData` was only ever reset in the
+    // disabled branch, so after the first success `loading` never fired again
+    // and the table kept rendering the PREVIOUS symbol's / date's numbers —
+    // with its own `asof` stamp — while the new request was in flight.
+    // Re-armed here, in the effect body, NOT inside `run()`: the 15s live poll
+    // calls `run()` too and must stay silent over data that is already good.
+    hasData.current = false;
+    setData(null);
     const run = async () => {
       if (!hasData.current) setLoading(true);
       try {

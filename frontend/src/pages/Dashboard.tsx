@@ -9,6 +9,7 @@ import { TimeframeBar } from "../components/TimeframeBar";
 import { TimeRangeSlider } from "../components/TimeRangeSlider";
 import { DatePicker } from "../components/DatePicker";
 import { ExportButton } from "../components/ExportButton";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { buildSnapshotTable } from "../utils/exportData";
 import { useOIChange } from "../hooks/useOIChange";
 import { useOIChangeRange } from "../hooks/useOIChangeRange";
@@ -20,6 +21,7 @@ import { filterOiRowsByAtmWindow } from "../utils/oiStrikeWindow";
 import {
   SESSION_SPAN_MIN,
   clamp,
+  sessionSpan,
   isToday,
   isoForSessionMinuteOnDate,
   maxMinForDate,
@@ -31,7 +33,7 @@ const RANGE_DEFAULT_LOOKBACK_MIN = 30;
 
 export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, authChecked, health, connectError,
+    dataReady, feedLive, authChecked, health,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -58,17 +60,23 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
   const effectiveDate = selectedDate ?? todayIstDate(health);
   const historical = selectedDate != null && !isToday(selectedDate, health);
 
-  // Drive the streaming hooks only when we have a valid F&O context — and NOT when
-  // viewing a historical date (live/preset data is current-session only).
+  // The preset timeframe drives the view live, OR — when a past date is picked
+  // and the user hasn't opened a custom window — "as of that date's close", so it
+  // matches the Multi-TF grid's row for the same timeframe/date. Only an explicit
+  // custom window (rangeMode) disables the preset fetch.
+  const asOfTs = historical && effectiveDate
+    ? isoForSessionMinuteOnDate(effectiveDate, maxMinForDate(effectiveDate, health))
+    : undefined;
   const activeTimeframe: Timeframe | null =
-    authenticated && expiry && fnoEligible && !historical ? timeframe : null;
-  const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null);
-  const live = useOIStream(activeTimeframe, expiry, fnoEligible ? symbol : null);
+    dataReady && expiry && fnoEligible && !rangeMode ? timeframe : null;
+  const initial = useOIChange(activeTimeframe, expiry, fnoEligible ? symbol : null, asOfTs);
+  // Live WS only for the current session; a historical date reads the REST as-of snapshot.
+  const live = useOIStream(historical ? null : activeTimeframe, expiry, fnoEligible ? symbol : null);
 
   // ── Custom time-range / historical mode ──────────────────────────────────
   // maxMin: today clamps to the live edge; a past date exposes the full session.
@@ -92,8 +100,10 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
   const rangeFromTs = effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, fromMin) : null;
   const liveEdge = !historical && toAtLive; // open-ended only for the current session
   const rangeToTs = liveEdge ? null : effectiveDate ? isoForSessionMinuteOnDate(effectiveDate, toMin) : null;
-  const windowActive = rangeMode || historical;
-  const rangeActive = windowActive && authenticated && fnoEligible && !!expiry && !!rangeFromTs;
+  // Only an explicit custom window reads the range fetch; a plain historical date
+  // uses the preset timeframe as-of close (presetData) so it matches Multi-TF.
+  const windowActive = rangeMode;
+  const rangeActive = windowActive && dataReady && fnoEligible && !!expiry && !!rangeFromTs;
   const range = useOIChangeRange(
     rangeFromTs,
     rangeToTs,
@@ -115,32 +125,31 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     if (historical) {
       // Keep the historical date; reset the window to the full session.
       setFromMin(0);
-      setToMin(SESSION_SPAN_MIN);
+      setToMin(sessionSpan(health));
       setToAtLive(false);
       return;
     }
     setRangeMode(false);
     setToAtLive(true);
-  }, [historical]);
+  }, [historical, health]);
   const handleTimeframeChange = useCallback((tf: Timeframe) => {
-    // Selecting a preset timeframe implies the live current session.
+    // A preset timeframe shows that timeframe live, or — when a past date is
+    // selected — as of that date's close. Keep the date; just exit any custom window.
     setTimeframe(tf);
     setRangeMode(false);
-    setToAtLive(true);
-    setSelectedDate(null);
   }, []);
   const handleDateChange = useCallback(
     (date: string | null) => {
       setSelectedDate(date);
       const isPast = date != null && !isToday(date, health);
+      // A past date defaults to the selected TIMEFRAME as of that day's close
+      // (matches the Multi-TF grid). Range mode is entered only if the user drags
+      // the slider; reset the slider bounds to the full session for when they do.
+      setRangeMode(false);
+      setToAtLive(!isPast);
       if (isPast) {
-        setRangeMode(true);
-        setToAtLive(false);
         setFromMin(0);
-        setToMin(SESSION_SPAN_MIN);
-      } else {
-        setRangeMode(false);
-        setToAtLive(true);
+        setToMin(sessionSpan(health));
       }
     },
     [health],
@@ -175,11 +184,16 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
     ? range.loading && !range.data
     : initial.loading && !hasMatchingSnapshot;
 
+  // Spot to use for ATM centring and display. A HISTORICAL session must use that
+  // day's stored spot — using today's live price re-centred the strike window (and
+  // the header) on a price the selected session never traded at.
+  const effSpot = historical ? data?.spot ?? null : liveSpot;
+
   const noOiChangeInAtmWindow = useMemo(() => {
     if (!data) return false;
-    const wr = filterOiRowsByAtmWindow(data.rows, liveSpot ?? data.spot ?? null, atmWindow, strikeStep);
+    const wr = filterOiRowsByAtmWindow(data.rows, effSpot ?? data.spot ?? null, atmWindow, strikeStep);
     return wr.length > 0 && wr.every((r) => r.call_oi_change === 0 && r.put_oi_change === 0);
-  }, [data, atmWindow, liveSpot, strikeStep]);
+  }, [data, atmWindow, effSpot, strikeStep]);
 
   if (!authChecked) {
     return (
@@ -204,30 +218,26 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
         streamError={live.streamError}
         symbolDisplay={symbolDisplay}
         symbolTicker={symbol}
+        spot={effSpot}
       />
 
       <main className="flex flex-col gap-4">
-        {!authenticated ? (
+        {/* Gate on OUR backend, not the broker. Stored history is fully readable
+            without a broker session; a feed outage only means no NEW ticks. */}
+        {!dataReady ? (
           <div className="panel p-8 flex flex-col items-center gap-4 max-w-md mx-auto w-full text-center border border-accent/30">
             <svg className="w-8 h-8 animate-spin text-accent" viewBox="0 0 24 24" fill="none">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
             </svg>
             <div>
-              <h2 className="text-lg font-semibold text-foreground">Connecting to broker…</h2>
-              <p className="mt-1 text-sm text-muted">
-                Starting live option-chain ingestion via the XTS API key in .env.
-              </p>
+              <h2 className="text-lg font-semibold text-foreground">Connecting…</h2>
+              <p className="mt-1 text-sm text-muted">Waiting for the API to respond.</p>
             </div>
-            {connectError && (
-              <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-sm text-red-400">
-                {connectError}
-                <div className="text-xs text-muted mt-1">Retrying automatically…</div>
-              </div>
-            )}
           </div>
         ) : (
           <>
+            {!feedLive && <FeedOfflineBanner />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -262,8 +272,8 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
               </div>
               {historical && (
                 <div className="text-[11px] text-amber-300/90">
-                  Viewing historical session <b>{effectiveDate}</b> — data is read from stored snapshots
-                  for the selected window.
+                  Viewing historical session <b>{effectiveDate}</b> —{" "}
+                  {rangeMode ? "custom window" : `${timeframe} as of the session close`}, read from stored snapshots.
                 </div>
               )}
 
@@ -314,7 +324,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
             )}
 
             {fnoEligible && (
-              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={liveSpot} strikeStep={strikeStep} />
+              <KPIBar data={data} mode="change" atmWindow={atmWindow} liveSpot={effSpot} strikeStep={strikeStep} />
             )}
 
             {fnoEligible && (
@@ -324,13 +334,16 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                 atmWindow={atmWindow}
                 isLoading={isLoading}
                 underlyingLabel={symbolDisplay}
-                liveSpot={liveSpot}
+                liveSpot={effSpot}
                 nseSessionOpen={health?.nse_session_open}
                 strikeStep={strikeStep}
               />
             )}
 
-            {fnoEligible && initial.error && !data && (
+            {/* Surface the error from whichever fetch is actually driving the view.
+                The custom-window/historical path uses `range`, whose failures were
+                never rendered — the chart just said "Waiting for data…" forever. */}
+            {fnoEligible && (windowActive ? range.error : initial.error) && !data && (
               <div className="panel p-4 text-sm text-red-400 border border-red-500/20">
                 Failed to load: {initial.error}
               </div>
@@ -358,7 +371,7 @@ export function Dashboard({ mc }: { mc: MarketContextValue }) {
                     </>
                   ) : (
                     <>
-                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:30 PM IST</b>), brokers often expose
+                      Outside the regular cash/F&amp;O window (Mon–Fri <b>9:15 AM – 3:40 PM IST</b>), brokers often expose
                       static end-of-day style OI, so intraday deltas stay flat.
                     </>
                   )}

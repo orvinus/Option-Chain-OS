@@ -1,8 +1,8 @@
 """Symphony XTS market-data feed — async Socket.IO client with reconnect + heartbeat.
 
 The Shrilakshmi Fintech / Symphony XTS market-data stream is delivered over
-Socket.IO. Unlike AngelOne's ``SmartWebSocketV2`` (a sync, thread-based client
-whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
+Socket.IO. Unlike a sync, thread-based broker SDK whose snapquote carried LTP,
+OI and volume in a single tick, XTS:
 
 * uses ``python-socketio``'s ``AsyncClient`` — so we run directly on the event
   loop with no worker-thread bridge;
@@ -14,7 +14,7 @@ whose mode-3 snapquote carried LTP + OI + volume in one tick), XTS:
   ``Tick`` shape the rest of the pipeline already expects. (Indices have no OI,
   so the index/spot instrument is subscribed to 1501 only.)
 
-XTS prices are already in rupees (no ``/100`` paise scaling that Angel needed).
+XTS prices are already in rupees (no ``/100`` paise scaling).
 
 Public surface (unchanged from the previous integration):
     feed = OptionFeedClient(queue, get_tokens, index_token=..., active_symbol=...)
@@ -28,7 +28,7 @@ import asyncio
 import json
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlencode
 
@@ -38,6 +38,7 @@ import socketio  # type: ignore
 from ..auth import get_session_manager
 from ..core.config import settings
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..market.scripmaster import InstrumentToken
 from ..market_data import xts_client
 from .types import Tick
@@ -53,14 +54,28 @@ HEARTBEAT_TIMEOUT_SECONDS = 30
 BACKOFF_INITIAL = 2.0
 BACKOFF_MAX = 60.0
 CONNECT_TIMEOUT_SECONDS = 15
+# Bounds the WHOLE sio.connect() call. python-socketio's wait_timeout only limits
+# the wait for the Socket.IO CONNECT packet after the Engine.IO transport is up —
+# the aiohttp WebSocket handshake underneath is NOT covered, so a half-open TCP
+# (NAT/conntrack drop with no RST) could park the supervisor here indefinitely.
+CONNECT_TOTAL_TIMEOUT_S = 25.0
+# Total budget for _subscribe_all. The per-instrument 400 fallback can degrade to
+# ~93 sequential POSTs; at the old 30s/request that was a worst case of ~46 minutes
+# inside _connect_once with feed_connected=false and every watchdog nudge a no-op.
+SUBSCRIBE_TOTAL_BUDGET_S = 60.0
+SUBSCRIBE_CALL_TIMEOUT_S = 10.0
+TEARDOWN_TIMEOUT_S = 5.0
 
-# Self-heal: when EVERY subscription is rejected with an auth error ('Invalid
-# Token'), the feed auto re-logins (minting a fresh XTS token) and reconnects —
-# recovering from the daily token expiry / single-session invalidation with no
-# human action. Cooldown + attempt cap prevent a login storm if something else
-# (a 2nd backend, revoked creds) keeps invalidating the session.
-AUTO_RELOGIN_COOLDOWN_S = 120.0
-AUTO_RELOGIN_MAX_ATTEMPTS = 5
+# Auth trouble is REPORTED, not fixed, from here: the feed client never logs in.
+# During outage #2 the in-feed self-heal was one of five independent actors
+# rotating the single-session token out from under each other every ~6 seconds.
+# All it may do now is request recovery from the SessionSteward (the one rotation
+# authority) — throttled locally so a tight reconnect loop doesn't spam requests.
+AUTH_RECOVERY_REQUEST_COOLDOWN_S = 60.0
+# After this many consecutive unanswered requests, also mark the session
+# broker-rejected so /api/health stops claiming authenticated=true (observability
+# only — nothing auto-rotates off that flag anymore).
+AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED = 3
 
 
 TokensProvider = Callable[[], Awaitable[tuple[list[InstrumentToken], float]]]
@@ -104,8 +119,17 @@ class OptionFeedClient:
         self._sio: socketio.AsyncClient | None = None
         self._stopping = asyncio.Event()
         self._connected = asyncio.Event()
+        # Set by nudge_reconnect() to wake the supervisor's backoff sleep. Without
+        # it a nudge while already disconnected was a pure no-op: clearing a clear
+        # _connected changes nothing, and the backoff wait only watched _stopping —
+        # which is how every watchdog escalation during outage #2 did nothing.
+        self._kick = asyncio.Event()
         self._supervisor_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        # Outcome of the most recent _subscribe_all/swap: instruments actually
+        # delivering (newly subscribed + already-subscribed). Unlike rt.tokens
+        # (which deliberately keeps last-known-good), this is honest about NOW.
+        self._live_subs: int = 0
 
         self._token_meta: dict[str, InstrumentToken] = {}
         # Per-instrument merged state: token -> {"ltp", "volume", "oi"}.
@@ -115,15 +139,23 @@ class OptionFeedClient:
         # ~80s) does not make OI momentarily collapse to 0 and write false
         # "OI crashed to zero" snapshots. Cleared only on symbol swap.
         self._last_oi: dict[str, int] = {}
+        # Last known *good* price/volume per token, same rationale as ``_last_oi``:
+        # ``_state`` is cleared on every reconnect, so without these the first frame
+        # after a bounce (typically a 1510 OI frame, which passes the OI gate via
+        # ``_last_oi``) would persist a row with ltp=0/volume=0 — a phantom "premium
+        # crashed to zero" that also flips the buildup label and poisons IV.
+        # UNLIKE OI, price and cumulative volume do NOT carry across trading days, so
+        # these are keyed to a session date and dropped when the IST date rolls over.
+        self._last_ltp: dict[str, float] = {}
+        self._last_volume: dict[str, int] = {}
+        self._px_day: date | None = None
         # Current subscription set per message code (for unsubscribe): code -> [instrument dicts].
         self._sub_groups: dict[int, list[dict]] = {}
         self._last_tick_at: float = 0.0
         self._latest_underlying: float | None = None
-        # Self-heal state: set when an auth-failure re-login asks _connect_once to
-        # drop the socket and reconnect with the fresh token.
-        self._reconnect_requested: bool = False
-        self._last_auto_relogin: float = 0.0
-        self._auto_relogin_attempts: int = 0
+        # Auth-recovery REQUEST throttle (the steward does the actual recovering).
+        self._last_auth_request: float = 0.0
+        self._auth_recovery_requests: int = 0
 
     # ------------------------------------------------ public
 
@@ -134,6 +166,26 @@ class OptionFeedClient:
     @property
     def is_feed_connected(self) -> bool:
         return self._connected.is_set()
+
+    @property
+    def supervisor_alive(self) -> bool:
+        """True while the ws-supervisor task exists and has not finished.
+
+        A dead supervisor is otherwise invisible: the strong reference on the
+        instance suppresses even asyncio's GC-time "exception was never retrieved"
+        warning, so outage forensics found NOTHING in the logs when it died. The
+        steward polls this and rebuilds the client when it goes false.
+        """
+        return self._supervisor_task is not None and not self._supervisor_task.done()
+
+    @property
+    def last_ws_tick_at(self) -> float:
+        """time.time() of the last real tick from the socket (0.0 before the first)."""
+        return self._last_tick_at
+
+    @property
+    def live_subscription_count(self) -> int:
+        return self._live_subs
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -153,9 +205,16 @@ class OptionFeedClient:
         await self._teardown()
 
     def nudge_reconnect(self) -> None:
-        """Drop the live socket so the supervisor reconnects (e.g. at IST session open)."""
+        """Drop the live socket AND wake the supervisor so it reconnects now.
+
+        Both halves matter. Clearing ``_connected`` drops a live socket; setting
+        ``_kick`` wakes a supervisor parked in its backoff sleep. The old
+        implementation only cleared the flag — a no-op whenever the feed was
+        already disconnected, which is every situation a recovery nudge exists for.
+        """
         log.info("ws.nudge_reconnect_requested")
         self._connected.clear()
+        self._kick.set()
 
     async def swap_subscription(
         self,
@@ -178,7 +237,7 @@ class OptionFeedClient:
             self._active_symbol = new_symbol
             self._latest_underlying = None
             self._state.clear()
-            self._last_oi.clear()
+            self._prune_value_caches()
             log.info("ws.swap_subscription.deferred", symbol=new_symbol, token_count=len(new_tokens))
             return
 
@@ -190,40 +249,74 @@ class OptionFeedClient:
         self._active_symbol = new_symbol
         self._latest_underlying = None
         self._state.clear()
-        self._last_oi.clear()
+        self._prune_value_caches()
 
         new_groups = self._build_subscription_groups()
         try:
             token = get_session_manager().token
             for code, insts in old_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
-                    await xts_client.unsubscribe(token, chunk, code)
-            ok = 0; skipped = 0; errors = 0
+                    await xts_client.unsubscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
+            ok = 0  # newly subscribed
+            already = 0  # benign "already subscribed"
+            rejected = 0  # real 400 (incl. cap breach) — no data flows
+            errors = 0  # non-400 transport errors
+            reasons: Counter[str] = Counter()
             for code, insts in new_groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
-                                        skipped += 1
+                                        is_already, detail = _classify_400(he2.response)
+                                        if detail:
+                                            reasons[detail] += 1
+                                        if is_already:
+                                            already += 1
+                                        else:
+                                            rejected += 1
+                                            log.warning(
+                                                "ws.swap.rejected",
+                                                inst=self._describe_inst(inst),
+                                                code=code, detail=detail,
+                                            )
                                     else:
                                         errors += 1
+                                        log.warning("ws.swap.inst_error", inst=self._describe_inst(inst), code=code)
                                 except Exception:
                                     errors += 1
                         else:
                             raise
             self._sub_groups = new_groups
+            self._live_subs = ok + already
             log.info(
                 "ws.swap_subscription.subscribed",
-                newly_subscribed=ok, already_present=skipped, errors=errors,
+                newly_subscribed=ok, already_present=already,
+                rejected=rejected, errors=errors, reasons=dict(reasons) or None,
             )
+            # Unlike the old code (which swallowed EVERY per-instrument 400 as a
+            # benign "skipped"), a cap breach during a re-center is now surfaced and
+            # healed. A partial breach silently drops (strike, side) instruments —
+            # the "missing strike" symptom; if it was the broker's 50-instrument cap
+            # (usually stale gateway slots the unsubscribe above didn't free), self-
+            # heal to a fresh 0/50 session and re-subscribe the current window.
+            if rejected or errors:
+                log.warning(
+                    "ws.swap.partial_truncation",
+                    subscribed=ok + already, rejected=rejected, errors=errors,
+                    reasons=dict(reasons) or None,
+                    hint="some strikes were NOT re-subscribed after the ATM re-center "
+                    "and will be missing from the chain until healed.",
+                )
+                if _has_cap_breach(reasons):
+                    await self._request_auth_recovery("cap breach on swap")
         except Exception as e:
             log.warning("ws.swap_subscription.error", error=str(e))
         self._last_tick_at = time.time()
@@ -235,6 +328,9 @@ class OptionFeedClient:
         backoff = BACKOFF_INITIAL
         while not self._stopping.is_set():
             try:
+                # A kick that arrived while we were connecting/connected is satisfied
+                # by the connect itself — clear it so it can't skip the NEXT backoff.
+                self._kick.clear()
                 await self._connect_once()
                 backoff = BACKOFF_INITIAL
                 while not self._stopping.is_set() and self._connected.is_set():
@@ -248,22 +344,62 @@ class OptionFeedClient:
                 else:
                     log.error("ws.supervisor.error", error=str(e))
             await self._teardown()
-            try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=backoff)
+            if await self._sleep_or_kick(backoff):
                 return
-            except asyncio.TimeoutError:
-                backoff = min(backoff * 2, BACKOFF_MAX)
+            backoff = min(backoff * 2, BACKOFF_MAX)
+
+    async def _sleep_or_kick(self, backoff: float) -> bool:
+        """Back off, but wake early on a kick. Returns True when stopping.
+
+        The old wait watched only ``_stopping``, so a watchdog nudge could not
+        shorten a 60s backoff — recovery waited for a timer while the market moved.
+        A kick also resets the caller's backoff (we return normally and the caller
+        re-enters connect immediately with backoff untouched-for-this-round).
+        """
+        stop_wait = asyncio.create_task(self._stopping.wait())
+        kick_wait = asyncio.create_task(self._kick.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {stop_wait, kick_wait}, timeout=backoff, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_wait in done:
+                return True
+            if kick_wait in done:
+                log.info("ws.backoff_kicked")
+            return False
+        finally:
+            for t in (stop_wait, kick_wait):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
     async def _connect_once(self) -> None:
         sess = get_session_manager()
         if not sess.authenticated:
-            raise RuntimeError(
-                "Not authenticated yet. Use the dashboard login form to authenticate first."
-            )
+            # `authenticated` can be false because XTS rejected the token — not only
+            # because nobody has logged in yet. Report it so the steward rotates;
+            # parking silently is how a feed stays dead for a whole session.
+            await self._request_auth_recovery("not authenticated")
+            if not sess.authenticated:
+                raise RuntimeError(
+                    "Not authenticated yet. Use the dashboard login form to authenticate first."
+                )
 
         tokens, spot = await self._tokens_provider()
         if not tokens:
-            log.warning("ws.no_tokens_to_subscribe")
+            log.warning(
+                "ws.no_tokens_to_subscribe",
+                hint="the option universe resolved empty — usually a dead token "
+                "failing the scripmaster fetch. Requesting auth recovery.",
+            )
+            # This state STARVES event-based recovery: with no instruments we never
+            # POST /instruments/subscription, so the 'Invalid Token' 400 that would
+            # otherwise surface the dead token never happens (production outage
+            # 2026-08-03 19:55 -> 2026-08-04, full session).
+            await self._request_auth_recovery("empty universe")
             await asyncio.sleep(5)
             return
         self._token_meta = {t.token: t for t in tokens}
@@ -290,32 +426,47 @@ class OptionFeedClient:
         self._connected.clear()
 
         try:
-            await sio.connect(
-                f"{origin}?{query}",
-                socketio_path=sio_path.lstrip("/"),
-                transports=["websocket"],
-                wait=True,
-                wait_timeout=CONNECT_TIMEOUT_SECONDS,
+            # wait_timeout alone does NOT bound the underlying aiohttp websocket
+            # handshake (only the Socket.IO CONNECT packet after it) — the outer
+            # wait_for is what guarantees this call can never hang the supervisor.
+            await asyncio.wait_for(
+                sio.connect(
+                    f"{origin}?{query}",
+                    socketio_path=sio_path.lstrip("/"),
+                    transports=["websocket"],
+                    wait=True,
+                    wait_timeout=CONNECT_TIMEOUT_SECONDS,
+                ),
+                timeout=CONNECT_TOTAL_TIMEOUT_S,
             )
         except Exception as e:
             log.error("ws.connect.failed", error=str(e))
             await self._teardown()
+            # XTS bakes the token into the handshake query, so a dead token is
+            # rejected HERE — before _subscribe_all ever runs. Report it; the
+            # steward decides whether a rotation is warranted (a genuine network
+            # outage must not become a login storm).
+            await self._request_auth_recovery(f"handshake failed: {e}")
             raise RuntimeError(f"Socket.IO failed to connect: {e}") from e
 
         # Subscribe over REST now that the socket is open. Safe to call on every
         # (re)connect: if XTS already has these subscriptions on the appKey it
         # returns 400 "already subscribed" (tolerated below); if not, this restores
         # the stream. Either way data flows without tearing the connection down.
-        await self._subscribe_all()
-
-        # Self-heal: if the subscribe found an auth failure and re-logged in, the
-        # socket we just opened is bound to the now-dead token. Drop it and return
-        # so the supervisor reconnects via _connect_once() with the fresh token.
-        if self._reconnect_requested:
-            self._reconnect_requested = False
-            log.info("ws.reconnect_after_self_heal")
-            await self._teardown()
-            return
+        # Budgeted: the per-instrument 400 fallback can serialize ~93 POSTs, and an
+        # unbounded run here kept feed_connected=false for tens of minutes while
+        # every recovery nudge was a no-op. On budget exhaustion we proceed with
+        # whatever subscribed — partial data now beats a perfect subscription later;
+        # the heartbeat and the steward judge the outcome.
+        try:
+            await asyncio.wait_for(self._subscribe_all(), timeout=SUBSCRIBE_TOTAL_BUDGET_S)
+        except asyncio.TimeoutError:
+            log.error(
+                "ws.subscribe.budget_exceeded",
+                budget_s=SUBSCRIBE_TOTAL_BUDGET_S,
+                hint="proceeding with the instruments that made it; the heartbeat "
+                "will drop the socket if nothing actually flows.",
+            )
 
         self._connected.set()
 
@@ -331,7 +482,9 @@ class OptionFeedClient:
         if not sio:
             return
         try:
-            await sio.disconnect()
+            # Bounded: a disconnect against a half-open TCP can hang, and this runs
+            # OUTSIDE the supervisor's try — an unbounded await here wedged the loop.
+            await asyncio.wait_for(sio.disconnect(), timeout=TEARDOWN_TIMEOUT_S)
         except Exception:
             pass
 
@@ -361,7 +514,18 @@ class OptionFeedClient:
                 pass
         return {MSG_TOUCHLINE: touchline, MSG_OPENINTEREST: list(options)}
 
-    async def _subscribe_all(self) -> None:
+    def _describe_inst(self, inst: dict) -> str:
+        """Readable label (e.g. '24300PE') for a subscription instrument dict, so
+        cap-rejection logs name the exact (strike, side) that went dark."""
+        iid = inst.get("exchangeInstrumentID")
+        meta = self._token_meta.get(str(iid))
+        if meta is not None:
+            return f"{meta.strike}{meta.option_type}"
+        if self._index_token and str(iid) == str(self._index_token):
+            return "INDEX"
+        return str(iid)
+
+    async def _subscribe_all(self, _rearmed: bool = False) -> None:
         groups = self._build_subscription_groups()
         total = sum(len(v) for v in groups.values())
         if not total:
@@ -390,14 +554,14 @@ class OptionFeedClient:
             for code, insts in groups.items():
                 for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
                     try:
-                        await xts_client.subscribe(token, chunk, code)
+                        await xts_client.subscribe(token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                         ok += len(chunk)
                     except httpx.HTTPStatusError as he:
                         if he.response is not None and he.response.status_code == 400 and len(chunk) > 1:
                             # Retry one at a time so new instruments get through.
                             for inst in chunk:
                                 try:
-                                    await xts_client.subscribe(token, [inst], code)
+                                    await xts_client.subscribe(token, [inst], code, timeout=SUBSCRIBE_CALL_TIMEOUT_S)
                                     ok += 1
                                 except httpx.HTTPStatusError as he2:
                                     if he2.response is not None and he2.response.status_code == 400:
@@ -410,13 +574,13 @@ class OptionFeedClient:
                                             rejected += 1
                                             log.warning(
                                                 "ws.subscribe.rejected",
-                                                inst=inst,
+                                                inst=self._describe_inst(inst),
                                                 code=code,
                                                 detail=detail,
                                             )
                                     else:
                                         errors += 1
-                                        log.warning("ws.subscribe.inst_error", inst=inst, code=code)
+                                        log.warning("ws.subscribe.inst_error", inst=self._describe_inst(inst), code=code)
                                 except Exception:
                                     errors += 1
                         else:
@@ -427,6 +591,42 @@ class OptionFeedClient:
             # (real 400) or errored, no ticks will ever arrive — surface it loudly
             # with the XTS reason instead of masking it as success.
             live = ok + already
+            self._live_subs = live
+            # MEASURED IN PRODUCTION 2026-08-11: the gateway cycles the socket
+            # every ~67 s, and after a reconnect the NSEFO options broadcast is
+            # DEAD no matter what: "Instrument Already Subscribed" delivers
+            # nothing, and even a same-session unsubscribe→resubscribe cycle
+            # (tried first — newly-subscribed instruments still stream nothing)
+            # does not re-arm it. Only a FRESH LOGIN arms delivery — which is
+            # what the pre-steward code did on every cycle, and why it survived
+            # this gateway for weeks. So: free the broker-side slots, then ask
+            # the steward for a rotation. The steward remains the ONE rotation
+            # authority (floor + burst budget + circuit all still apply) — this
+            # is the bounded, single-actor version of the old behaviour, not a
+            # return of the outage-#2 login storm. Tune LOGIN_FLOOR_S /
+            # LOGIN_BURST_MAX to the measured cycle cadence.
+            if ok == 0 and already > 0 and not _rearmed:
+                log.warning(
+                    "ws.subscribe.rearm",
+                    already_present=already,
+                    hint="already-subscribed after a gateway socket cycle — "
+                    "broadcast re-arms only on a fresh login; freeing slots and "
+                    "requesting a steward rotation",
+                )
+                for code, insts in groups.items():
+                    for chunk in _chunks(insts, MAX_INSTRUMENTS_PER_REQUEST):
+                        try:
+                            await xts_client.unsubscribe(
+                                token, chunk, code, timeout=SUBSCRIBE_CALL_TIMEOUT_S
+                            )
+                        except Exception:
+                            # Best-effort: a failed unsubscribe leaves us no
+                            # worse off than the dead broadcast we already have.
+                            pass
+                await self._request_auth_recovery(
+                    "gateway socket cycle: options broadcast re-arms only on a fresh login"
+                )
+                return
             if live == 0 and (rejected or errors):
                 log.error(
                     "ws.subscribe.all_failed",
@@ -438,19 +638,22 @@ class OptionFeedClient:
                     "market-data token (re-login) or a stale scripmaster. No ticks "
                     "will arrive until this is resolved.",
                 )
-                # Auth failure (every instrument 'Invalid Token') → self-heal by
-                # re-logging in and reconnecting under a fresh token. The same
-                # recovery clears 'Exceeded Instrument Subscription Limit' — a
-                # fresh session starts with 0/50 slots, releasing stale
-                # subscriptions a swap failed to free on the gateway.
+                # Auth failure (every instrument 'Invalid Token') → the steward
+                # rotates to a fresh token and reconnects. The same recovery
+                # clears 'Exceeded Instrument Subscription Limit' — a fresh
+                # session starts with 0/50 slots, releasing stale subscriptions
+                # a swap failed to free on the gateway.
                 if rejected and any(
                     "token" in r.lower() or ("limit" in r.lower() and "exceed" in r.lower())
                     for r in reasons
                 ):
-                    await self._self_heal_auth()
+                    await self._request_auth_recovery("all subscriptions rejected")
             else:
-                # Healthy subscribe — clear the self-heal attempt counter.
-                self._auto_relogin_attempts = 0
+                # A FULLY clean subscribe is the broker's positive proof-of-life
+                # for this token: clear the rejected flag and the request streak.
+                if not (rejected or errors):
+                    self._auth_recovery_requests = 0
+                    get_session_manager().mark_broker_ok()
                 log.info(
                     "ws.subscribe.success",
                     instruments=total,
@@ -481,49 +684,52 @@ class OptionFeedClient:
                         "on the same XTS appKey stealing the session, or STRIKE_WINDOW "
                         "exceeding the broker's 50-instrument cap.",
                     )
+                    # If the rejection was the broker's 50-instrument cap (usually
+                    # stale gateway slots a prior ATM re-center never freed), ask
+                    # for a rotation: a fresh session starts at 0/50 and
+                    # re-subscribes the full window.
+                    if _has_cap_breach(reasons):
+                        await self._request_auth_recovery("cap breach on subscribe")
         except Exception as e:
             # Don't drop the connection on a subscribe hiccup; if no data flows the
             # heartbeat will recover. Avoids a reconnect storm on transient errors.
             log.error("ws.subscribe.error", error=str(e))
 
-    async def _self_heal_auth(self) -> None:
-        """Auto-recover from an all-instruments 'Invalid Token' rejection.
+    async def _request_auth_recovery(self, reason: str) -> None:
+        """Report auth trouble to the SessionSteward — the ONE rotation authority.
 
-        Mints a fresh XTS token (single-flight + debounced in the session manager)
-        and requests a socket reconnect so the new token is used for both the
-        handshake and the resubscribe. Cooldown + attempt cap stop a login storm
-        when something keeps invalidating the session (e.g. a 2nd backend competing
-        for the single XTS market-data session, or revoked credentials).
+        This used to log in directly ("self-heal"). During outage #2 that made the
+        feed one of five independent actors rotating the single-session token out
+        from under each other every ~6 seconds for 14.6 hours; its give-up latch
+        then flipped ``authenticated`` false, which re-armed the frontend's
+        auto-login and closed the livelock. The feed now only ASKS; the steward
+        rotates under a global rate floor and verifies the outcome.
         """
         now = time.time()
-        since = now - self._last_auto_relogin
-        if since < AUTO_RELOGIN_COOLDOWN_S:
-            log.info("ws.self_heal.cooldown", since_s=round(since, 1))
+        since = now - self._last_auth_request
+        if since < AUTH_RECOVERY_REQUEST_COOLDOWN_S:
             return
-        if self._auto_relogin_attempts >= AUTO_RELOGIN_MAX_ATTEMPTS:
-            log.error(
-                "ws.self_heal.gave_up",
-                attempts=self._auto_relogin_attempts,
-                hint="auth still failing after repeated auto re-logins — likely a "
-                "2nd backend competing for the single XTS session, or revoked "
-                "credentials. Manual intervention required.",
-            )
-            return
-        self._last_auto_relogin = now
-        self._auto_relogin_attempts += 1
+        self._last_auth_request = now
+        self._auth_recovery_requests += 1
         log.warning(
-            "ws.self_heal.relogin",
-            attempt=self._auto_relogin_attempts,
-            max=AUTO_RELOGIN_MAX_ATTEMPTS,
+            "ws.auth_recovery_requested",
+            reason=reason, consecutive=self._auth_recovery_requests,
         )
+        if self._auth_recovery_requests >= AUTH_RECOVERY_REQUESTS_BEFORE_REJECTED:
+            # Observability only: /api/health should stop claiming
+            # authenticated=true while recovery keeps not landing. Nothing
+            # auto-rotates off this flag anymore.
+            get_session_manager().mark_broker_rejected(
+                f"{self._auth_recovery_requests} auth-recovery requests unanswered"
+            )
         try:
-            await get_session_manager().login()
-            # Force the supervisor to reconnect so the socket re-handshakes with
-            # the fresh token (the live socket is still bound to the dead one).
-            self._reconnect_requested = True
-            log.info("ws.self_heal.relogin_ok")
-        except Exception as e:
-            log.error("ws.self_heal.relogin_failed", error=str(e))
+            from .session_steward import get_steward
+
+            steward = get_steward()
+            if steward is not None:
+                steward.request_recovery(f"ws:{reason}")
+        except Exception as e:  # pragma: no cover — reporting must never hurt
+            log.warning("ws.auth_recovery_request_failed", error=str(e))
 
     # ------------------------------------------------ socket handlers
 
@@ -585,7 +791,40 @@ class OptionFeedClient:
             st["ltp"] = ltp
         if vol is not None:
             st["volume"] = vol
+        self._remember_px(token, ltp, vol)
         self._emit(token, st)
+
+    def _prune_value_caches(self) -> None:
+        """Drop cached OI/price/volume for tokens outside the NEW subscription set.
+
+        Previously these were cleared wholesale on every swap. Most swaps are ATM-drift
+        re-centres of the SAME symbol, where the windows overlap heavily: wiping the
+        memory meant a retained strike that XTS answers with "already subscribed"
+        (so it may not resend a snapshot immediately) had no last-known OI, and
+        ``_emit`` skipped it until its next OI update — a self-inflicted gap.
+        Keys are exchange instrument ids, globally unique, so a retained entry can
+        never be attributed to a different contract.
+        """
+        keep = set(self._token_meta)
+        self._last_oi = {k: v for k, v in self._last_oi.items() if k in keep}
+        self._last_ltp = {k: v for k, v in self._last_ltp.items() if k in keep}
+        self._last_volume = {k: v for k, v in self._last_volume.items() if k in keep}
+
+    def _remember_px(self, token: str, ltp: float | None, vol: int | None) -> None:
+        """Record the last known good price/volume, scoped to the IST trading day.
+
+        Price and cumulative volume reset every session, so a carry-forward must never
+        cross a day boundary (unlike open interest, which genuinely does carry over).
+        """
+        today = now_ist().date()
+        if self._px_day != today:
+            self._px_day = today
+            self._last_ltp.clear()
+            self._last_volume.clear()
+        if ltp is not None and ltp > 0:
+            self._last_ltp[token] = float(ltp)
+        if vol is not None and vol > 0:
+            self._last_volume[token] = int(vol)
 
     def _handle_oi(self, data: Any) -> None:
         obj = _as_obj(data)
@@ -624,6 +863,22 @@ class OptionFeedClient:
             # No real OI is known for this token yet (brand-new subscription before
             # its first 1510 frame). Skip rather than persist a misleading 0-OI row.
             return
+
+        # Same reasoning as OI, for price: ``_state`` is wiped on reconnect, so a
+        # post-bounce OI-first frame would otherwise stamp ltp=0 (a phantom "premium
+        # went to zero" that flips the buildup label and yields a garbage IV).
+        # Fall back to the last good same-day price; if none is known, persist NULL
+        # rather than 0 — NULL means "price unknown" and every consumer already
+        # handles it, whereas 0 is indistinguishable from a real quote. We must NOT
+        # skip the row: a genuinely untraded strike still has real OI that belongs in
+        # the totals.
+        ltp_val = float(st.get("ltp") or 0.0)
+        ltp: float | None = ltp_val if ltp_val > 0 else self._last_ltp.get(token)
+        # Cumulative traded volume never decreases within a session, so a lower value
+        # after a reconnect is a reset artifact, not a real number.
+        vol = int(st.get("volume") or 0)
+        vol = max(vol, self._last_volume.get(token, 0))
+
         tick = Tick(
             ts=datetime.now(timezone.utc),
             token=token,
@@ -631,9 +886,9 @@ class OptionFeedClient:
             expiry=meta.expiry,
             strike=meta.strike,
             option_type=meta.option_type,
-            ltp=float(st["ltp"]),
+            ltp=ltp,
             oi=oi,
-            volume=int(st["volume"]),
+            volume=vol,
             underlying=self._latest_underlying,
         )
         try:
@@ -690,6 +945,14 @@ def _classify_400(resp: httpx.Response) -> tuple[bool, str]:
     is_limit = "limit" in low and ("exceed" in low or "50/50" in low)
     is_already = "already" in low and "subscrib" in low and not is_limit
     return is_already, detail
+
+
+def _has_cap_breach(reasons: "Counter[str]") -> bool:
+    """True if any XTS 400 reason indicates the broker's ~50-instrument cap."""
+    return any(
+        "limit" in r.lower() and ("exceed" in r.lower() or "50/50" in r.lower())
+        for r in reasons
+    )
 
 
 def _instrument_id(obj: dict) -> str:

@@ -2,7 +2,7 @@
 
 Loads ``data/symbols.json`` once at startup into an in-memory dict. Each entry
 describes one tradable instrument (index or stock) with its sector, lot size,
-strike step, and the SmartAPI spot token (for indices) or ``None`` (for stocks,
+strike step, and the XTS spot token (for indices) or ``None`` (for stocks,
 where the spot token is resolved at runtime via ``searchScrip('NSE', symbol)``).
 
 The registry is the canonical answer to "which symbols can the dashboard show?".

@@ -8,12 +8,13 @@ compute time). Populated going forward by ``_greeks_history_loop`` in main.py.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
+from ..core.time_utils import IST
 
 log = get_logger("services.greeks_history")
 
@@ -32,7 +33,9 @@ _UPSERT_GREEKS_SQL = text(
 _GREEKS_SERIES_SQL = text(
     """
     SELECT
-        time_bucket_gapfill((:step_iv)::interval, ts, :start, :end) AS bucket,
+        -- :gap_end = :end + 1µs: same inclusive-end rule as the OI replay query, so the
+        -- greeks bucket holding :end is locf-complete and lines up with the OI frame.
+        time_bucket_gapfill((:step_iv)::interval, ts, :start, :gap_end) AS bucket,
         strike, option_type,
         locf(last(iv, ts))    AS iv,
         locf(last(delta, ts)) AS delta,
@@ -55,6 +58,19 @@ async def snapshot_greeks_for_symbol(symbol: str, timeframe: str = "5m") -> None
         expiry = await resolve_expiry(None, symbol=symbol)
         engine = get_option_chain_full_engine()
         res = await engine.get(timeframe, expiry, symbol=symbol)
+
+        # This loop runs 24/7; without a guard it stamped ts=now onto greeks recomputed
+        # from the LAST session's prices every weekend, holiday and overnight tick, so
+        # replay/exports showed "greeks" for hours the market never traded. Only persist
+        # when the chain is actually from the current session (same test as iv_history).
+        if res.asof:
+            try:
+                if datetime.fromisoformat(res.asof).astimezone(IST).date() != datetime.now(IST).date():
+                    log.info("greeks_history.skip_stale_chain", symbol=symbol, asof=res.asof)
+                    return
+            except ValueError:
+                pass
+
         ts = datetime.now(timezone.utc)
         params: list[dict] = []
         for r in res.rows:
@@ -94,7 +110,14 @@ async def fetch_greeks_series(
         rows = (
             await s.execute(
                 _GREEKS_SERIES_SQL,
-                {"step_iv": step_iv, "symbol": symbol, "expiry": expiry, "start": start, "end": end},
+                {
+                    "step_iv": step_iv,
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "start": start,
+                    "end": end,
+                    "gap_end": end + timedelta(microseconds=1),
+                },
             )
         ).mappings().all()
     out: dict[datetime, dict[tuple[int, str], dict]] = {}

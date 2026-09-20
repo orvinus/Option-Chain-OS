@@ -184,7 +184,6 @@ Set these (copy the secret values from the working `.env` on your PC):
 | `XTS_MD_APP_KEY` | *your key* | Broker market-data login |
 | `XTS_MD_SECRET_KEY` | *your secret* | Broker market-data login |
 | `XTS_MD_BASE_URL` | `https://trades.lakshmishree.com/apimarketdata` | Your broker host (not the demo default) |
-| `XTS_LOGIN_AT_STARTUP` | `true` | Log in automatically on every boot/restart |
 | `API_CORS_ORIGINS` | `http://YOUR_IP` | So the browser origin is accepted by the API |
 | `UNDERLYING_SYMBOL` | `NIFTY` | Symbol the feed starts on |
 | `NIFTY_LOT_SIZE` | `65` | Current NIFTY lot |
@@ -221,7 +220,7 @@ both servers' auto-heal loops fight forever.
 
 From the repo root on the VPS:
 ```bash
-cd /opt/nifty-oi
+cd /root/nifty-oi
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 docker compose --env-file .env -f docker/docker-compose.yml logs -f backend
 ```
@@ -339,7 +338,7 @@ Once launched, it's meant to be hands-off:
 
 - **Auto-restart:** all three containers use `restart: unless-stopped`, and Docker
   starts on boot — a reboot brings the whole stack back by itself.
-- **Auto-login:** `XTS_LOGIN_AT_STARTUP=true` + a 12h refresh loop keep the token
+- **Auto-login:** startup login (automatic in live mode) + a 12h refresh loop keep the token
   fresh; the feed self-heals from "Invalid Token" and the 50-instrument
   subscription-limit wedge (both fixed in this branch).
 - **If the feed ever looks dead:** re-mint the token —
@@ -347,7 +346,7 @@ Once launched, it's meant to be hands-off:
   in the dashboard.
 - **Deploy updates:**
   ```bash
-  cd /opt/nifty-oi && git pull
+  cd /root/nifty-oi && git pull
   docker compose --env-file .env -f docker/docker-compose.yml up -d --build
   ```
   (~30s feed gap; the session restores itself.)
@@ -365,7 +364,7 @@ Once launched, it's meant to be hands-off:
 **On the VPS (nightly logical dump).** `mkdir -p /root/backups`, then `crontab -e`
 and add (16:30 IST, weekdays):
 ```cron
-30 16 * * 1-5 cd /opt/nifty-oi && docker compose --env-file .env -f docker/docker-compose.yml exec -T timescaledb sh -c 'pg_dump -U postgres -Fc oi > /tmp/oi.dump' && docker compose --env-file .env -f docker/docker-compose.yml cp timescaledb:/tmp/oi.dump /root/backups/oi_$(date +\%F).dump
+30 16 * * 1-5 cd /root/nifty-oi && docker compose --env-file .env -f docker/docker-compose.yml exec -T timescaledb sh -c 'pg_dump -U postgres -Fc oi > /tmp/oi.dump' && docker compose --env-file .env -f docker/docker-compose.yml cp timescaledb:/tmp/oi.dump /root/backups/oi_$(date +\%F).dump
 ```
 
 **Pull copies down to your PC** with the committed script (already tested):

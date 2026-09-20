@@ -31,7 +31,20 @@ export function useReplayFrames({
       setFrames([]);
       return;
     }
+    // Before 09:15 on today's date `maxMinForDate` returns 0, so start === end and
+    // /api/replay 400s with "start must be < end". Treat an empty window as "nothing
+    // to replay yet" rather than showing the user a server error.
+    if (Date.parse(endTs) <= Date.parse(startTs)) {
+      setFrames([]);
+      setError(null);
+      return;
+    }
     let cancelled = false;
+    // Drop the previous session's frames: every chart, table and KPI on the
+    // replay page reads `frames`, so leaving them in place renders a complete,
+    // convincing view of the WRONG day while the new one loads. A mislabelled
+    // export came out of exactly this (see the ExportButton comment).
+    setFrames([]);
     setLoading(true);
     api
       .replayFrames(symbol, expiry, startTs, endTs, step, false, withGreeks)

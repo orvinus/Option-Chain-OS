@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Platform Guide — NIFTY OI Analytics & Algo Trading</title>
+<style>
+  :root {
+    --bg: #0b0f17; --panel: #111827; --border: #253044; --text: #d1d5db;
+    --muted: #8b98ab; --accent: #38bdf8; --green: #34d399; --red: #f87171;
+    --amber: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0 16px 80px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 26px; color: #fff; border-bottom: 2px solid var(--accent); padding-bottom: 10px; margin-top: 28px; }
+  h2 { font-size: 20px; color: var(--accent); margin-top: 42px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 16px; color: #e5e7eb; margin-top: 26px; }
+  h4 { font-size: 13.5px; color: var(--amber); margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+  p, li { color: var(--text); }
+  .muted { color: var(--muted); }
+  code, kbd { background: #1f2937; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; color: #e5e7eb; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin: 14px 0; }
+  .note { border-left: 3px solid var(--accent); }
+  .warn { border-left: 3px solid var(--amber); }
+  .danger { border-left: 3px solid var(--red); }
+  .ok { border-left: 3px solid var(--green); }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12.5px; }
+  th, td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #16202f; color: #cbd5e1; }
+  .toc { columns: 2; gap: 32px; }
+  .toc a { color: var(--accent); text-decoration: none; display: block; padding: 2px 0; }
+  .toc a:hover { text-decoration: underline; }
+  .pill { display: inline-block; background: #1f2937; border: 1px solid var(--border); border-radius: 999px; padding: 1px 10px; font-size: 11.5px; color: #cbd5e1; margin: 0 2px; }
+  .g { color: var(--green); } .r { color: var(--red); } .a { color: var(--amber); } .b { color: var(--accent); }
+  .btn { display: inline-block; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1px 9px; font-size: 12px; color: #e2e8f0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>📖 Platform Guide — every page, every button, every rule</h1>
+<p class="muted">NIFTY OI Analytics &amp; Semi-Automated Trading · covers the six main tabs, all Algo Config sub-tabs, the full standalone Backtesting workspace, paper trading, and the broker integration. Written for the operator: what each control does, what the engine does with it, and why.</p>
+
+<div class="card toc">
+  <a href="#arch">0. How the platform fits together</a>
+  <a href="#main">1. The six main tabs</a>
+  <a href="#algo">2. Algo Config — the LIVE control room</a>
+  <a href="#algo-daily">2.1 Daily Trading Config</a>
+  <a href="#algo-engines">2.2 The four engine dashboards</a>
+  <a href="#algo-pnl">2.3 P&amp;L Summary</a>
+  <a href="#algo-paper">2.4 Paper Trading (+ how to paper trade)</a>
+  <a href="#algo-holidays">2.5 Holiday Calendar</a>
+  <a href="#algo-broker">2.6 Integrations &amp; Broker</a>
+  <a href="#algo-security">2.7 Security &amp; Backups</a>
+  <a href="#algo-validation">2.8 Validation Summary</a>
+  <a href="#bt">3. Backtesting — the standalone workspace</a>
+  <a href="#bt-sandbox">3.1 The sandbox config</a>
+  <a href="#bt-runs">3.2 Runs &amp; Results</a>
+  <a href="#bt-replay">3.3 Day Replay — the visual anatomy</a>
+  <a href="#bt-tabs">3.4 The other workspace tabs</a>
+  <a href="#rules">4. The trading rules the engine enforces</a>
+  <a href="#data">5. Data &amp; fidelity</a>
+  <a href="#faq">6. FAQ / troubleshooting</a>
+</div>
+
+<h2 id="arch">0. How the platform fits together</h2>
+<div class="card">
+<p>One pipeline, three uses:</p>
+<ul>
+<li><b>Live feed</b> (TrueData 1-minute option chain) → TimescaleDB → the analytics tabs and, during market hours, the <b>live orchestrator</b> — the trading brain that evaluates every closed minute.</li>
+<li><b>Algo Config</b> edits the LIVE configuration the orchestrator trades with. One document, versioned; the newest version is what trades.</li>
+<li><b>Backtesting</b> drives the <i>same</i> orchestrator code over the stored ~6-month archive under a separate <b>sandbox</b> configuration. Nothing done there can affect live trading.</li>
+</ul>
+<p class="muted">The engines (OI Structure, MTF Ratio, MQAE, Ultra Master Pro) are pure functions — dashboards, live trading and backtests all call the identical code, which is why the platform can promise "what you see is what trades".</p>
+</div>
+
+<h2 id="main">1. The six main tabs</h2>
+
+<h3>1.1 OI Change</h3>
+<p>The live option-chain dashboard: per-strike OI, OI change since open, LTP, IV and Greeks for the selected symbol/expiry, plus the day's cumulative Call/Put OI-change chart and PCR. The timeframe pills (1m…full-day) change the change-window. Data refreshes over a WebSocket; the "as of" stamp shows the last tick.</p>
+
+<h3>1.2 Charts</h3>
+<p>Total Call vs Put OI over the session for a strike window (ATM ± N), bucketed 1m/5m/…; candles are built client-side from the 1-minute totals. The date picker replays any stored day. Includes drawing tools (trend line, ray, rectangle — persisted per chart) and CSV/Excel export.</p>
+
+<h3>1.3 Multi-TF</h3>
+<p>OI change across all ten timeframes at once (1m, 3m, 5m, 10m, 15m, 30m, 1h, 2h, 3h, full-day) — the table version of "what's building up on each horizon". <code>as_of</code> lets you view any historical minute.</p>
+
+<h3>1.4 Ratio</h3>
+<p>The PCR (Green) and Call/Put Ratio (Yellow) lines over the session — the exact two series the MQAE engine consumes. Same date replay ability.</p>
+
+<h3>1.5 Replay</h3>
+<p>The whole-market replay player: pick a stored day, press <span class="btn">▶ Play</span>, and the option chain, OI-change grids and charts re-play minute by minute. Transport bar: restart ⏮, step ◀ ▶, speed 1–15×, scrubber. No network per playhead move — a day is fetched once.</p>
+
+<h3>1.6 Algo Config &amp; Backtesting</h3>
+<p>Chapters 2 and 3.</p>
+
+<h2 id="algo">2. Algo Config — the LIVE control room</h2>
+
+<div class="card danger"><b>This page edits what the engine actually trades.</b> Every edit accumulates in a local <i>draft</i>; nothing reaches the engine until you press <span class="btn">Save…</span> and confirm the field-by-field diff. Each save writes a NEW numbered version (v1, v2, …) — the newest version is live. Every save, sign-in and change is recorded in the append-only audit log.</div>
+
+<h4>The admin gate</h4>
+<p>Every <code>/api/algo/*</code> call requires a server-side session (httpOnly cookie). Sign in once; the session survives reloads and backend restarts. If it ever expires mid-use, the page drops back to the sign-in form with an explanation — sign in again and continue.</p>
+
+<h4>The header bar (always visible)</h4>
+<table>
+<tr><th>Element</th><th>Meaning</th></tr>
+<tr><td>Sub-tab pills</td><td>Daily Trading Config · OI Change · Multi-TF · Ratio · Ultra Master Pro · P&amp;L Summary · Paper Trading · Holiday Calendar · Integrations &amp; Broker · Security &amp; Backups · Validation Summary</td></tr>
+<tr><td><code>v37 · ayush</code></td><td>The LIVE config version and your username.</td></tr>
+<tr><td><span class="r">■ MASTER KILL ACTIVE</span></td><td>The engine-wide kill is on — nothing evaluates or trades.</td></tr>
+<tr><td><span class="a">■ PAPER MODE</span></td><td>All orders go to the simulator, never the broker.</td></tr>
+<tr><td><span class="a">N unsaved changes</span> + <span class="btn">Discard</span> / <span class="btn">Save…</span></td><td>The draft differs from the saved version. <b>Save…</b> opens the confirmation modal listing every changed field; <b>Confirm</b> writes the new version. <b>Discard</b> throws the draft away. <u>If you navigate away or reload without saving, edits are lost — this is the #1 cause of "my changes weren't stored".</u></td></tr>
+</table>
+
+<h3 id="algo-daily">2.1 Daily Trading Config</h3>
+<ul>
+<li><b>Live Decision Snapshot</b> (top) — what the orchestrator is doing RIGHT NOW: state (idle/hunting/in-trade/gated/killed), active zone, per-indicator readings, the unanimous direction, position details, gate blocks, today's realized P&amp;L, and the <span class="btn">Resume</span> button after a consecutive-loss auto-pause. Polls every 5&nbsp;s.</li>
+<li><b>Expiries strip</b> — all known expiries with weekdays; the traded (current weekly) one highlighted.</li>
+<li><b>Kill grid</b> — master kill, 5 day kills, 15 zone kills. A kill blocks evaluation/entries; an OPEN trade keeps being managed.</li>
+<li><b>Day tabs → zone rows</b> — per weekday: index symbol, allocation % (or ALL-IN), risk caps (max daily loss %, profit lock %, consecutive-loss pauses), End-Exit toggle, alerts; per zone: start/end times (never overlapping, inside 09:15–15:30), premium band ₹min–₹max, max trades, re-evaluation cadence (zone start vs every candle), strategy active, and the three indicator enable switches with live readings.</li>
+<li><b>Indicator names are links</b> (↗) — they open that engine's dashboard bound to the same day/zone.</li>
+<li><b>Copy / Reset toolbelt</b> — copy a whole day's settings to other days, copy one zone (including all four engines' parameters) to any day/zone (start/end times are preserved on the target so zones never overlap), reset day/zone/engine to the Appendix-A defaults.</li>
+</ul>
+
+<h3 id="algo-engines">2.2 The four engine dashboards</h3>
+<div class="card warn"><b>The honesty rule (read this once):</b> the readings, charts and verdicts on these dashboards are computed by the SERVER from the last <b>saved</b> config. Editing a parameter changes the draft only — the evaluation will NOT move until you press <span class="btn">Save All Engine Settings</span> (or the header Save…) and confirm. The panels say this under the editors: <i>"the evaluation below reflects the saved config. Save to apply your edits."</i></div>
+<h4>Shared context bar</h4>
+<p><b>Zone context</b> (weekday + zone) picks whose parameters run. <b>Expiry</b> defaults to "current (auto)"; pick a past expiry to analyze it. <b>Date</b> replays any stored session; with a date set, the <b>At</b> time freezes the evaluation at that exact minute (the whole window — including the ATM basket — resolves as-of that minute). <span class="btn">Live</span> clears both.</p>
+<table>
+<tr><th>Dashboard</th><th>What it shows</th></tr>
+<tr><td><b>OI Change</b> (OI Structure Engine)</td><td>Cumulative Call/Put OI-change lines, detected swings, consolidation zones, range breakouts, red-candle checks, the 12-slot structure matrix, per-event contributions with weights, the CALL/PUT/NO_TRADE signal + confidence, and the exact Algo Payload JSON.</td></tr>
+<tr><td><b>Multi-TF</b> (MTF Ratio)</td><td>Per-timeframe Call/Put OI deltas, dominant side (the SMALLER signed delta — deliberate), factor "1:N", the ordered rule list with per-condition pass/fail traces, and the final reading.</td></tr>
+<tr><td><b>Ratio</b> (MQAE)</td><td>The Green (PCR) + Yellow (Ratio) lines, five model cards (Velocity, Order Blocks, SMC, Trend Rider, Crossover) each with net-points chip, Aggressive/Conservative mode scoring, signal history (transitions), and a TIME-REPLAY slider (09:15–15:30).</td></tr>
+<tr><td><b>Ultra Master Pro</b></td><td>The execution engine: data-ready gate strip (3 daily + weekly + 1H feeds, levels ready), the level ladder (PDH/PDL/…) on 5-minute premium candles, the active zone band (ZB→ZT with midline), entry sub-scenario state (S1A…S3C, R1/R2), trail/System-B stop ladder, entry/exit event markers, engine trade list, and every group of Pine-v24 parameters (audited line-by-line against the original script — zero divergences).</td></tr>
+</table>
+<h4>Per-engine action row</h4>
+<p><span class="btn">Save All Engine Settings</span> = the page's save flow. <span class="btn">Re-run Engine Now</span> refetches. <span class="btn">Reset Z1 to Defaults</span> restores that zone's engine params from Appendix-A into the draft.</p>
+
+<h3 id="algo-pnl">2.3 P&amp;L Summary</h3>
+<ul>
+<li><b>PAPER / LIVE ledger toggle</b> — the two ledgers are never mixed in one number.</li>
+<li><b>Cumulative Performance</b> — period P&amp;L, blended return (total P&amp;L ÷ total allocated — never an average of daily %), win rate, avg win/loss, profit factor.</li>
+<li><b>Calendar</b> — day cells show net ₹ and % of that day's allocated capital (the same basis the risk limits use). Click a day to filter the trade log. 📝 = a journal note; click the cell (or use the Day Notes card) to read/edit.</li>
+<li><b>Trade log</b> — every fill: date/day/zone/side/strike, entry/exit time+price, lots, P&amp;L ₹ and %, exit reason, sub-scenario. Filter by date/zone; <span class="btn">Export CSV</span>.</li>
+</ul>
+
+<h3 id="algo-paper">2.4 Paper Trading</h3>
+<p><b>Controls:</b> Virtual balance (the simulator's capital, independent of the demat balance), slippage % (applied unfavourably to every fill), simulated latency, fill source, Shadow Mode (mirror LIVE entries into a parallel paper twin), and <span class="btn">Reset Paper Session</span> (clears ALL paper trades, restarts the session today — the only sanctioned delete, fully audited).</p>
+<div class="card ok"><b>How to paper trade properly, step by step:</b>
+<ol>
+<li>Keep <b>Paper Mode ON</b> (Integrations &amp; Broker → the mode is on by default; the amber ■ PAPER MODE badge shows in the header).</li>
+<li>Set your <b>virtual balance</b> here and each weekday's <b>allocation %</b> in Daily Trading Config.</li>
+<li>Configure zones/indicators/engines as you want to trade — Save.</li>
+<li>During market hours the orchestrator evaluates every closed minute: watch the <b>Live Decision Snapshot</b>. When the enabled indicators agree unanimously, it picks the strike whose premium sits inside the zone's band, hunts a UMP entry, and fills at LTP ± slippage.</li>
+<li>Fills, fees (the full ₹17-brokerage + statutory stack) and exits appear in <b>P&amp;L Summary → PAPER</b> and in Telegram alerts.</li>
+<li>Reset the session whenever you want a clean slate. Live trades are a separate ledger and are never touched.</li>
+</ol></div>
+<p>The <b>Brokerage Calculator</b> card mirrors the fee engine exactly: enter buy/sell premium + lots and see brokerage ×2, STT (sell side), exchange txn, SEBI, IPFT, GST, stamp duty, the total, net P&amp;L and the breakeven premium move.</p>
+
+<h3 id="algo-holidays">2.5 Holiday Calendar</h3>
+<p>NSE holidays the engine must not trade. Add with the date picker + occasion; remove with ✕. A date listed here hard-kills evaluation for that whole day (state shows "killed / holiday").</p>
+
+<h3 id="algo-broker">2.6 Integrations &amp; Broker</h3>
+<ul>
+<li><b>Connection rows</b> — feed + broker status. <span class="btn">Test Login</span> probes the Lakshmishree Interactive API (audited). <span class="btn">Reconcile</span> compares the engine's open live position against the broker's book.</li>
+<li><b>Fee model</b> — the editable charge schedule used by paper AND live P&amp;L (they can never disagree).</li>
+<li><b>Live Account — Lakshmishree</b> — read-only broker truth: balance highlights (cash available, margin, collateral…), a full field-by-field balance expander, net positions and the day's order book (including rejection reasons). <span class="btn">Refresh</span> refetches.
+<div class="card warn"><b>Weekends/off-hours:</b> the broker gateway itself goes offline; the card then shows a clean one-line reason and — once a successful fetch has happened during market hours — the <b>last snapshot</b> with its timestamp ("⏳ showing the LAST snapshot, fetched …"). Your ₹ funds will appear here the first market morning after they are credited; press Refresh after 09:00 IST Monday.</div></li>
+</ul>
+
+<h3 id="algo-security">2.7 Security &amp; Backups</h3>
+<ul>
+<li><b>Config Lock</b> — "lock during market hours" (only the lock itself may change while the session is open) and "require save confirmation" (OFF = the Save button posts directly without the diff modal).</li>
+<li><b>Version history</b> — every saved version with author/time/note; <span class="btn">Restore</span> re-saves an old document as a NEW version (the trail never rewinds).</li>
+<li><b>Audit log</b> — append-only: sign-ins (including failures), every changed field with old→new, paper resets, notes, backtest runs, kills.</li>
+</ul>
+
+<h3 id="algo-validation">2.8 Validation Summary</h3>
+<p>The §15 pre-save checklist (zone overlaps, windows inside 09:15–15:30, premium band sanity, max-trades ≥ 1, holiday formats, fees ≥ 0, balances &gt; 0…) and the §14 runtime gate per zone (an incomplete zone can never trade — live or paper — and the block is alerted). Evaluated against the LIVE saved config; the identical functions gate the orchestrator, so this page and the engine can never disagree.</p>
+
+<h2 id="bt">3. Backtesting — the standalone workspace</h2>
+
+<div class="card ok"><b>The idea:</b> a complete copy of the control room, bound to a <b>SANDBOX</b> configuration document, driving the REAL orchestrator over the stored ~6-month archive (2026-02-05 →). Same engines, same unanimous rule, same premium-band strike pick, same UMP entries/exits, same paper fills and fee stack — proven byte-identical to the live path (633/633 series-parity checks; every recorded signal transition re-derived through the live pipeline matches exactly).</div>
+
+<h3 id="bt-sandbox">3.1 The sandbox config</h3>
+<table>
+<tr><th>Property</th><th>Behavior</th></tr>
+<tr><td>Storage</td><td>Its own table — <u>never</u> a live config version. Nothing done in this workspace can change live trading. The header shows <span class="a">■ SANDBOX CONFIG</span> + last-saved time/author.</td></tr>
+<tr><td>Editing</td><td>Identical panels to Algo Config (Daily Trading Config, all four engines, Paper Settings, Holiday Calendar, fee model). Same draft → <span class="btn">Save Sandbox…</span> → diff-confirm flow, same §15 validation on save.</td></tr>
+<tr><td>Seeding</td><td><span class="btn">⟳ Copy from live</span> in the header, or Security &amp; Audit → copy any saved live version into the sandbox.</td></tr>
+<tr><td>Runs</td><td>A run launched with source "Sandbox config" freezes the document into the run — later sandbox edits never change past results (reproducibility).</td></tr>
+<tr><td>Dashboards</td><td>The engine tabs evaluate under the SAVED sandbox config (banner says so); after a deep-link from a day replay they evaluate under that <i>run's</i> frozen config until you clear the pin.</td></tr>
+</table>
+
+<h3 id="bt-runs">3.2 Runs &amp; Results</h3>
+<h4>New Backtest Run (form)</h4>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Label / From / To</td><td>Free text + the date range (the archive starts 2026-02-05).</td></tr>
+<tr><td>Configuration</td><td><b>Sandbox config</b> (recommended — this workspace's document), <b>Current live config</b>, or <b>a saved version</b>.</td></tr>
+<tr><td>Balance mode</td><td><b>Compounding</b> = live-paper parity (each day sizes off starting balance + all realized P&amp;L so far); <b>Fixed per day</b> = every day starts from the starting balance.</td></tr>
+<tr><td>Starting balance</td><td>0 = use the config's virtual balance.</td></tr>
+<tr><td>Min minutes/day</td><td>Days with less stored data are skipped (default 300).</td></tr>
+<tr><td>Skip catalogued bad-data days</td><td>The operator-verified vendor-damage days (OI collapses) stay excluded.</td></tr>
+<tr><td>Carry consecutive-loss pause</td><td>OFF (default) = each simulated day auto-resumes, like a morning manual resume.</td></tr>
+<tr><td>Extra excluded days</td><td>Any additional dates to skip.</td></tr>
+</table>
+<p><span class="btn">Run Preflight</span> shows the exact day-by-day verdict BEFORE running: symbol, resolved expiry, stored minutes, spot coverage, and run/skip with the reason (no data · holiday · excluded · bad-data day · duplication risk · insufficient coverage). <span class="btn">▶ Start Backtest</span> launches (one run at a time; a 6-month sweep takes ~10–20 minutes).</p>
+<h4>Run detail</h4>
+<p>Progress bar with the day being simulated; on completion: stat tiles (net P&amp;L, final equity, win rate, <b>max drawdown</b> with dates, profit factor, fees, day counts), the <b>equity curve</b>, the per-day table (trades/net/fees/equity/flags — click a day to open its replay), and the FULL P&amp;L suite (calendar, by-day/by-zone, trade log, CSV) run-scoped. Actions: <span class="btn">■ Cancel</span>, <span class="btn">↻ Resume</span> (continues an interrupted run deterministically), <span class="btn">Use in P&amp;L tab ↗</span>, <span class="btn">Delete run</span>.</p>
+
+<h3 id="bt-replay">3.3 Day Replay — the visual anatomy</h3>
+<p>Open any completed day. Everything is loaded once; the playhead is pure client-side — scrubbing is instant.</p>
+<table>
+<tr><th>Element</th><th>What it shows</th></tr>
+<tr><td>Transport bar</td><td>⏮ restart · ◀ ▶ step one minute · ▶ Play/❚❚ Pause · speeds 1–15 minutes/second · scrubber · the simulated clock (09:15–15:39) and frame counter.</td></tr>
+<tr><td>Zone strip</td><td>Z1/Z2/Z3 windows on the session timeline; the active one highlights; the amber line is the playhead.</td></tr>
+<tr><td>Engine State card</td><td>The orchestrator's state AT the playhead: IDLE / HUNTING / IN_TRADE / NO_TRADE / GATED / KILLED / NO_STRIKE_IN_BAND, with zone + direction.</td></tr>
+<tr><td>Signals card</td><td>The per-indicator readings (oi_change / multi_tf / ratio) and the unanimous <b>combined</b> signal at the playhead.</td></tr>
+<tr><td>Equity card</td><td>Running equity: day-start → playhead → day-end.</td></tr>
+<tr><td><b>OI Change — Call vs Put (Cr)</b></td><td>The day's cumulative OI-change lines truncated at the playhead. <span class="g">Green</span>/<span class="r">red</span> background bands = the windows where the unanimous signal was CALL/PUT. Vertical ▲ markers = entries, ▼ = exits (with the exit reason).</td></tr>
+<tr><td><b>PCR / Ratio</b></td><td>The MQAE's Green + Yellow input lines, same bands and markers.</td></tr>
+<tr><td><b>UMP chart</b></td><td>The traded contract's 5-minute premium candles, the level ladder, the zone band, entry/exit event markers — truncated at the playhead. Click a trade row to chart it.</td></tr>
+<tr><td>Trades table</td><td>Every trade: zone, side, strike, entry/exit time+price (click the time to JUMP the playhead there), exit reason, P&amp;L. Rows dim until their entry time passes.</td></tr>
+<tr><td>Alerts feed</td><td>Exactly what Telegram would have received, up to the playhead.</td></tr>
+<tr><td>"Open this minute in…"</td><td>Deep-links into each engine dashboard on this date, frozen at the playhead minute, under the RUN's frozen config (the amber pin banner shows it).</td></tr>
+</table>
+
+<h3 id="bt-tabs">3.4 The other workspace tabs</h3>
+<ul>
+<li><b>Daily Trading Config</b> — the full editor (kill grid, zones, risk, copy/reset) on the sandbox draft. No live snapshot here — there is no live engine in the sandbox.</li>
+<li><b>OI Change / Multi-TF / Ratio / Ultra Master Pro</b> — the full dashboards evaluating the SAVED sandbox config; use Date + At to study any archived minute. No auto-polling (nothing is "live" here).</li>
+<li><b>P&amp;L Summary</b> — pick a completed run (or send one from its detail page) → the entire P&amp;L suite for that run.</li>
+<li><b>Paper Settings</b> — the sandbox's virtual balance (default run capital), slippage/latency/fill source (they drive every backtest fill) + the Brokerage Calculator.</li>
+<li><b>Holiday Calendar</b> — sandbox holidays (skipped by the runner's preflight).</li>
+<li><b>Integrations &amp; Broker</b> — the fee model edits the sandbox; the Live Account card is the same read-only broker view (handy while testing).</li>
+<li><b>Security &amp; Audit</b> — sandbox document info, seed-from-version, and the audit log filtered to backtest + config events. (Live restore/Config-Lock stay in Algo Config on purpose.)</li>
+<li><b>Validation Summary</b> — §15 + §14 evaluated against the sandbox DRAFT (unsaved edits included), so you can fix problems before saving.</li>
+</ul>
+
+<h2 id="rules">4. The trading rules the engine enforces</h2>
+<table>
+<tr><th>Rule</th><th>Behavior</th></tr>
+<tr><td><b>Unanimous rule</b> (§4.1)</td><td>Whichever indicators are ENABLED must all agree CALL or all PUT; anything else = NO_TRADE. Zero enabled indicators can never trade (§14 blocks + alerts).</td></tr>
+<tr><td><b>Strike-in-band</b></td><td>On a confirmed side, scan the current weekly's strikes; trade the one whose live premium sits inside the zone's ₹min–₹max band, nearest the band middle; none in band → no trade + one alert.</td></tr>
+<tr><td><b>UMP owns execution</b> (§5.3/§6)</td><td>Entries come ONLY from the Ultra Master Pro engine's setups (trigger + S1A…S3C / retest R1-R2, two-candle guard, level machinery); exits ONLY from its chain (targets, trail ladder, System B, MAX/BASE SL) or the day-level End-Exit. Filter flips never touch an open trade; a direction flip while hunting discards everything.</td></tr>
+<tr><td><b>Sequencing</b> (§2.3)</td><td>An open trade suppresses every later zone's entries until it closes. End-Exit (if enabled) force-closes at the LAST zone's end time.</td></tr>
+<tr><td><b>Risk kills</b> (§7)</td><td>Per day: max-loss auto-kill, profit lock (stop after reaching +X%), consecutive-loss pause (count and/or % — manual Resume required). All recomputed from the ledger, so they survive restarts.</td></tr>
+<tr><td><b>§14 completeness gate</b></td><td>A zone missing anything (indicators, band, times…) is dead for the session and the block is alerted — never silent.</td></tr>
+<tr><td><b>§15 validation</b></td><td>A config that violates the hard rules cannot be SAVED at all.</td></tr>
+<tr><td><b>Honesty rule</b></td><td>Dashboards evaluate the last SAVED config (live page) / SAVED sandbox (workspace) — never unsaved drafts.</td></tr>
+</table>
+
+<h2 id="data">5. Data &amp; fidelity</h2>
+<ul>
+<li><b>Archive:</b> 1-minute option bars for NIFTY + SENSEX from 2026-02-05, all sessions opening exactly 09:15 IST (timezone-repair verified). The live feed's days merge seamlessly on top.</li>
+<li><b>Backtest determinism:</b> the same run inputs produce byte-identical results — including across interrupt + resume. Lot sizes and strike steps are frozen into each run.</li>
+<li><b>No lookahead:</b> every evaluation uses closed minutes only; the ATM basket, strike membership and the strike picker resolve as-of the simulated instant (this is tested against the live SQL to exact equality).</li>
+<li><b>Honest degradations:</b> spot-less sessions (a catalogued vendor gap) run with full-chain baskets exactly as live would and are flagged per day; thin days are skipped by preflight with the reason shown.</li>
+<li><b>Fills:</b> 1-minute paper simulation — LTP ± slippage, no queue/liquidity model. Fees are the full statutory stack, identical to live P&amp;L.</li>
+</ul>
+
+<h2 id="faq">6. FAQ / troubleshooting</h2>
+<table>
+<tr><th>Symptom</th><th>Explanation</th></tr>
+<tr><td>"I changed settings but nothing changed / it wasn't stored."</td><td>Two usual causes: (1) the draft was never SAVED — look for the amber "N unsaved changes" and press Save…/Save Sandbox… then Confirm; navigating away or reloading discards drafts. (2) The engine dashboards follow the honesty rule — they evaluate the last saved config, so charts move only after a save. Every successful save shows a green toast "✔ Saved as vN" and appears in Security → version history + audit.</td></tr>
+<tr><td>"The broker card shows an error / no funds."</td><td>Outside market hours the Lakshmishree gateway itself is offline (weekends especially) — the card says so and shows the last snapshot when one exists. Funds credited to the account appear the next market morning; open Integrations &amp; Broker and press Refresh after ~09:00 IST.</td></tr>
+<tr><td>"A backtest day was skipped."</td><td>Open the run's preflight/days table — every skip carries its reason: weekend, config holiday, catalogued bad-data day, excluded by you, no stored data, or too few minutes.</td></tr>
+<tr><td>"My backtest made zero trades."</td><td>Honest outcome: the unanimous rule + premium band + UMP setup requirements are strict. Open any day's replay and watch the signals — you'll see exactly where directions formed and why entries didn't (band empty, disagreement, no UMP setup).</td></tr>
+<tr><td>"Two runs differ."</td><td>Only if their inputs differ — check the config source (sandbox vs live vs version) and settings; each run freezes its document, and identical inputs are proven byte-identical.</td></tr>
+<tr><td>"Session expired" mid-use</td><td>Backend restarted; sign in again (one click — the form appears in place).</td></tr>
+</table>
+
+<p class="muted" style="margin-top:40px">Generated 2026-08-15 · lives at <code>docs/platform-guide.html</code> and served at <code>/platform-guide.html</code>.</p>
+</div>
+</body>
+</html>

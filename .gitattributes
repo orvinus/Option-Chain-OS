@@ -1,0 +1,8 @@
+# Shell scripts and systemd units are deployed to a Linux VPS straight from this
+# checkout — a single CRLF (\r) in a unit file makes systemd fail in confusing
+# ways, and Windows editors/clipboards inject them silently. Pin LF in the repo.
+*.sh text eol=lf
+scripts/systemd/* text eol=lf
+
+# PowerShell is Windows-native; let it be CRLF.
+*.ps1 text eol=crlf

@@ -28,13 +28,24 @@ function flattenSymbols(groups: SymbolSectorGroup[]): Record<string, SymbolEntry
  * selection (and a single health poll) is shared across tab switches.
  */
 export interface MarketContextValue {
+  /** True when the BROKER market-data session is live. Use this only for live-feed
+   *  concerns (spot ticks, "feed offline" notices) — never to gate reading data. */
   authenticated: boolean;
+  /** True when our own backend answered /api/health, regardless of broker state.
+   *  Every read endpoint serves stored history without a broker session, so this is
+   *  what data loading should be gated on. A broker outage must not hide months of
+   *  collected data. */
+  dataReady: boolean;
+  /** True only when ticks can actually arrive: we hold a broker session AND the
+   *  market-data socket is up. `authenticated` alone is not enough — a token can be
+   *  TTL-valid while the socket is dead, which is how production served 13-hour-old
+   *  data under a green badge with no warning at all (2026-08-04). Gate the
+   *  "feed offline" notice on this, never on `authenticated`. */
+  feedLive: boolean;
   authChecked: boolean;
   health: HealthResponse | null;
   setAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
   handleAuthenticated: () => void;
-  /** Last error from the automatic broker connect (null while connecting/connected). */
-  connectError: string | null;
 
   symbol: string;
   symbolGroups: SymbolSectorGroup[];
@@ -72,7 +83,7 @@ export function useMarketContext(): MarketContextValue {
   const [expiryError, setExpiryError] = useState<string | null>(null);
 
   // Defaults to NIFTY; changes only via the confirmation gate. Never follows the
-  // backend's active symbol out-of-band (so /hidden switching can't drag it off NIFTY).
+  // backend's active symbol out-of-band (a global switch can't drag it off NIFTY).
   const [symbol, setSymbol] = useState<string>(DEFAULT_SYMBOL);
   const [symbolGroups, setSymbolGroups] = useState<SymbolSectorGroup[]>([]);
   const [switching, setSwitching] = useState(false);
@@ -84,9 +95,9 @@ export function useMarketContext(): MarketContextValue {
   const [atmWindow, setAtmWindow] = useState<number>(5);
 
   const [authenticated, setAuthenticated] = useState(false);
+  const [dataReady, setDataReady] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
 
   const symbolIndex = useMemo(() => flattenSymbols(symbolGroups), [symbolGroups]);
   const activeEntry: SymbolEntry | undefined = symbolIndex[symbol];
@@ -102,13 +113,18 @@ export function useMarketContext(): MarketContextValue {
         if (!cancelled) {
           setHealth(h);
           setAuthenticated(h.authenticated);
+          // Our backend answered — stored data is readable even if the broker is not.
+          setDataReady(true);
           setAuthChecked(true);
           // NOTE: intentionally do NOT adopt h.active_symbol — the main dashboard is
-          // pinned to NIFTY and must not follow the global active symbol (which the
-          // /hidden dashboard may switch to a stock/commodity).
+          // pinned to NIFTY and must not follow the global active symbol (which
+          // another consumer may have switched to a stock/commodity).
         }
       } catch {
-        if (!cancelled) setAuthChecked(true);
+        if (!cancelled) {
+          setDataReady(false);
+          setAuthChecked(true);
+        }
       }
     };
     void check();
@@ -118,41 +134,20 @@ export function useMarketContext(): MarketContextValue {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-connect the broker using the appKey/secretKey in .env. The XTS market-data
-  // API authenticates with the API key alone (no MPIN/TOTP/per-user login), so there
-  // is no manual "Connect to Broker" page — establish the session automatically and
-  // retry until it succeeds.
-  useEffect(() => {
-    if (!authChecked || authenticated) return;
-    // Replay instances never contact the broker (single-session-per-appKey safety):
-    // don't auto-connect — the backend would 409 anyway, and hammering it every 60s
-    // just shows a perpetual "connect error" on this dev/replay dashboard.
-    if (health?.run_mode === "replay") return;
-    let cancelled = false;
-    let inFlight = false;
-    const connect = async () => {
-      if (inFlight || cancelled) return;
-      inFlight = true;
-      try {
-        await api.login({ mpin: "" });
-        if (!cancelled) setConnectError(null);
-      } catch (e) {
-        if (!cancelled) setConnectError(String(e));
-      } finally {
-        inFlight = false;
-      }
-    };
-    void connect();
-    // Gentle retry while disconnected — XTS market-data login is rate-limited and
-    // every login restarts the feed, so don't hammer it. Stops once authenticated.
-    const id = setInterval(() => void connect(), 60_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [authChecked, authenticated, health?.run_mode]);
+  // NOTE: there is deliberately NO auto-login here anymore. This hook used to
+  // POST /api/auth/login whenever `authenticated` read false — and because the
+  // effect re-ran on every `authenticated` flip, its "gentle 60s retry" actually
+  // fired within seconds of each flip. During the 2026-08-06 outage that made
+  // every open dashboard tab a login-storm actor: each forced login invalidated
+  // the token the feed's socket was using, ~6s per cycle, for 14.6 hours.
+  // Recovery is the backend SessionSteward's job now; the browser only OBSERVES
+  // via the health poll. (The server-side login endpoint is also coalescing, so
+  // even this old bundle, if cached, can no longer rotate the token.)
 
-  // Load the symbol registry once authenticated; retry every 3s on transient failure
-  // or when groups is empty (e.g. backend came up after frontend).
+  // Load the symbol registry once the BACKEND is reachable (not the broker); retry
+  // every 3s on transient failure or when groups is empty.
   useEffect(() => {
-    if (!authenticated) return;
+    if (!dataReady) return;
     let cancelled = false;
     const load = () => {
       api.symbols().then((res) => {
@@ -174,11 +169,11 @@ export function useMarketContext(): MarketContextValue {
       });
     }, 3_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated]);
+  }, [dataReady]);
 
   // Load expiries for the current symbol when it changes (or auth flips on).
   useEffect(() => {
-    if (!authenticated) return;
+    if (!dataReady) return;
     if (!fnoEligible) {
       setExpiries([]);
       setExpiry(null);
@@ -201,7 +196,7 @@ export function useMarketContext(): MarketContextValue {
     void tick();
     const id = setInterval(() => void tick(), EXPIRY_POLL_MS);
     return () => { cancelled = true; clearInterval(id); };
-  }, [authenticated, symbol, fnoEligible]);
+  }, [dataReady, symbol, fnoEligible]);
 
   // Perform the actual symbol switch (POST /api/active-symbol + local state).
   const doSwitch = useCallback(async (next: string) => {
@@ -248,7 +243,7 @@ export function useMarketContext(): MarketContextValue {
   // Assert NIFTY as the backend's active symbol ONCE on load, so live NIFTY data
   // flows here (the WS hub and spot only serve the globally-active symbol). Fires a
   // single time — it never re-grabs the feed afterwards, so a later user-confirmed
-  // switch (or the /hidden dashboard) is not fought.
+  // switch is not fought.
   const nudgedActiveRef = useRef(false);
   useEffect(() => {
     if (!authenticated || !health || nudgedActiveRef.current) return;
@@ -267,8 +262,12 @@ export function useMarketContext(): MarketContextValue {
       ? health.latest_spot
       : null;
 
+  // Both halves must hold. Before the health poll lands we assume the feed is fine so
+  // the banner does not flash on every page load.
+  const feedLive = authenticated && health?.feed_connected !== false;
+
   return {
-    authenticated, authChecked, health, setAuthenticated, handleAuthenticated, connectError,
+    authenticated, dataReady, feedLive, authChecked, health, setAuthenticated, handleAuthenticated,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     verified, pendingSymbol, confirmSymbolChange, cancelSymbolChange,
     expiry, setExpiry, expiries, expiryError,

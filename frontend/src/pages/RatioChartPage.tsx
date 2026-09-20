@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { SymbolSelect } from "../components/SymbolSelect";
 import {
   TimeSeriesChart,
@@ -12,7 +13,7 @@ import {
 import { SERIES_COLORS } from "../components/charts/chartTheme";
 import { istIsoToChartTime } from "../components/charts/chartTime";
 import type { MarketContextValue } from "../hooks/useMarketContext";
-import { compact } from "../utils/num";
+import { compact, fmt2 } from "../utils/num";
 import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { useAvailableDates } from "../hooks/useAvailableDates";
 import { useMultiTimeframe } from "../hooks/useMultiTimeframe";
@@ -26,11 +27,9 @@ const BUCKET_LABEL: Record<string, string> = {
 };
 const ATM_MAX_WINDOW = 50;
 
-const fmt2 = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
-
 export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
+    feedLive, dataReady, health, symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError, fnoEligible, symbolDisplay,
     atmWindow, setAtmWindow, activeEntry,
   } = mc;
@@ -48,7 +47,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
 
   // A past date is read as a fixed full-session window (one fetch); today/null stays live.
@@ -62,12 +61,12 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
     symbol: fnoEligible ? symbol : null,
     expiry,
     asOf: historical ? toTs : undefined,
-    enabled: authenticated && fnoEligible && !!expiry,
+    enabled: dataReady && fnoEligible && !!expiry,
   });
   const atm = mtf.data?.atm_strike ?? null;
   const { strikeMin, strikeMax } = useMemo(() => {
     if (atm == null || atmWindow < 0) return { strikeMin: undefined, strikeMax: undefined };
-    const w = effectiveAtmWindow(atmWindow); // one fewer strike each side than the picked N
+    const w = effectiveAtmWindow(atmWindow); // exactly ATM ± the picked N, as in Algo Config
     return { strikeMin: atm - w * strikeStep, strikeMax: atm + w * strikeStep };
   }, [atm, atmWindow, strikeStep]);
 
@@ -79,7 +78,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
     toTs,
     strikeMin,
     strikeMax,
-    enabled: authenticated && fnoEligible && !!expiry,
+    enabled: dataReady && fnoEligible && !!expiry,
   });
 
   // Build the two ratio lines plus a per-time position lookup for the tooltip.
@@ -129,6 +128,7 @@ export function RatioChartPage({ mc }: { mc: MarketContextValue }) {
 
   return (
     <div className="min-h-screen w-full max-w-[1500px] mx-auto px-4 md:px-6 py-3">
+      {!feedLive && <FeedOfflineBanner />}
       <div className="panel px-4 py-3 flex flex-wrap items-center gap-3 mb-4">
         <SymbolSelect
           groups={symbolGroups}

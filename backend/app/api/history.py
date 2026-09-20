@@ -18,10 +18,12 @@ from .schemas import HistoryDatesResponse
 
 router = APIRouter(tags=["history"])
 
+# Reads the unified view (live table ∪ vendor archive, migration 0005) so the
+# date picker offers vendor-backfilled days alongside live-recorded ones.
 _HISTORY_DATES_SQL = text(
     """
     SELECT DISTINCT (ts AT TIME ZONE 'Asia/Kolkata')::date AS d
-    FROM option_oi_snapshots
+    FROM oi_snapshots_unified
     WHERE symbol = :symbol AND expiry = :expiry
     ORDER BY d DESC
     """

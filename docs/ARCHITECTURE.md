@@ -28,7 +28,7 @@ sequenceDiagram
 
     Lifespan->>Auth: restore token from DB, else login (appKey/secretKey)
     Auth-->>Lifespan: marketDataToken
-    Note over Auth: if no token & XTS_LOGIN_AT_STARTUP=false,<br/>park at ws.awaiting_dashboard_login
+    Note over Auth: if restore AND fresh login both fail,<br/>park at ws.awaiting_dashboard_login
     Lifespan->>Sm: resolve_option_universe(spot)
     Sm-->>Lifespan: tokens, expiries
     Lifespan->>Agg: start()

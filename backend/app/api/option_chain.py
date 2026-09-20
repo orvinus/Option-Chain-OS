@@ -77,6 +77,7 @@ async def option_chain(
 
     book: dict[int, dict[str, object]] = {}
     spot: Optional[float] = None
+    spot_ts = None
     max_ts = None
     for r in rows:
         slot = book.setdefault(r["strike"], {})
@@ -88,8 +89,13 @@ async def option_chain(
             slot["put_oi"] = int(r["oi"])
             slot["put_ltp"] = float(r["ltp"]) if r.get("ltp") is not None else None
             slot["put_volume"] = int(r.get("volume") or 0)
-        if spot is None and r.get("underlying") is not None:
+        # Freshest-row spot, not first-row: rows outside the live subscription
+        # window are carry-forward and can hold an underlying that is minutes
+        # or hours old (integrity invariant: spot must come from the newest
+        # stamped row).
+        if r.get("underlying") is not None and (spot_ts is None or r["ts"] > spot_ts):
             spot = float(r["underlying"])
+            spot_ts = r["ts"]
         if max_ts is None or r["ts"] > max_ts:
             max_ts = r["ts"]
 

@@ -54,35 +54,40 @@ sequenceDiagram
     XTS-->>App: touchline + OI ticks
 ```
 
-## Manual vs. unattended login
+## Startup login (automatic)
 
-Login is **manual by default** (`XTS_LOGIN_AT_STARTUP=false`):
+Startup auth is **unconditional** whenever `RUN_MODE=live`.
+There is no opt-in flag. (`XTS_LOGIN_AT_STARTUP` was documented here for a long
+time but was never read by any code — it has been removed.)
 
-1. On boot the backend first calls **`try_restore_session_from_db`** — if a
-   valid token row exists in `auth_sessions`, the feed reconnects with no
-   interaction.
-2. If restore fails, the feed parks at **`ws.awaiting_dashboard_login`** and
-   waits. Trigger a fresh login from the dashboard **Connect** button or with:
+1. On boot the backend calls **`try_restore_session_from_db`** — if a token row in
+   `auth_sessions` is still inside its 24h TTL, it is reused with no interaction.
+2. If restore fails, the backend **logs in fresh from `.env`** (`force=True`).
+3. Only if both fail does the feed park at **`ws.awaiting_dashboard_login`**. Mint a
+   token by hand with:
 
    ```bash
    curl -X POST http://localhost:8000/api/auth/login
    ```
 
-   (The legacy form fields `client_code` / `mpin` / `totp_code` are accepted but
-   ignored — the XTS session authenticates with the `appKey` / `secretKey` from
-   `.env`.)
+   The request body is empty — the XTS session authenticates with the `appKey` /
+   `secretKey` from `.env`. (Older clients that still post `client_code` / `mpin` /
+   `totp_code` keep working; the fields are simply ignored.)
 
-For **unattended servers** (VPS / Docker / Task Scheduler), set
-**`XTS_LOGIN_AT_STARTUP=true`** so the backend logs in from `.env` on startup
-without needing the dashboard. See [DEPLOY.md](DEPLOY.md).
+**A restored token can still be dead.** The TTL is local arithmetic; XTS also expires
+tokens daily and invalidates them whenever a newer login happens on the same appKey.
+Recovery is automatic — the feed's `_self_heal_auth` re-logs in on an auth rejection,
+at the Socket.IO handshake, or when the option universe resolves empty — but note that
+**a dashboard sign-in is not a re-login**: `_fixed_credential_gate` short-circuits when
+the session already looks authenticated. To *guarantee* a fresh token, hit
+`POST /api/auth/login` directly (it is the only `force=True` path).
 
 Relevant timeouts (in `.env`):
 
 | Variable                  | Default | Meaning |
 |---------------------------|---------|---------|
-| `SMARTAPI_LOGIN_TIMEOUT_S` | `45`   | Max seconds `POST /api/auth/login` waits for the XTS login. |
+| `XTS_LOGIN_TIMEOUT_S`      | `45`   | Max seconds `POST /api/auth/login` waits for the XTS login. (`SMARTAPI_LOGIN_TIMEOUT_S` still accepted.) |
 | `DB_PERSIST_TIMEOUT_S`     | `20`   | Max seconds to persist the new session row. |
-| `XTS_LOGIN_AT_STARTUP`     | `false`| `true` = log in from `.env` on startup (unattended). |
 
 ## The XTS socket drops every ~83 seconds
 
@@ -97,7 +102,7 @@ stored data stays clean. The disconnects themselves are expected; you will see
 
 | Symptom                                   | Likely cause |
 |-------------------------------------------|--------------|
-| Feed stuck at `ws.awaiting_dashboard_login` | No valid token. Click **Connect** on the dashboard or `POST /api/auth/login`. After a container recreate this is expected when `XTS_LOGIN_AT_STARTUP=false`. |
+| Feed stuck at `ws.awaiting_dashboard_login` | No valid token and the startup login failed (bad creds, or the broker was unreachable). Run `POST /api/auth/login`. |
 | `401` / `Invalid appKey or secretKey`     | Wrong/blank `XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY`, or pointing `XTS_MD_BASE_URL` at the wrong host (demo vs. live). |
 | Login succeeds but no ticks               | Subscription limit exceeded for the appKey (see below), or outside market hours. |
 | `feed_connected` flaps every ~80s         | Normal — the gateway's periodic reconnect (see above). |
@@ -110,6 +115,8 @@ the broker dashboard; some plans default to as few as **50**). With
 two message codes (touchline `1501` + open-interest `1510`). Ensure your appKey
 allows enough subscriptions, or lower `STRIKE_WINDOW`.
 
-> **Note:** `/api/health` reports `auth_mode: "totp"` — that string is a legacy
-> field name left over from the Angel One era. The active integration is the XTS
+> **Note:** `/api/health` no longer reports `auth_mode`. That field, and the
+> `AUTH_MODE` setting behind it, were Angel One leftovers removed on 2026-08-04
+> (its "publisher" value silently skipped session restore, login and the token
+> refresh loop). The active integration is the XTS
 > appKey/secretKey flow described here.

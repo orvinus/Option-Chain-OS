@@ -17,6 +17,8 @@ import type {
   Timeframe,
 } from "../types";
 
+import { trackRequest } from "./inflight";
+
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 
 /** Prefer FastAPI `detail` field so login/API errors are readable in the UI. */
@@ -47,12 +49,16 @@ async function getJSON<T>(path: string, params?: Record<string, string | undefin
       if (v != null) url.searchParams.set(k, v);
     }
   }
-  const res = await fetch(url.toString(), { credentials: "same-origin" });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status} ${res.statusText} :: ${formatErrorBody(res, text)}`);
-  }
-  return (await res.json()) as T;
+  // Counted so the app-wide loading indicator covers every dashboard read
+  // without each caller having to opt in.
+  return trackRequest(async () => {
+    const res = await fetch(url.toString(), { credentials: "same-origin" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status} ${res.statusText} :: ${formatErrorBody(res, text)}`);
+    }
+    return (await res.json()) as T;
+  });
 }
 
 type PostOpts = { timeoutMs?: number };
@@ -80,7 +86,7 @@ async function postJSON<T>(path: string, body: unknown, opts?: PostOpts): Promis
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
       throw new Error(
-        `Request timed out after ${opts?.timeoutMs ?? 0} ms — Angel One or the database may be slow or unreachable.`
+        `Request timed out after ${opts?.timeoutMs ?? 0} ms — the backend or database may be slow or unreachable.`
       );
     }
     throw e;
@@ -94,8 +100,8 @@ export const api = {
   spot: (symbol?: string) => getJSON<SpotResponse>("/api/spot", { symbol }),
   niftyCrossCheck: () => getJSON<NiftyCrossCheckResponse>("/api/verify/nifty-cross-check"),
   expiries: (symbol?: string) => getJSON<ExpiriesResponse>("/api/expiries", { symbol }),
-  oiChange: (timeframe: Timeframe, expiry?: string, symbol?: string) =>
-    getJSON<OIChangeResponse>("/api/oi-change", { timeframe, expiry, symbol }),
+  oiChange: (timeframe: Timeframe, expiry?: string, symbol?: string, asOf?: string) =>
+    getJSON<OIChangeResponse>("/api/oi-change", { timeframe, expiry, symbol, as_of: asOf }),
   /**
    * OI change over an explicit window. `toTs` omitted => "up to latest" (live,
    * left-anchored window). Timestamps are ISO-8601 (IST offset recommended).
@@ -186,18 +192,18 @@ export const api = {
       with_greeks: withGreeks ? "true" : undefined,
     }),
   symbols: () => getJSON<SymbolsResponse>("/api/symbols"),
-  /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — Angel resubscribe can be slow. */
+  /** Switch the live WebSocket subscription to a new symbol. Allow ~45s — a broker resubscribe can be slow. */
   setActiveSymbol: (symbol: string) =>
     postJSON<ActiveSymbolResponse>("/api/active-symbol", { symbol }, { timeoutMs: 45_000 }),
   authStart: () =>
     getJSON<{ login_url: string; state: string }>("/api/auth/publisher/start"),
-  /** ~55s client cap vs backend SMARTAPI_LOGIN_TIMEOUT_S (45s default) + persist margin */
+  /** ~55s client cap vs backend XTS_LOGIN_TIMEOUT_S (45s default) + persist margin */
   login: (req: LoginRequest) =>
     postJSON<LoginResponse>("/api/auth/login", req, { timeoutMs: 55_000 }),
   /**
    * Fixed-credential gate for the main dashboard. Verified server-side against
-   * MAIN_USER / MAIN_PASSWORD (distinct from the /hidden pair). In live mode a
-   * successful sign-in also starts the broker feed, so allow ~55s.
+   * MAIN_USER / MAIN_PASSWORD. In live mode a successful sign-in also starts
+   * the broker feed, so allow ~55s.
    */
   gateLogin: (req: { username: string; password: string }) =>
     postJSON<LoginResponse>("/api/auth/main-login", req, { timeoutMs: 55_000 }),

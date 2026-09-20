@@ -27,6 +27,25 @@ class Runtime:
         self.latest_spot: Optional[float] = None
         self.last_flush_at: Optional[datetime] = None
         self.last_flush_rows: int = 0
+        # WS-origin rows only. The session steward keys feed health on THIS, so
+        # REST-failover rows (which advance last_flush_at and keep the dashboard
+        # honest) can never mask a dead socket from the recovery ladder.
+        self.last_ws_flush_at: Optional[datetime] = None
+        # The session steward (single recovery authority), set by the lifespan.
+        self.steward: Optional[object] = None
+
+        # ---------------- TrueData shadow pipeline ----------------
+        # A COMPLETELY separate queue/aggregator/feed triple writing to
+        # td_shadow_snapshots. Deliberately not reusing the fields above:
+        # /api/health, the spot refresher and the steward all read `feed_client`,
+        # `last_flush_at` and `last_ws_flush_at`, so publishing the shadow feed
+        # there would make a dead live socket look healthy — a silent outage
+        # generator. The shadow pipeline touches none of them.
+        self.shadow_tick_queue: "asyncio.Queue[Tick]" = asyncio.Queue(maxsize=100_000)
+        self.shadow_feed_client: Optional[object] = None
+        self.shadow_aggregator: Optional[object] = None
+        self.shadow_last_flush_at: Optional[datetime] = None
+        self.shadow_last_flush_rows: int = 0
         # Active symbol = the underlying currently subscribed on the live WS.
         # Switched via /api/active-symbol; only one is live at a time.
         self.active_symbol: str = (settings.underlying_symbol or "NIFTY").upper()

@@ -1,0 +1,20 @@
+[Unit]
+Description=Nightly TrueData archive top-up (pull + ticks + data-health refresh)
+# OnFailure is the whole point of running this as a unit rather than a cron
+# line: the script exits non-zero when the archive is behind the last completed
+# trading day, and oi-alert@ turns that into a Telegram page. Before this, the
+# top-up could stop for a week and the only symptom was a backtest quietly
+# missing recent days (it did: 2026-08-13 -> 2026-08-21).
+OnFailure=oi-alert@%n.service
+# TrueData drops hosting-ASN source IPs, so on the VPS every vendor call rides
+# the WARP SOCKS port. Starting before WARP is up guarantees a failed run.
+Wants=network-online.target
+After=network-online.target warp-svc.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/nifty-oi
+ExecStart=/usr/local/bin/oi-topup
+# A full re-pull of the recent window across both symbols is minutes, not
+# seconds; the vendor rate governor deliberately paces it.
+TimeoutStartSec=7200

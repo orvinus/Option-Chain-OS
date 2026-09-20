@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { AtmWindowSelect } from "../components/AtmWindowSelect";
 import { ChartIntervalBar } from "../components/ChartIntervalBar";
-import { ConnectBanner } from "../components/ConnectBanner";
+import { BackendOfflineNotice } from "../components/BackendOfflineNotice";
 import { DatePicker } from "../components/DatePicker";
 import { ExpirySelect } from "../components/ExpirySelect";
+import { FeedOfflineBanner } from "../components/FeedOfflineBanner";
 import { OICandleChart } from "../components/OICandleChart";
 import { SpotHeader } from "../components/SpotHeader";
 import { SymbolSelect } from "../components/SymbolSelect";
@@ -13,14 +14,14 @@ import { useOITimeseries } from "../hooks/useOITimeseries";
 import { useOIStream } from "../hooks/useOIStream";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import type { ChartInterval } from "../utils/oiCandles";
-import { effectiveAtmWindow } from "../utils/oiStrikeWindow";
+import { atmRound, effectiveAtmWindow } from "../utils/oiStrikeWindow";
 import { isToday, isoForSessionMinuteOnDate, maxMinForDate } from "../utils/sessionTime";
 
 const ATM_MAX_WINDOW = 50;
 
 export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const {
-    authenticated, authChecked, health, handleAuthenticated,
+    authenticated, dataReady, feedLive, authChecked, health,
     symbol, symbolGroups, switching, symbolError, handleSymbolChange,
     expiry, setExpiry, expiries, expiryError,
     atmWindow, setAtmWindow,
@@ -33,7 +34,7 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
   const avail = useAvailableDates(
     fnoEligible ? symbol : null,
     expiry,
-    authenticated && fnoEligible && !!expiry,
+    dataReady && fnoEligible && !!expiry,
   );
 
   // A past date is read as a fixed full-session window; today/null stays live.
@@ -47,18 +48,23 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
     symbol: historical && fnoEligible ? symbol : null,
     expiry: historical ? expiry : null,
     asOf: toTs,
-    enabled: historical && authenticated && fnoEligible && !!expiry,
+    enabled: historical && dataReady && fnoEligible && !!expiry,
   });
 
   // Resolve the ATM ± N strike window from the spot + the symbol's strike step
   // (same ATM math as the backend: round(spot / step) * step). These bounds are
   // sent to /api/oi-timeseries which sums every strike inside [min, max].
   const step = activeEntry?.strike_step ?? 50;
-  const spot = historical ? histMtf.data?.spot ?? null : liveSpot ?? health?.latest_spot ?? null;
+  // NOTE: no `?? health.latest_spot` fallback. `liveSpot` is already guarded (feed
+  // connected AND health.active_symbol === this symbol); the raw health value is the
+  // GLOBALLY active symbol's price, so falling back to it centred this symbol's strike
+  // window on another instrument's spot and sent a wrong [strikeMin,strikeMax] to
+  // /api/oi-timeseries. The page already renders a "waiting for spot" state below.
+  const spot = historical ? histMtf.data?.spot ?? null : liveSpot;
   const { strikeMin, strikeMax, atm } = useMemo(() => {
     if (spot == null) return { strikeMin: null, strikeMax: null, atm: null };
-    const a = Math.round(spot / step) * step;
-    // "All" (atmWindow<0) → full window; otherwise one fewer strike each side than picked.
+    const a = atmRound(spot, step);
+    // "All" (atmWindow<0) → full window; otherwise exactly ATM ± the picked N.
     const w = atmWindow < 0 ? ATM_MAX_WINDOW : effectiveAtmWindow(atmWindow);
     return { strikeMin: a - w * step, strikeMax: a + w * step, atm: a };
   }, [spot, step, atmWindow]);
@@ -127,13 +133,16 @@ export function ChartsPage({ mc }: { mc: MarketContextValue }) {
         symbolDisplay={symbolDisplay}
         symbolTicker={symbol}
         atmStrike={atm}
+        spot={spot}
       />
 
       <main className="flex flex-col gap-4">
-        {!authenticated ? (
-          <ConnectBanner onAuthenticated={handleAuthenticated} />
+        {/* Gate on OUR backend, not the broker — stored candles need no live session. */}
+        {!dataReady ? (
+          <BackendOfflineNotice />
         ) : (
           <>
+            {!feedLive && <FeedOfflineBanner />}
             {/* ── Controls row ──────────────────────────────────── */}
             <div className="panel px-4 py-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

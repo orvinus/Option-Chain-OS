@@ -2,20 +2,26 @@ import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { ChartDrawingOverlay } from "./ChartDrawingOverlay";
+import { echartsCategoryAnchor } from "./charts/drawingAnchors";
 import type { OITimeseriesPoint } from "../types";
 import {
   baselineLabel,
   bucketToCandles,
   toChangeSinceOpen,
   toLineSeries,
-  type ChartInterval,
   type OISide,
 } from "../utils/oiCandles";
+import { compact as compactNum } from "../utils/num";
+import { OI_CANDLE_THEME } from "./charts/chartTheme";
 
 interface Props {
   points: OITimeseriesPoint[] | null;
   side: OISide;
-  interval: ChartInterval;
+  /** Bar width in minutes; 1 renders a line. Widened from `ChartInterval` (1|5|10|15|30)
+   *  so the Replay page can drive it from the shared 10 timeframe presets (3/60/120/180)
+   *  — the value is only compared to 1 and handed to `bucketToCandles`, which is generic
+   *  over minutes. `ChartIntervalBar` and the Charts tab still use `ChartInterval`. */
+  interval: number;
   title: string;
   isLoading?: boolean;
   /** Real-time total OI (absolute, summed across the selected strikes) for this side. */
@@ -24,22 +30,10 @@ interface Props {
   liveOn?: boolean;
 }
 
-/** Compact Indian number notation — matches the OI Change chart axis labels. */
-function compactNum(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${sign}${(abs / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}K`;
-  return `${sign}${abs.toLocaleString()}`;
-}
-
 // Call = red theme, Put = blue theme. Up candle (close ≥ open) = bright fill,
-// down candle = muted fill — same palette family as OIChangeChart.
-const THEME: Record<OISide, { up: string; down: string; upBorder: string; downBorder: string; line: string }> = {
-  call: { up: "#f75c5c", down: "#7f3a3a", upBorder: "#ff8c8c", downBorder: "#a85555", line: "#f75c5c" },
-  put: { up: "#4da6ff", down: "#2a4a7f", upBorder: "#7fc1ff", downBorder: "#3a6aaf", line: "#4da6ff" },
-};
+// down candle = muted fill — same palette family as OIChangeChart. The values
+// live in charts/chartTheme.ts (shared with the engine panels); pure move.
+const THEME = OI_CANDLE_THEME;
 
 export function OICandleChart({ points, side, interval, title, isLoading = false, liveTotal, liveOn = false }: Props) {
   const theme = THEME[side];
@@ -56,6 +50,11 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
   const xLabels = useMemo(
     () => (isLine ? toLineSeries(series).labels : bucketToCandles(series, interval).map((c) => c.label)),
     [series, isLine, interval],
+  );
+
+  const drawAnchor = useMemo(
+    () => echartsCategoryAnchor(() => chartRef.current?.getEchartsInstance() ?? null, xLabels),
+    [xLabels],
   );
 
   // Pixel → data readout used by the drawing overlay to show the value/level being
@@ -241,7 +240,7 @@ export function OICandleChart({ points, side, interval, title, isLoading = false
             style={{ height: 420, width: "100%" }}
             opts={{ renderer: "canvas" }}
           />
-          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} toolbarContainer={toolbarSlot} />
+          <ChartDrawingOverlay describeAt={describeAt} persistKey={`candle-${side}`} toolbarContainer={toolbarSlot} anchor={drawAnchor} />
 
           {liveTotal != null && (
             <div

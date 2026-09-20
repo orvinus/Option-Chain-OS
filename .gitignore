@@ -45,6 +45,12 @@ data/
 *.cache
 scripmaster_cache.json
 
+# TrueData vendor docs — contain LIVE credentials + bearer tokens in the shipped
+# Postman collections. Must NEVER be committed (see the migration report, Annex E).
+TD_API_Documents/
+TD_API_Documents (1)/
+TD Postman Collection/
+
 # Alembic local artifacts
 backend/alembic/versions/__pycache__/
 

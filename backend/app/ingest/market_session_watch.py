@@ -2,26 +2,29 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 from ..core.logging import get_logger
 from ..core.time_utils import is_nse_regular_session_open
-
-if TYPE_CHECKING:
-    from .ws_client import OptionFeedClient
+from ..runtime import get_runtime
 
 log = get_logger("market_session_watch")
 
 
-async def run_nse_session_open_watch(feed: OptionFeedClient) -> None:
-    """Poll every minute; on transition to session-open, reconnect the feed."""
+async def run_nse_session_open_watch() -> None:
+    """Poll every minute; on transition to session-open, reconnect the feed.
+
+    Reads ``rt.feed_client`` dynamically (never captures a feed reference) so it
+    keeps nudging the CURRENT client across steward rebuilds.
+    """
     prev = False
     while True:
         try:
             open_now = is_nse_regular_session_open()
             if open_now and not prev:
                 log.info("market.session_open_ist_nudging_ws")
-                feed.nudge_reconnect()
+                feed = get_runtime().feed_client
+                if feed is not None:
+                    feed.nudge_reconnect()
             prev = open_now
             await asyncio.sleep(60.0)
         except asyncio.CancelledError:

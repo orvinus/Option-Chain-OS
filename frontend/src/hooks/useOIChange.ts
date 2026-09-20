@@ -18,6 +18,9 @@ export function useOIChange(
   timeframe: Timeframe | null,
   expiry: string | null,
   symbol: string | null = null,
+  /** Historical instant (ISO) — computes the timeframe as of a past date's close.
+   *  Omit / null for the live latest snapshot. */
+  asOf?: string | null,
 ) {
   const [data, setData] = useState<OIChangeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +39,7 @@ export function useOIChange(
     let cancelled = false;
     setLoading(true);
     api
-      .oiChange(timeframe!, expiry ?? undefined, symbol ?? undefined)
+      .oiChange(timeframe!, expiry ?? undefined, symbol ?? undefined, asOf ?? undefined)
       .then((d) => {
         if (!cancelled) {
           setData(d);
@@ -52,7 +55,7 @@ export function useOIChange(
     return () => {
       cancelled = true;
     };
-  }, [timeframe, expiry, streamReady, symbol]);
+  }, [timeframe, expiry, streamReady, symbol, asOf]);
 
   return { data, error, loading };
 }

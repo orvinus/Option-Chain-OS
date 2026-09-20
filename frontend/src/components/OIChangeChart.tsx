@@ -3,6 +3,7 @@ import type { EChartsOption } from "echarts";
 import { useMemo } from "react";
 import type { OIChangeResponse, OIChangeRow } from "../types";
 import { filterOiRowsByAtmWindow, nearestIdx } from "../utils/oiStrikeWindow";
+import { compact as compactNum } from "../utils/num";
 
 export type OIMode = "change" | "absolute";
 
@@ -18,18 +19,6 @@ interface Props {
   nseSessionOpen?: boolean;
   /** The symbol's strike step from the registry (NIFTY 50, SENSEX 100). */
   strikeStep?: number | null;
-}
-
-// ── formatting helpers ──────────────────────────────────────────────────────
-
-/** Compact Indian number notation — matches Sensibull axis labels */
-function compactNum(n: number): string {
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${sign}${(abs / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}K`;
-  return `${sign}${abs.toLocaleString()}`;
 }
 
 // ── main component ──────────────────────────────────────────────────────────
@@ -254,7 +243,7 @@ export function OIChangeChart({
         <p className="text-sm text-muted max-w-lg leading-relaxed">
           Charts read from ingested ticks stored in TimescaleDB. If nothing has been written yet, every strike shows empty.
           Live XTS feed ticks (and useful intraday OI change) usually appear only on{" "}
-          <strong className="text-foreground">trading days, 9:15 AM – 3:30 PM IST</strong>. Weekends and holidays
+          <strong className="text-foreground">trading days, 9:15 AM – 3:40 PM IST</strong>. Weekends and holidays
           typically do not stream the same intraday option feed.
         </p>
         <ul className="text-xs text-muted text-left max-w-md space-y-2 list-disc pl-5">
@@ -307,13 +296,13 @@ export function OIChangeChart({
                 </>
               ) : nseSessionOpen === false ? (
                 <>
-                  Outside <span className="text-white font-medium">9:15 AM – 3:30 PM IST</span> (weekdays), OI is often
+                  Outside <span className="text-white font-medium">9:15 AM – 3:40 PM IST</span> (weekdays), OI is often
                   static in vendor feeds, so deltas stay at zero even though absolute OI is shown.
                 </>
               ) : (
                 <>
                   Either the comparison snapshot matches the latest tick, or the feed is not moving. After hours, brokers
-                  often expose static OI; during <span className="text-white font-medium">9:15 AM – 3:30 PM IST</span> you
+                  often expose static OI; during <span className="text-white font-medium">9:15 AM – 3:40 PM IST</span> you
                   should see movement when the feed and DB are updating.
                 </>
               )}

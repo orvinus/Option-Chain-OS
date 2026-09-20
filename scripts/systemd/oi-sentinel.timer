@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the OI dead-man sentinel every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

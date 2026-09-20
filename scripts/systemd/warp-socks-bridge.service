@@ -1,0 +1,71 @@
+; Relays the Docker bridge gateway's port 40000 to Cloudflare WARP's SOCKS5
+; listener on the host loopback.
+;
+; WHY THIS EXISTS
+; TrueData's edge silently drops packets from hosting-ASN source ranges (the VPS
+; is Hostinger AS47583; vendor support denies any whitelisting mechanism, and
+; TrueData publishes no AAAA records so IPv6 is not an escape). The only working
+; egress is Cloudflare WARP in proxy mode, which opens a SOCKS5 port bound to
+; 127.0.0.1 and leaves system routing untouched.
+;
+; That works for the nightly backfill, which runs in a host venv. It does NOT
+; work for the backend, which runs on a Docker bridge where 127.0.0.1 is the
+; container's own loopback. `warp-cli` has no bind-address option, WARP inside
+; the container would need NET_ADMIN + /dev/net/tun + a second registration, and
+; network_mode: host would break the DB hostname and the nginx upstream. A tiny
+; host-side relay is the least invasive fix.
+;
+; INSTALL
+;   apt-get install -y socat
+;   cp scripts/systemd/warp-socks-bridge.service /etc/systemd/system/
+;   systemctl daemon-reload && systemctl enable --now warp-socks-bridge
+; (scripts/install-sentinel.sh does this for you.)
+;
+; VERIFY — from inside the container, not the host:
+;   docker exec <backend> curl -s --socks5-hostname warp-proxy:40000 \
+;       -o /dev/null -w '%{http_code}\n' https://auth.truedata.in
+;   403 = reached the vendor.  000 = still blocked.
+
+[Unit]
+Description=WARP SOCKS5 relay: docker bridge 172.28.0.1:40000 -> 127.0.0.1:40000
+Documentation=file://%h/nifty-oi/docs/MONITORING.md
+# WARP must be up first: socat binds immediately but would relay into a closed
+# port, and every TrueData call would fail fast instead of waiting for the tunnel.
+Requires=warp-svc.service
+After=warp-svc.service network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The bind address must equal the compose network's gateway. Both default to
+# 172.28.0.1 and both are overridable, because a host that already owns that
+# range makes Docker refuse to create the network outright. If you set
+# DOCKER_BRIDGE_GATEWAY/DOCKER_BRIDGE_SUBNET in the repo's .env, mirror them here:
+#   printf 'BRIDGE_GATEWAY=172.31.0.1\nBRIDGE_SUBNET=172.31.0.0/16\n' \
+#     > /etc/oi-warp-bridge.env && systemctl restart warp-socks-bridge
+Environment=BRIDGE_GATEWAY=172.28.0.1
+Environment=BRIDGE_SUBNET=172.28.0.0/16
+EnvironmentFile=-/etc/oi-warp-bridge.env
+
+# keepalive on BOTH legs: a 24/7 websocket with a 5-6s vendor heartbeat will
+# never idle out, but a mid-session WARP hiccup must surface as a TCP reset the
+# feed can react to, not as a black hole that stalls the reader task.
+ExecStart=/usr/bin/socat -d \
+    TCP-LISTEN:40000,bind=${BRIDGE_GATEWAY},fork,reuseaddr,keepalive \
+    TCP:127.0.0.1:40000,keepalive
+Restart=always
+RestartSec=3
+
+# Defence in depth. The gateway is a bridge-local address and is not routable
+# from outside the host, but an open SOCKS proxy is an open relay if it ever
+# were: refuse everything that is not the compose network.
+IPAddressAllow=${BRIDGE_SUBNET}
+IPAddressDeny=any
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

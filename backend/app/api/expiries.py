@@ -23,7 +23,7 @@ _reresolve_lock = asyncio.Lock()
 async def _reresolve_active_universe(symbol: str) -> None:
     """Re-run the active-symbol switch so a throttled-empty first fetch recovers.
 
-    The initial option fetch can come back empty if Angel throttled it; the
+    The initial option fetch can come back empty if the broker throttled it; the
     frontend then polls ``/api/expiries`` every 30s but that only reads runtime /
     DB and never re-triggers resolution. Re-running ``switch_active_symbol``
     re-resolves the option universe *and* re-subscribes the live feed, so the
@@ -61,13 +61,23 @@ async def expiries(symbol: str | None = Query(default=None)) -> ExpiriesResponse
     if entry.symbol == rt.active_symbol and rt.expiries:
         expiry_set.update(rt.expiries)
 
-    # Source 2: distinct expiries that actually have snapshot data in the DB.
+    # Source 2: distinct expiries that actually have stored data — live table ∪
+    # vendor archive, so backfilled expired weeklies are selectable in the
+    # Replay date/expiry pickers. Deliberately NOT the oi_snapshots_unified
+    # view: a DISTINCT over the UNION ALL view cannot be planned per-arm, and
+    # in production (2026-08-11) four stacked 8-second copies of that scan —
+    # this endpoint is polled by every open tab — exhausted the DB pool and
+    # starved the aggregator into dropping every tick. Explicit per-table
+    # DISTINCTs let each side use its own index and finish in milliseconds.
     async with AsyncSessionLocal() as s:
         rows = (
             await s.execute(
                 text(
-                    "SELECT DISTINCT expiry FROM option_oi_snapshots "
-                    "WHERE symbol = :symbol ORDER BY expiry"
+                    "SELECT DISTINCT expiry FROM option_oi_snapshots WHERE symbol = :symbol "
+                    "UNION "
+                    "SELECT DISTINCT expiry FROM oi_archive_bars "
+                    "WHERE symbol = :symbol AND option_type IN ('CE','PE') "
+                    "ORDER BY expiry"
                 ),
                 {"symbol": entry.symbol},
             )

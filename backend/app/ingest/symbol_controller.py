@@ -1,7 +1,7 @@
 """Active-symbol controller.
 
 Coordinates the switch of the live WebSocket subscription when the dashboard
-changes the active symbol via POST /api/active-symbol. SmartAPI caps a single
+changes the active symbol via POST /api/active-symbol. The broker caps a single
 WS connection at ~1000 tokens, so we keep exactly one underlying live at a
 time and swap subscriptions in place rather than running concurrent feeds.
 
@@ -11,11 +11,14 @@ For non-F&O symbols, only the spot token is subscribed.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from ..auth import get_session_manager
+from ..core.config import settings
 from ..core.logging import get_logger
+from ..core.time_utils import now_ist
 from ..market.scripmaster import InstrumentToken, resolve_option_universe
 from ..market.symbols import SymbolEntry, get_registry
 from ..market_data import xts_client
@@ -23,6 +26,9 @@ from ..runtime import get_runtime
 from ..services.spot_fallback import db_last_underlying
 
 log = get_logger("symbol_controller")
+
+# Serialises symbol switches (drift-watch re-centre vs. user-initiated switch).
+_switch_lock = asyncio.Lock()
 
 # XTS /instruments/indexlist names differ from our F&O symbol codes (e.g. our
 # "BANKNIFTY" is "NIFTY BANK" on XTS). Explicit aliases make index spot resolution
@@ -158,7 +164,9 @@ async def _resolve_commodity_future_token(entry: SymbolEntry) -> str | None:
     except Exception as e:
         log.warning("symbol_controller.commodity_master.error", symbol=entry.symbol, error=str(e))
         return None
-    today = datetime.utcnow().date()
+    # IST, not UTC — before 05:30 IST a UTC date is yesterday, which would keep an
+    # already-expired commodity contract as the "earliest non-expired" spot token.
+    today = now_ist().date()
     best: tuple[date, str] | None = None
     for r in rows:
         uid = (r.get("underlying_id") or "").strip()
@@ -186,8 +194,20 @@ async def _fetch_spot_ltp(spot_token: str, spot_seg: int = xts_client.SEG_NSECM)
 async def switch_active_symbol(symbol: str) -> SwitchResult:
     """Switch the live WS subscription to ``symbol``.
 
+    Serialised: the ATM-drift watcher re-centres by calling this for the CURRENT
+    symbol on its own timer, and the dashboard calls it via POST /api/active-symbol.
+    Both mutate the same runtime state and both await REST round-trips in the middle,
+    so without the lock they interleaved — unsubscribing one symbol's universe while
+    subscribing another's, and leaving ``rt.active_symbol`` disagreeing with what the
+    feed is actually streaming.
+
     Raises ``KeyError`` if the symbol is not in the registry.
     """
+    async with _switch_lock:
+        return await _switch_active_symbol_locked(symbol)
+
+
+async def _switch_active_symbol_locked(symbol: str) -> SwitchResult:
     reg = get_registry()
     entry = reg.require(symbol)
     sym = entry.symbol
@@ -213,9 +233,16 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
         same_symbol_spot = rt.latest_spot if rt.active_symbol == sym else None
         spot_for_window = spot or db_spot or same_symbol_spot or 1.0
         try:
-            tokens, expiries = await resolve_option_universe(
-                spot=spot_for_window, symbol=sym
-            )
+            if settings.feed_vendor in ("truedata", "td_relay"):
+                from ..market.scripmaster_td import resolve_td_option_universe
+
+                tokens, expiries = await resolve_td_option_universe(
+                    spot=spot_for_window, symbol=sym
+                )
+            else:
+                tokens, expiries = await resolve_option_universe(
+                    spot=spot_for_window, symbol=sym
+                )
             expiries_iso = [e.isoformat() for e in expiries]
             rt.expiries = expiries
         except Exception as e:
@@ -223,7 +250,10 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
             tokens, expiries_iso = [], []
             rt.expiries = []
 
-    if feed is not None and spot_token is not None:
+    # TrueData subscribes its reference instrument BY NAME on the same socket, so
+    # it has no spot_token to resolve and must not be gated on one — requiring it
+    # would silently skip every subscription swap under the new vendor.
+    if feed is not None and (spot_token is not None or settings.feed_vendor in ("truedata", "td_relay")):
         await feed.swap_subscription(tokens, spot_token, sym, spot_seg)
 
     rt.tokens = tokens
@@ -233,6 +263,14 @@ async def switch_active_symbol(symbol: str) -> SwitchResult:
         # Never leave the previous symbol's spot in runtime — /api/spot and the
         # resubscribe loop would keep serving/centring on the wrong index.
         rt.latest_spot = spot_for_window
+    else:
+        # No trustworthy spot for the NEW symbol (live quote failed and nothing is
+        # stored for it — common for the many symbols that have never been viewed
+        # while the poller is off). Without this branch the PREVIOUS symbol's price
+        # stayed in runtime and, because active_symbol is reassigned just below,
+        # /api/spot would serve it as this symbol's spot. None is the honest value:
+        # every consumer already treats a missing spot as "waiting for price".
+        rt.latest_spot = None
     rt.active_symbol = sym
 
     log.info(

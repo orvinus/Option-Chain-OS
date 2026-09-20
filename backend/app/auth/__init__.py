@@ -1,3 +1,3 @@
-from .smartapi_session import MarketDataSession, SmartApiSession, get_session_manager
+from .market_session import MarketDataSession, get_session_manager
 
-__all__ = ["MarketDataSession", "SmartApiSession", "get_session_manager"]
+__all__ = ["MarketDataSession", "get_session_manager"]

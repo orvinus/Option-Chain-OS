@@ -18,8 +18,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+import pytz
+
 from ..core.config import settings
 from ..core.logging import get_logger
+from ..core.time_utils import IST
 from ..market_data import xts_client
 
 log = get_logger("scripmaster")
@@ -29,6 +32,23 @@ CACHE_TTL = timedelta(hours=20)
 
 # Legacy cache file (pre-multi-symbol). Read once on first NIFTY load if present.
 LEGACY_CACHE_FILE = Path(__file__).resolve().parents[3] / "data" / "scripmaster_cache.json"
+
+
+def _cache_still_fresh(fetched_at: datetime | None) -> bool:
+    """True when a UTC-naive fetch stamp is inside the TTL *and* still on the same
+    IST trading date.
+
+    The TTL alone can carry a master across a session boundary — exactly when new
+    expiries and strikes get listed — so a stale copy would silently omit them for
+    hours. Shared by the per-symbol cache, the module-level FO master cache and the
+    disk cache so all three age out together.
+    """
+    if fetched_at is None:
+        return False
+    if datetime.utcnow() - fetched_at >= CACHE_TTL:
+        return False
+    fetched_ist = pytz.utc.localize(fetched_at).astimezone(IST).date()
+    return fetched_ist == datetime.now(IST).date()
 
 
 @dataclass(frozen=True)
@@ -44,7 +64,7 @@ class InstrumentToken:
 
     @property
     def exchange_type(self) -> int:
-        # XTS ExchangeSegments enum (NOT the legacy Angel codes): NSECM=1, NSEFO=2,
+        # XTS ExchangeSegments enum: NSECM=1, NSEFO=2,
         # NSECD=3, BSECM=11, BSEFO=12, MCXFO=51. SENSEX options live on BSEFO(12);
         # MCX commodity options on MCXFO(51). "MFO" is our internal short tag.
         return {"NSE": 1, "NFO": 2, "CDS": 3, "BSE": 11, "BFO": 12, "MFO": 51}[self.exchange]
@@ -56,9 +76,8 @@ class ScripMasterCache:
     fetched_at: datetime | None = None
 
     def fresh(self) -> bool:
-        return bool(self.raw) and self.fetched_at is not None and (
-            datetime.utcnow() - self.fetched_at < CACHE_TTL
-        )
+        # An empty payload is never "fresh" — see _cache_still_fresh.
+        return bool(self.raw) and _cache_still_fresh(self.fetched_at)
 
 
 # Per-symbol cache and per-symbol lock.
@@ -206,12 +225,12 @@ async def _load_fo_master_rows(force_refresh: bool = False) -> list[dict]:
     """
     global _master_rows, _master_fetched_at
     async with _master_lock:
-        fresh = (
-            _master_rows is not None
-            and _master_fetched_at is not None
-            and (datetime.utcnow() - _master_fetched_at < CACHE_TTL)
-        )
-        if _master_rows is not None and fresh and not force_refresh:
+        # Truthiness, NOT `is not None`: an EMPTY list used to pass the old guard, so a
+        # single bad fetch was served as a valid "no instruments exist" answer for the
+        # whole CACHE_TTL. That blanks the option universe and wedges the live feed —
+        # no tokens -> no subscribe -> no 'Invalid Token' -> the auth self-heal never
+        # fires (production outage 2026-08-03 19:55 IST -> 2026-08-04, whole session).
+        if _master_rows and _cache_still_fresh(_master_fetched_at) and not force_refresh:
             return _master_rows
 
         from ..auth import get_session_manager
@@ -233,6 +252,19 @@ async def _load_fo_master_rows(force_refresh: bool = False) -> list[dict]:
             if row:
                 rows.append(row)
                 counts[seg] += 1
+        if not rows:
+            # A real FO master is never empty. Zero parsed rows means an error envelope
+            # (XTS returns some failures as HTTP 200 with a string body), a truncated
+            # response, or an entitlement change. Leave the previous cache untouched and
+            # raise so the ws supervisor retries on its next cycle (<= 60s) instead of
+            # us pinning an empty universe for CACHE_TTL.
+            log.error(
+                "scripmaster.master.empty",
+                dump_bytes=len(dump),
+                hint="instruments/master returned no NSEFO/BSEFO/MCXFO rows — "
+                "usually a dead token or a broker-side error body.",
+            )
+            raise RuntimeError("XTS instruments/master returned no F&O rows")
         _master_rows = rows
         _master_fetched_at = datetime.utcnow()
         log.info(
@@ -261,7 +293,7 @@ def _disk_path(symbol: str) -> Path:
     return CACHE_DIR / f"{symbol.upper()}.json"
 
 
-async def _load_from_disk(symbol: str) -> list[dict] | None:
+async def _load_from_disk(symbol: str) -> tuple[list[dict], datetime] | None:
     path = _disk_path(symbol)
     # One-shot migration: if the legacy single-file cache exists and this symbol
     # is NIFTY, fall back to it so we don't lose the warm cache after upgrade.
@@ -271,10 +303,17 @@ async def _load_from_disk(symbol: str) -> list[dict] | None:
         return None
     try:
         stat = path.stat()
-        age = datetime.utcnow() - datetime.utcfromtimestamp(stat.st_mtime)
-        if age >= CACHE_TTL:
+        mtime = datetime.utcfromtimestamp(stat.st_mtime)
+        # Same TTL *and* same-IST-trading-date rule as the in-memory caches, so a file
+        # written yesterday evening cannot supply today's universe (new expiries and
+        # strikes get listed exactly across that boundary).
+        if not _cache_still_fresh(mtime):
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        # Return the file's own mtime so the in-memory entry inherits the REAL fetch
+        # time. Stamping it with "now" (the old behaviour) restarted the TTL on every
+        # load, letting a nearly-expired file live for another full TTL — up to ~40h
+        # of staleness, long enough to miss a newly listed expiry or strike.
+        return json.loads(path.read_text(encoding="utf-8")), mtime
     except Exception as e:
         log.warning("scripmaster.disk_cache.error", symbol=symbol, error=str(e))
         return None
@@ -301,9 +340,8 @@ async def get_scripmaster(symbol: str | None = None, force_refresh: bool = False
         if not force_refresh:
             disk = await _load_from_disk(sym)
             if disk is not None:
-                entry.raw = disk
-                entry.fetched_at = datetime.utcnow()
-                return disk
+                entry.raw, entry.fetched_at = disk
+                return entry.raw
         data = await _fetch_via_master(sym)
         entry.raw = data
         entry.fetched_at = datetime.utcnow()
@@ -464,7 +502,10 @@ async def resolve_option_universe(
     """
     sym = (symbol or settings.underlying_symbol).upper()
     raw = await get_scripmaster(sym, force_refresh=force_refresh)
-    today = today or datetime.utcnow().date()
+    # IST, not UTC: _select_expiries keeps expiries `>= today`, so between 00:00 and
+    # 05:30 IST a UTC date is *yesterday* and an already-expired contract stays in the
+    # universe. On expiry day itself the two dates agree, which is why this hid so long.
+    today = today or datetime.now(IST).date()
     win = window if window is not None else settings.strike_window
     pols = policies if policies is not None else settings.expiry_policies
 

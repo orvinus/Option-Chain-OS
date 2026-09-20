@@ -133,10 +133,10 @@ NIFTY, BSECM/BSEFO for SENSEX). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.m
 ## Authentication
 
 Server-side login to the **Symphony XTS Market Data API** with
-`XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY` (no client code / MPIN / TOTP). Manual by
-default (`XTS_LOGIN_AT_STARTUP=false`): on boot the backend restores the last
-token from `auth_sessions`; otherwise trigger login via the dashboard button or
-`POST /api/auth/login`. Set `XTS_LOGIN_AT_STARTUP=true` for unattended servers.
+`XTS_MD_APP_KEY` / `XTS_MD_SECRET_KEY` (no client code / MPIN / TOTP). Automatic
+whenever `RUN_MODE=live`: on boot the backend restores the last token from
+`auth_sessions`, else logs in fresh from `.env`. If both fail, force one with
+`POST /api/auth/login`.
 See [`docs/AUTH.md`](docs/AUTH.md).
 
 ---

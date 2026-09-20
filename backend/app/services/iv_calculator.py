@@ -9,6 +9,11 @@ from typing import Literal
 
 OptionSide = Literal["CE", "PE"]
 
+# Numerical floor (one minute expressed in years). Kept tiny on purpose: the previous
+# ~1-hour floor silently replaced every genuine sub-hour time-to-expiry on expiry day,
+# which forced the solved sigma far too high.
+MIN_T_YEARS = 60.0 / (365.25 * 24 * 3600)
+
 
 def _norm_cdf(x: float) -> float:
     return 0.5 * math.erfc(-x / math.sqrt(2.0))
@@ -35,7 +40,7 @@ def calc_iv(
     market_price: float | None,
     S: float | None,
     K: float,
-    T: float,
+    T: float | None,
     r: float = 0.065,
 ) -> float | None:
     """Return annualized IV as decimal (e.g. 0.18), or None if not solvable."""
@@ -43,9 +48,12 @@ def calc_iv(
         return None
     if market_price <= 0:
         return None
+    if T is None or float(T) <= 0:
+        # Settled/expired: the price is pure intrinsic and carries no information
+        # about sigma, so any "solved" IV would be fabricated.
+        return None
 
-    # Minimum time as fraction of year (~1 hour floor)
-    t_eff = max(float(T), 1.0 / (365.25 * 24))
+    t_eff = max(float(T), MIN_T_YEARS)
 
     intrinsic = max((S - K) if side == "CE" else (K - S), 0.0)
     lower_bound = intrinsic * math.exp(-r * t_eff)

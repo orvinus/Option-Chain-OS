@@ -158,11 +158,36 @@ async def snapshot_atm_iv_for_symbol(symbol: str, timeframe: str = "5m") -> None
         res = await engine.get(timeframe, expiry, symbol=symbol)
         if res.atm_iv is None:
             return
+
+        # Derive the trade date from the DATA, and refuse to write unless the chain is
+        # actually from the current session.
+        #
+        # This loop runs 24/7. Without the guard it minted a NEW iv_daily row every
+        # weekend, holiday and overnight tick — recomputing IV off the last session's
+        # stale prices — so IVR/IVP were measured against a history full of phantom
+        # days. Keying on the chain's own asof handles weekends, exchange holidays and
+        # after-hours uniformly, and works for MCX's longer session without needing a
+        # separate calendar.
+        chain_date: date | None = None
+        if res.asof:
+            try:
+                chain_date = datetime.fromisoformat(res.asof).astimezone(IST).date()
+            except ValueError:
+                chain_date = None
+        today = datetime.now(IST).date()
+        if chain_date is None or chain_date != today:
+            log.info(
+                "iv_history.skip_stale_chain",
+                symbol=symbol, chain_date=str(chain_date), today=str(today),
+            )
+            return
+
         await upsert_atm_iv(
             symbol,
             res.atm_iv,
             spot=res.spot,
             expiry=expiry,
+            trade_date=chain_date,
         )
         log.info("iv_history.snapshot", symbol=symbol, atm_iv=res.atm_iv)
     except Exception as e:

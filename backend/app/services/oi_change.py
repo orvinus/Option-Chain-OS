@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from ..core.db import AsyncSessionLocal
 from ..core.logging import get_logger
-from ..core.time_utils import IST, market_close_today, market_open_today, parse_timeframe
+from ..core.time_utils import IST, market_close_today, market_open_today, parse_timeframe, session_floor_for
 from ..market.symbols import get_registry
 from ..runtime import get_runtime
 
@@ -91,7 +91,7 @@ class OIChangeResponse:
     timeframe: str
     expiry: str
     spot: float | None
-    # Latest exchange timestamp on option snapshot rows (Angel exchange_feed_time → DB ts).
+    # Latest exchange timestamp on option snapshot rows (feed exchange time → DB ts).
     # After hours this often freezes at the last trade while the pipeline keeps recomputing.
     asof: str
     # Wall-clock IST when this snapshot was computed (always moves on each REST/WS push).
@@ -178,13 +178,21 @@ _SNAPSHOT_AT_OR_AFTER_BOUNDED_SQL = text(
 # current latest OI, i.e. the value just before the last OI move. Bounded to a
 # recent horizon so far/illiquid strikes that stopped moving don't surface a
 # stale all-day delta on a sub-minute view.
+#
+# BOTH arms are also floored to the current session. This was the only unfloored
+# query in this module and it could reach across the session boundary: early in a
+# session `:horizon` (anchor − 5 min) still lands in YESTERDAY's rows, so a strike
+# whose OI legitimately changed overnight surfaced that overnight move as a
+# sub-minute delta. Harmless-looking today; on a vendor cutover it becomes a
+# CROSS-VENDOR phantom delta held for the full 5-minute horizon, because the two
+# feeds' OI for the same strike differ by construction at the boundary.
 _PREV_DISTINCT_OI_SQL = text(
     """
     WITH latest AS (
         SELECT DISTINCT ON (strike, option_type)
             strike, option_type, oi AS cur_oi
         FROM option_oi_snapshots
-        WHERE symbol = :symbol AND expiry = :expiry
+        WHERE symbol = :symbol AND expiry = :expiry AND ts >= :floor
         ORDER BY strike, option_type, ts DESC
     )
     SELECT DISTINCT ON (o.strike, o.option_type)
@@ -194,6 +202,7 @@ _PREV_DISTINCT_OI_SQL = text(
     WHERE o.symbol = :symbol AND o.expiry = :expiry
       AND o.oi <> l.cur_oi
       AND o.ts >= :horizon
+      AND o.ts >= :floor
     ORDER BY o.strike, o.option_type, o.ts DESC
     """
 )
@@ -238,6 +247,7 @@ def _assemble(
     rows: list[OIChangeRow] = []
     max_ts: Optional[datetime] = None
     spot: Optional[float] = None
+    spot_ts: Optional[datetime] = None
     total_ce_chg = 0
     total_pe_chg = 0
     for strike in strikes:
@@ -275,8 +285,12 @@ def _assemble(
                 continue
             if max_ts is None or r["ts"] > max_ts:
                 max_ts = r["ts"]
-            if spot is None and r.get("underlying") is not None:
+            # Track the underlying attached to the freshest row rather than the first
+            # strike seen (rows arrive in strike order, so "first" meant lowest strike —
+            # typically a quiet deep-ITM contract carrying a stale spot).
+            if r.get("underlying") is not None and (spot_ts is None or r["ts"] >= spot_ts):
                 spot = float(r["underlying"])
+                spot_ts = r["ts"]
 
     asof_ts = asof_override if asof_override is not None else (max_ts or now_utc)
     computed_wall = now_utc.astimezone(IST).isoformat()
@@ -321,18 +335,29 @@ class OIChangeEngine:
         expiry: date,
         symbol: str | None = None,
         live_spot: float | None = None,
+        as_of: datetime | None = None,
     ) -> OIChangeResponse:
+        """Strike-wise OI change for a timeframe.
+
+        ``as_of`` (tz-aware) computes the timeframe as of a historical instant
+        (a picked past date), mirroring ``get_multi``; omit it for the live
+        latest snapshot. This lets the OI Change page show "15m as of a past
+        date" identically to the Multi-TF grid's 15m row for that date.
+        """
         symbol = (symbol or get_runtime().active_symbol).upper()
+        as_of_utc = as_of.astimezone(timezone.utc) if as_of is not None else None
         async with self._lock:
             anchor = await self._fetch_anchor_ts(symbol, expiry)
-            cache_key = (timeframe, expiry.isoformat(), symbol, anchor)
+            ref_key = as_of_utc.isoformat() if as_of_utc else (anchor.isoformat() if anchor else "now")
+            cache_key = (timeframe, expiry.isoformat(), symbol, ref_key)
             cached = self._cache.get(cache_key)
             if cached is not None:
-                if live_spot is not None and live_spot != cached.spot:
+                # Live spot only overrides for the live (non-as_of) snapshot.
+                if live_spot is not None and as_of_utc is None and live_spot != cached.spot:
                     from dataclasses import replace as dc_replace
                     return dc_replace(cached, spot=live_spot)
                 return cached
-            result = await self._compute(timeframe, expiry, symbol, anchor, live_spot)
+            result = await self._compute(timeframe, expiry, symbol, anchor, live_spot, as_of_utc)
             self._cache[cache_key] = result
             return result
 
@@ -386,6 +411,17 @@ class OIChangeEngine:
         now_utc = datetime.now(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         from_ist = from_utc.astimezone(IST)
+
+        # Re-anchor a window that starts AFTER the last stored session. On a weekend,
+        # an exchange holiday, or before the first flush of the day, the dashboard's
+        # default "today 09:15 -> now" window contains no data at all: the now-side
+        # still resolves to the last data day (it is floored to the anchor), but the
+        # baseline side finds nothing, so `now - 0` reported the ENTIRE open interest
+        # as if it were today's change. Fall back to the latest stored session, which
+        # is what the timeframe path (`_compute`) already does via market_open_today(anchor).
+        if anchor is not None and from_ist.date() > anchor.astimezone(IST).date():
+            from_ist = market_open_today(anchor.astimezone(IST))
+            from_utc = from_ist.astimezone(timezone.utc)
         from_floor = market_open_today(from_ist).astimezone(timezone.utc)
 
         # Resolve the effective window end. An explicit ``to_utc`` wins. When it is
@@ -456,6 +492,20 @@ class OIChangeEngine:
                     r for r in earliest_rows
                     if (r["strike"], r["option_type"]) in missing_set
                 ]
+            # Last-resort guard: if NO baseline could be established at all while we do
+            # have current rows, `now - 0` would report every strike's entire open
+            # interest as "change". Reporting zero change is the honest answer when the
+            # baseline is unknown — never the full OI.
+            if now_rows and not then_rows:
+                log.warning(
+                    "oi_change.range.no_baseline",
+                    symbol=symbol,
+                    expiry=expiry.isoformat(),
+                    from_ts=from_utc.isoformat(),
+                    hint="no baseline snapshot in window; reporting zero change instead "
+                    "of now-0 (which would be the entire OI).",
+                )
+                then_rows = list(now_rows)
         # Report the effective upper bound (or now) as the window's asof.
         asof_override = effective_to if effective_to is not None else None
         return _assemble("range", expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
@@ -467,11 +517,13 @@ class OIChangeEngine:
         symbol: str,
         anchor_from_db: datetime | None,
         live_spot: float | None = None,
+        as_of_utc: datetime | None = None,
     ) -> OIChangeResponse:
         delta_or_marker = parse_timeframe(timeframe)
         now_utc = datetime.now(timezone.utc)
-        anchor = anchor_from_db or now_utc
-        session_floor = market_open_today(anchor.astimezone(IST)).astimezone(timezone.utc)
+        # "now" reference: an explicit historical instant, else the DB anchor, else wall clock.
+        anchor = as_of_utc or anchor_from_db or now_utc
+        session_floor = session_floor_for(anchor).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
         if delta_or_marker == "full_day":
             # Baseline = earliest snapshot at/after today's open (already today-
@@ -494,9 +546,18 @@ class OIChangeEngine:
             floored_then = True
 
         async with AsyncSessionLocal() as s:
-            now_rows = (
-                await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
-            ).mappings().all()
+            # NOW snapshot: the live latest, or the last row at/before a historical as_of.
+            if as_of_utc is None:
+                now_rows = (
+                    await s.execute(_LATEST_SNAPSHOT_SQL, {**params, "floor": session_floor})
+                ).mappings().all()
+            else:
+                now_rows = (
+                    await s.execute(
+                        _SNAPSHOT_AT_OR_BEFORE_FLOOR_SQL,
+                        {**params, "cutoff": as_of_utc, "floor": session_floor},
+                    )
+                ).mappings().all()
             then_rows = list((await s.execute(then_sql, then_params)).mappings().all())
             # Per-strike baseline clamp (mirrors ``_compute_range``): a now-strike
             # with no floored ``then`` row (it entered the window mid-session) is
@@ -520,11 +581,15 @@ class OIChangeEngine:
                     ]
 
         # Sub-minute timeframes: hold the last OI move where the exact window is flat.
-        if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None:
+        # Live only — a historical as_of reads the exact stored snapshot at that instant.
+        if timeframe in SUBMINUTE_TIMEFRAMES and anchor_from_db is not None and as_of_utc is None:
             then_rows = await self._merge_hold_last(symbol, expiry, anchor, now_rows, then_rows)
 
-        asof_override = anchor if anchor_from_db is not None else None
-        return _assemble(timeframe, expiry, now_rows, then_rows, asof_override, now_utc, live_spot)
+        # asof = the historical instant, else the live DB anchor (None when neither).
+        asof_override = as_of_utc if as_of_utc is not None else (anchor_from_db if anchor_from_db is not None else None)
+        # Live spot only applies to the live snapshot; historical uses the stored underlying.
+        eff_live_spot = live_spot if as_of_utc is None else None
+        return _assemble(timeframe, expiry, now_rows, then_rows, asof_override, now_utc, eff_live_spot)
 
     async def get_multi(
         self,
@@ -553,9 +618,17 @@ class OIChangeEngine:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 if live_spot is not None and as_of_utc is None and live_spot != cached.spot:
-                    from dataclasses import replace as dc_replace
-                    return dc_replace(cached, spot=live_spot, atm_strike=_atm_strike(symbol, live_spot))
-                return cached
+                    # Patching a fresh spot onto a cached response is only sound while
+                    # the ATM is unchanged. With an ATM +/- N window the cached sums were
+                    # computed around the OLD atm_strike, so rewriting atm_strike alone
+                    # advertised a window the numbers were never summed over. Recompute
+                    # instead when the ATM actually moved.
+                    new_atm = _atm_strike(symbol, live_spot)
+                    if win is None or new_atm == cached.atm_strike:
+                        from dataclasses import replace as dc_replace
+                        return dc_replace(cached, spot=live_spot, atm_strike=new_atm)
+                else:
+                    return cached
             result = await self._compute_multi(timeframes, expiry, symbol, anchor, as_of_utc, live_spot, win)
             self._cache[cache_key] = result
             return result
@@ -572,7 +645,7 @@ class OIChangeEngine:
     ) -> MultiTFResponse:
         now_utc = datetime.now(timezone.utc)
         ref = as_of_utc or anchor_from_db or now_utc
-        session_floor = market_open_today(ref.astimezone(IST)).astimezone(timezone.utc)
+        session_floor = session_floor_for(ref).astimezone(timezone.utc)
         params = {"symbol": symbol, "expiry": expiry}
 
         async with AsyncSessionLocal() as s:
@@ -592,10 +665,16 @@ class OIChangeEngine:
 
             # Resolve spot/ATM up-front so an ATM ± N window can filter strikes before
             # every sum (each timeframe's OI-change AND the shared totals/ratio/pcr).
-            stored_spot = next(
-                (float(r["underlying"]) for r in now_map.values() if r.get("underlying") is not None),
-                None,
+            # Take the underlying from the FRESHEST row, not the first one. now_map is
+            # built in strike order, so `next(...)` picked the LOWEST strike — usually a
+            # quiet deep-ITM contract whose carried-forward underlying can be minutes
+            # stale, and that stale spot then set the ATM for every window and sum.
+            _spot_row = max(
+                (r for r in now_map.values() if r.get("underlying") is not None),
+                key=lambda r: r["ts"],
+                default=None,
             )
+            stored_spot = float(_spot_row["underlying"]) if _spot_row is not None else None
             spot = live_spot if (live_spot is not None and as_of_utc is None) else stored_spot
             atm = _atm_strike(symbol, spot)
             if atm_window is not None and atm is not None:
@@ -702,11 +781,14 @@ class OIChangeEngine:
         to 0. Strikes with no recent move stay flat (baseline = current = 0 delta).
         """
         horizon = anchor - HOLD_LAST_HORIZON
+        # Never let the held baseline reach into a previous session (see the SQL's
+        # own note): at 09:16 the 5-minute horizon still covers yesterday's close.
+        floor = session_floor_for(anchor).astimezone(timezone.utc)
         async with AsyncSessionLocal() as s:
             held_rows = (
                 await s.execute(
                     _PREV_DISTINCT_OI_SQL,
-                    {"symbol": symbol, "expiry": expiry, "horizon": horizon},
+                    {"symbol": symbol, "expiry": expiry, "horizon": horizon, "floor": floor},
                 )
             ).mappings().all()
 

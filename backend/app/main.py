@@ -2,8 +2,9 @@
 
 Boot sequence (lifespan):
     1.  Configure logging.
-    2.  Restore the XTS market-data session from ``auth_sessions``, or log in with
-        appKey/secretKey when ``XTS_LOGIN_AT_STARTUP`` is set.
+    2.  Restore the XTS market-data session from ``auth_sessions``, else log in with
+        appKey/secretKey. Both happen automatically whenever ``RUN_MODE=live`` and
+        ``AUTH_MODE=totp`` — no dashboard click and no opt-in flag is involved.
     3.  Bootstrap the option universe (uses /quote LTP for an initial spot).
     4.  Start the XTS Socket.IO ingestion client and IST session-open watch.
     5.  Start the 1-minute aggregator (which feeds the WS hub on each flush).
@@ -31,91 +32,20 @@ from .auth import get_session_manager
 from .core.config import settings
 from .core.db import AsyncSessionLocal
 from .core.logging import configure_logging, get_logger
-from .ingest.aggregator import MinuteAggregator
+from .core.tasks import cancel_supervised, spawn_supervised
 from .ingest.atm_drift_watch import run_atm_drift_watch
+from .ingest.feed_factory import ensure_live_ingestion
 from .ingest.market_session_watch import run_nse_session_open_watch
-from .ingest.symbol_controller import _resolve_spot_token, _spot_segment
+from .ingest.session_steward import SessionSteward, set_steward
 from .ingest.universe_poller import UniversePoller
-from .ingest.ws_client import OptionFeedClient
-from .market.scripmaster import resolve_option_universe
-from .market.symbols import get_registry
-from .market_data import xts_client
 from .runtime import get_runtime
-from .services import get_oi_engine
-from .services.spot_fallback import db_last_underlying
-from .ws import get_hub, ws_router
+from .ws import algo_ws_router, ws_router
 
 log = get_logger("main")
 
-# Startup `sess.login()` calls Angel over the network; without a cap, a stalled
-# SmartAPI keeps lifespan from reaching `yield` and nothing listens on :8000.
-STARTUP_SMARTAPI_LOGIN_TIMEOUT_S = 30.0
-
-
-async def _initial_spot() -> float:
-    """Fetch a starting spot for the active symbol via an XTS REST quote.
-
-    Required because we need the spot to resolve the strike window *before* the
-    websocket has produced any ticks. If the quote fails (throttled boot, no
-    session yet), fall back to the last stored underlying for the symbol; the
-    hardcoded constant is a last resort only. A wrong value here mis-centers
-    the subscribed strike window AND is served as ``latest_spot`` until the
-    live index tick arrives.
-    """
-    rt = get_runtime()
-    reg_entry = get_registry().get(rt.active_symbol)
-    spot_token = (reg_entry.spot_token if reg_entry else None) or (
-        settings.nifty_index_token if rt.active_symbol == "NIFTY" else None
-    )
-    # Reference-price segment: NSECM/BSECM for index/equity, MCXFO for a commodity
-    # (its "spot" is the near-month future). Centralised in symbol_controller.
-    segment = _spot_segment(reg_entry) if reg_entry is not None else xts_client.SEG_NSECM
-    sess = get_session_manager()
-    # Resolve a missing spot token (BSE index, MCX near-future, or a stock) so the
-    # boot symbol centres correctly instead of falling through to the constant.
-    if sess.authenticated and not spot_token and reg_entry is not None:
-        try:
-            spot_token = await _resolve_spot_token(reg_entry)
-        except Exception as e:
-            log.warning("initial_spot.resolve_error", symbol=rt.active_symbol, error=str(e))
-    if sess.authenticated and spot_token:
-        try:
-            ltp = await xts_client.quote_ltp(sess.token, segment, spot_token)
-            if ltp:
-                return float(ltp)
-        except Exception as e:
-            log.warning("initial_spot.fallback", symbol=rt.active_symbol, error=str(e))
-    else:
-        log.warning("initial_spot.no_session", symbol=rt.active_symbol)
-    db_spot = await db_last_underlying(rt.active_symbol)
-    if db_spot:
-        log.info("initial_spot.db_fallback", symbol=rt.active_symbol, spot=db_spot)
-        return db_spot
-    return 24000.0
-
-
-async def _resubscribe_provider() -> tuple[list, float]:
-    """Resolve (tokens, spot) for the WS client to subscribe."""
-    rt = get_runtime()
-    spot = rt.latest_spot or await _initial_spot()
-    tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
-    if not tokens:
-        # rt.latest_spot can belong to the PREVIOUS symbol after a failed
-        # switch (e.g. SENSEX window centred on NIFTY's spot -> zero
-        # contracts, endless resubscribe loop). Re-resolve with a spot
-        # fetched for the active symbol itself before giving up.
-        fresh = await _initial_spot()
-        if fresh and fresh != spot:
-            log.warning(
-                "resubscribe.empty_universe_respot",
-                symbol=rt.active_symbol, stale_spot=spot, fresh_spot=fresh,
-            )
-            spot = fresh
-            tokens, expiries = await resolve_option_universe(spot=spot, symbol=rt.active_symbol)
-    rt.tokens = tokens
-    rt.expiries = expiries
-    rt.latest_spot = spot
-    return tokens, spot
+# Startup `sess.login()` is a network call to the broker; without a cap, a stalled
+# response keeps lifespan from reaching `yield` and nothing listens on :8000.
+STARTUP_LOGIN_TIMEOUT_S = 30.0
 
 
 @asynccontextmanager
@@ -125,140 +55,210 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     rt = get_runtime()
     sess = get_session_manager()
 
-    # 1) Restore last persisted Angel session (refresh JWT/feed) when possible.
-    # 2) Else optional MPIN+TOTP login when ANGEL_LOGIN_AT_STARTUP=true.
-    if settings.run_mode == "live" and settings.auth_mode == "totp":
+    # ---- TrueData boot path -------------------------------------------------
+    # TrueData needs no session restore and no login here: credentials ride in
+    # the websocket URL, so the feed authenticates itself on connect. What it
+    # DOES need is the opposite of a login — a defensive logout.
+    #
+    # A container restart is, from the vendor's point of view, a dirty
+    # disconnect: the server still believes the previous process is connected
+    # and rejects us with "User Already Connected" for ~60s. Since restarts are
+    # routine here (deploys, the sentinel, the steward's own backstop), the boot
+    # path MUST assume the last exit was dirty and clear the session before the
+    # feed's first connect attempt — otherwise every restart begins with a
+    # guaranteed lockout.
+    if settings.run_mode == "live" and settings.feed_vendor == "truedata":
+        from .auth.td_session import get_td_session
+        from .core import proxy_health
+
+        await proxy_health.probe(force=True)
+        if not proxy_health.is_up():
+            log.error("app.startup.proxy_down", detail=proxy_health.last_error(),
+                      hint="TrueData is only reachable through the WARP SOCKS proxy; "
+                           "check warp-svc and warp-socks-bridge on the host.")
+        td_sess = get_td_session()
+        try:
+            td_sess.require_credentials()
+            await asyncio.wait_for(td_sess.logout_request("boot", force=True), timeout=25.0)
+            log.info("app.startup.td_boot_logout_done",
+                     cooldown_s=round(td_sess.cooldown_remaining_s, 1))
+        except Exception as e:
+            log.warning("app.startup.td_boot_logout_failed", error=str(e))
+
+    # 1) Restore the last persisted XTS session when possible.
+    # 2) Else log in fresh from the appKey/secretKey in .env.
+    # Skipped entirely under FEED_VENDOR=truedata: there is no XTS session to
+    # hold, and logging in would pointlessly consume the broker's single seat.
+    if settings.run_mode == "live" and settings.feed_vendor == "xts":
         restored = False
         try:
             restored = await asyncio.wait_for(
                 sess.try_restore_session_from_db(),
-                timeout=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                timeout=STARTUP_LOGIN_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
             log.warning(
                 "app.startup.restore_session_timeout",
-                seconds=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                seconds=STARTUP_LOGIN_TIMEOUT_S,
             )
         except Exception as e:
             log.warning("app.startup.restore_session_error", error=str(e))
         if restored:
-            await sess.start_refresh_loop()
+            # Token renewal is the steward's job now (daily pre-open + TTL
+            # backstop) — there is no interval refresh loop to start.
             log.info("app.startup.session_restored_from_db")
-            # A TTL-valid restored token can still be dead (XTS daily expiry /
-            # single-session invalidation). If so, the feed's self-heal will
-            # auto re-login on the first 'Invalid Token' — no manual click needed.
         elif (settings.xts_md_secret_key or "").strip() and (settings.xts_md_app_key or "").strip():
-            # No usable session restored — auto-login at startup so the feed comes
-            # up live without a human clicking the dashboard button. force=True
-            # guarantees a fresh token.
+            # No usable session restored (missing, expired, or broker-rejected on
+            # the validation probe) — log in fresh so the feed comes up unattended.
             try:
                 await asyncio.wait_for(
-                    sess.login(force=True),
-                    timeout=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
+                    sess.login(force=True, actor="startup"),
+                    timeout=STARTUP_LOGIN_TIMEOUT_S,
                 )
-                await sess.start_refresh_loop()
                 log.info("app.startup.auto_login_ok")
             except asyncio.TimeoutError:
                 log.warning(
                     "app.startup.login_timeout",
-                    seconds=STARTUP_SMARTAPI_LOGIN_TIMEOUT_S,
-                    hint="XTS market-data login did not respond; authenticate via the dashboard.",
+                    seconds=STARTUP_LOGIN_TIMEOUT_S,
+                    hint="XTS market-data login did not respond; the steward keeps retrying.",
                 )
             except Exception as e:
-                # Wrong appKey/secretKey / network — backend stays up for UI login.
+                # Wrong appKey/secretKey / network / circuit parked at boot —
+                # backend stays up; the steward's ladder takes it from here.
                 log.warning("app.startup.login_deferred", reason=str(e))
+                from .core.notify import notify
 
-    feed: OptionFeedClient | None = None
-    aggregator: MinuteAggregator | None = None
-    session_watch: asyncio.Task[None] | None = None
-    atm_watch: asyncio.Task[None] | None = None
+                notify("startup_login_failed", f"⚠️ Startup broker login failed: {e}")
+
     poller: UniversePoller | None = None
 
     try:
         if settings.run_mode == "live":
-            engine = get_oi_engine()
-            hub = get_hub()
+            # Aggregator + feed client + spot refresher, via the ONE factory path
+            # (shared with the login endpoint's bootstrap and the steward rebuild).
+            await ensure_live_ingestion(fresh_token_minted=False)
 
-            async def on_flush(bucket: datetime, rows: int) -> None:
-                rt.last_flush_at = bucket
-                rt.last_flush_rows = rows
-                engine.on_aggregator_flush(bucket)
-                await hub.publish_flush(bucket, rows)
+            spawn_supervised(run_nse_session_open_watch, "nse-session-watch")
+            spawn_supervised(run_atm_drift_watch, "atm-drift-watch")
 
-            aggregator = MinuteAggregator(rt.tick_queue, on_flush=on_flush)
-            await aggregator.start()
-            rt.aggregator = aggregator
+            # The single recovery authority. Which one depends on the vendor,
+            # because the two have OPPOSITE premises: the XTS steward exists to
+            # avoid logging in too often (a login kills the live session), while
+            # the TrueData steward exists to avoid logging OUT too often (a
+            # logout costs a ~60s lockout). Running the XTS ladder against
+            # TrueData would be a lockout generator, so this is a hard branch,
+            # never a shared class with flags.
+            if settings.feed_vendor == "truedata":
+                from .core.proxy_health import run_proxy_watch
+                from .ingest.truedata_steward import get_td_steward
 
-            # Resolve the reference-price token BEFORE building the feed so token and
-            # segment stay consistent. Falling back to the NIFTY constant paired with
-            # a non-NSE segment (e.g. a commodity/BSE-index boot symbol → 26000 on
-            # MCXFO/BSECM) is an invalid instrument and yields no spot tick.
-            reg_entry = get_registry().get(rt.active_symbol)
-            index_token = reg_entry.spot_token if reg_entry else None
-            if not index_token and reg_entry is not None and sess.authenticated:
-                try:
-                    index_token = await _resolve_spot_token(reg_entry)
-                except Exception as e:
-                    log.warning("feed.spot_resolve_error", symbol=rt.active_symbol, error=str(e))
-            if index_token and reg_entry is not None:
-                index_segment = _spot_segment(reg_entry)
+                td_steward = get_td_steward()
+                rt.steward = td_steward
+                spawn_supervised(td_steward.run, "session-steward")
+                spawn_supervised(run_proxy_watch, "proxy-watch")
+            elif settings.feed_vendor == "td_relay":
+                # Follower: there is no vendor session to rotate or log out, so
+                # NO steward. The relay client reconnects on its own; running
+                # the TrueData ladder here would try to log the OWNER out.
+                rt.steward = None
+                log.info("app.startup.td_relay_follower", relay=settings.td_relay_url.split("?")[0])
             else:
-                # Consistent valid fallback: NIFTY index token on its own cash segment.
-                index_token = settings.nifty_index_token
-                index_segment = xts_client.SEG_NSECM
-            feed = OptionFeedClient(
-                rt.tick_queue,
-                _resubscribe_provider,
-                index_token=index_token,
-                active_symbol=rt.active_symbol,
-                index_segment=index_segment,
-            )
-            await feed.start()
-            rt.feed_client = feed
+                steward = SessionSteward()
+                set_steward(steward)
+                rt.steward = steward
+                spawn_supervised(steward.run, "session-steward")
 
-            # Background task: refresh latest_spot from feed every second
-            asyncio.create_task(_spot_refresher(feed), name="spot-refresher")
-            session_watch = asyncio.create_task(
-                run_nse_session_open_watch(feed),
-                name="nse-session-watch",
-            )
-            atm_watch = asyncio.create_task(
-                run_atm_drift_watch(),
-                name="atm-drift-watch",
-            )
+            # REST snapshotter: "failover" covers the active symbol while the WS
+            # feed is down; "full" additionally polls the whole F&O universe.
+            # The transports are vendor-specific (XTS batch-quotes vs TrueData
+            # per-contract getlastnbars / whole-segment getAllBars), so the
+            # implementation is chosen here while the MODE semantics stay shared.
+            if settings.effective_poller_mode != "off":
+                # The REST failover transport is the vendor's, and a relay
+                # follower still holds REST credentials — so it fails over the
+                # same way the owner does.
+                if settings.feed_vendor in ("truedata", "td_relay"):
+                    from .ingest.td_failover_poller import TdFailoverPoller, TdSegmentSweeper
 
-            # All-symbol OI snapshotter (opt-in). Reuses the same tick_queue →
-            # aggregator → option_oi_snapshots path as the live feed.
-            if settings.poller_enabled:
-                poller = UniversePoller(rt.tick_queue)
+                    if settings.effective_poller_mode == "segment_sweep":
+                        poller = TdSegmentSweeper(rt.tick_queue)
+                    else:
+                        poller = TdFailoverPoller(rt.tick_queue)
+                else:
+                    poller = UniversePoller(rt.tick_queue)
                 await poller.start()
                 rt.universe_poller = poller
 
             # Persist ATM IV for the active symbol so IVR/IVP accumulate over days.
-            asyncio.create_task(_iv_history_loop(), name="iv-history-snapshot")
+            spawn_supervised(_iv_history_loop, "iv-history-snapshot")
             # Persist per-strike greeks so replay/exports can show live-computed greeks.
-            asyncio.create_task(_greeks_history_loop(), name="greeks-history-snapshot")
+            spawn_supervised(_greeks_history_loop, "greeks-history-snapshot")
+
+            # The Algo Config trading orchestrator: one decision pass per
+            # closed minute during the session (clock-driven — it reads the
+            # already-persisted buckets, deliberately NOT the flush hook, so
+            # the hardened ingestion path stays untouched). Routes to the
+            # paper simulator until the live broker milestone lands.
+            from .algo.orchestrator import run_orchestrator_loop
+
+            spawn_supervised(run_orchestrator_loop, "algo-orchestrator")
+
+        # The Algo Config live stream — deliberately OUTSIDE the live-mode
+        # branch. Under RUN_MODE=replay there is no feed and no orchestrator,
+        # but the page must still render the last stored session and SAY that
+        # it is replaying rather than look broken. The loop costs nothing with
+        # zero subscribers, so running it unconditionally is free.
+        from .algo.live_stream import run_algo_stream_loop
+
+        spawn_supervised(run_algo_stream_loop, "algo-stream")
+
+        # Keeps oi_day_stats / live_days current. Independent of the nightly
+        # shell script on purpose: that script's refresh line was uncommitted
+        # for weeks, so anything deployed from git never refreshed at all and
+        # oi_snapshots_unified silently served the wrong arm. Also runs in
+        # replay — a stale index is stale regardless of the feed.
+        from .services.data_health import run_data_health_loop
+
+        spawn_supervised(run_data_health_loop, "data-health")
+
+        # Heals multi-day outages: if this backend was down for N trading days,
+        # pull them from the TrueData REST archive (same puller as the nightly
+        # cron) and refresh the day index. Live mode only — a replay box has
+        # no business writing history it did not observe.
+        if settings.run_mode == "live":
+            from .ingest.gapfill import run_gapfill_loop
+
+            spawn_supervised(run_gapfill_loop, "gapfill", respawn=False)
 
         yield
 
     finally:
         log.info("app.shutdown")
-        for task in (session_watch, atm_watch):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        for name in (
+            "session-steward", "nse-session-watch", "atm-drift-watch",
+            "iv-history-snapshot", "greeks-history-snapshot", "spot-refresher",
+            "proxy-watch", "algo-orchestrator", "algo-stream", "data-health",
+            # was missing: an in-flight vendor pull subprocess outlived shutdown
+            "gapfill",
+        ):
+            cancel_supervised(name)
         # Stop producers (feed + poller) before the aggregator so no producer
         # outlives the consumer draining the queue.
         if poller is not None:
             await poller.stop()
-        if feed is not None:
-            await feed.stop()
-        if aggregator is not None:
-            await aggregator.stop()
-        if settings.run_mode == "live":
+        if rt.feed_client is not None:
+            # Under TrueData this is load-bearing, not tidiness: stop() sends the
+            # on-socket logout, and skipping it leaves the session dirty so the
+            # NEXT boot starts inside a ~60s "User Already Connected" window.
+            # docker-compose's stop_grace_period is raised to 45s for this.
+            await rt.feed_client.stop()
+        if rt.shadow_feed_client is not None:
+            await rt.shadow_feed_client.stop()
+        if rt.aggregator is not None:
+            await rt.aggregator.stop()
+        if rt.shadow_aggregator is not None:
+            await rt.shadow_aggregator.stop()
+        if settings.run_mode == "live" and settings.feed_vendor == "xts":
             await sess.stop()
 
 
@@ -280,7 +280,7 @@ def _frontend_dist_dir() -> Path | None:
 
 class _SPAStaticFiles(StaticFiles):
     """StaticFiles that falls back to ``index.html`` on 404 so client-side routes
-    (e.g. ``/hidden``) resolve on hard refresh when FastAPI serves the built SPA
+    resolve on hard refresh when FastAPI serves the built SPA
     directly (frozen-exe / local ``frontend/dist``). Inert under nginx/Vite, which
     already do history fallback. The ``/api`` and ``/ws`` routers are registered
     before the greedy ``/`` mount, so they always match first — this fallback only
@@ -292,22 +292,6 @@ class _SPAStaticFiles(StaticFiles):
         if response.status_code == 404:
             return await super().get_response("index.html", scope)
         return response
-
-
-async def _spot_refresher(feed: OptionFeedClient) -> None:
-    """Mirror the feed's latest spot into runtime so REST can read it without a queue."""
-    rt = get_runtime()
-    while True:
-        try:
-            spot = feed.latest_underlying
-            if spot is not None:
-                rt.latest_spot = spot
-            await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:  # pragma: no cover
-            log.warning("spot_refresher.error", error=str(e))
-            await asyncio.sleep(5.0)
 
 
 async def _iv_history_loop() -> None:
@@ -371,6 +355,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.include_router(ws_router)
+    app.include_router(algo_ws_router)
+    # Relay owner endpoint — inert unless TD_RELAY_ENABLED (it answers with an
+    # error frame and closes), so mounting it unconditionally is safe.
+    from .ws.td_relay import router as td_relay_router
+
+    app.include_router(td_relay_router)
 
     dist = _frontend_dist_dir()
     if dist is not None:
