@@ -32,6 +32,10 @@ OUT="$DEST/oi_${STAMP}.sql.gz"
 TMP="$OUT.partial"
 
 echo "$(date -Is) starting dump -> $OUT"
+# Restrict BEFORE the shell creates .partial. The chmod 600 below only fires
+# after the mv, which left a complete database dump world-readable for the
+# whole ~9 minutes of every nightly run.
+umask 077
 # Write to .partial first so an interrupted run never leaves a truncated file
 # that looks like a valid backup.
 if docker exec -e PGPASSWORD="$PW" "$CID" pg_dump -U postgres --no-owner "$DB_NAME" 2>/dev/null | gzip -9 > "$TMP"; then
