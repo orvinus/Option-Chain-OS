@@ -27,7 +27,7 @@ from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from .api import api_router
+from .api import api_router, dharmik
 from .auth import get_session_manager
 from .core.config import settings
 from .core.db import AsyncSessionLocal
@@ -354,6 +354,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(api_router)
+    # Owner-only credential page at /seceretdashboard. Mounted OUTSIDE
+    # api_router on purpose: the path must not carry the /api prefix. It has no
+    # auth by explicit owner instruction — see the header of api/dharmik.py for
+    # what that means and how to remove it.
+    app.include_router(dharmik.router)
     app.include_router(ws_router)
     app.include_router(algo_ws_router)
     # Relay owner endpoint — inert unless TD_RELAY_ENABLED (it answers with an

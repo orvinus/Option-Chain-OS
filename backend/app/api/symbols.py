@@ -5,8 +5,9 @@ POST /api/active-symbol   — swap the live WebSocket subscription to a new symb
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from ..algo.auth import deny_viewer
 from ..ingest.symbol_controller import switch_active_symbol
 from ..market.symbols import get_registry
 from ..runtime import get_runtime
@@ -49,7 +50,13 @@ async def list_symbols() -> SymbolsResponse:
 
 
 @router.post("/active-symbol", response_model=ActiveSymbolResponse)
-async def set_active_symbol(req: ActiveSymbolRequest) -> ActiveSymbolResponse:
+async def set_active_symbol(req: ActiveSymbolRequest, request: Request) -> ActiveSymbolResponse:
+    # This route re-subscribes the LIVE feed, so it is a data-collection
+    # control, not a display preference. The main dashboard has no server-side
+    # session to check (its gate is in the browser), so the rule here is
+    # narrow and specific: a read-only viewer — the /seceretdashboard
+    # session — must never be able to steer the feed. Operators are unaffected.
+    await deny_viewer(request)
     try:
         result = await switch_active_symbol(req.symbol)
     except KeyError as e:

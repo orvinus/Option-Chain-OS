@@ -59,7 +59,14 @@ RestartSec=3
 # Defence in depth. The gateway is a bridge-local address and is not routable
 # from outside the host, but an open SOCKS proxy is an open relay if it ever
 # were: refuse everything that is not the compose network.
-IPAddressAllow=${BRIDGE_SUBNET}
+# NOTE: systemd does NOT expand environment variables in IPAddressAllow= (only
+# ExecStart= gets them). ${BRIDGE_SUBNET} here was silently dropped with
+# "Invalid address prefix ... ignoring assignment", leaving an empty allow-list
+# against IPAddressDeny=any — the relay then firewalled itself off from the very
+# bridge it exists to serve, and every TrueData call timed out. Literal values
+# only; if you move the bridge, edit these two lines by hand (or ship a drop-in).
+IPAddressAllow=172.28.0.0/16
+IPAddressAllow=127.0.0.0/8
 IPAddressDeny=any
 NoNewPrivileges=yes
 PrivateTmp=yes

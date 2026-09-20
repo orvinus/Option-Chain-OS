@@ -126,3 +126,15 @@
     transform: none;
   }
 }
+
+
+/* ── Read-only mirror (/seceretdashboard) ──────────────────────────────
+   Deliberately NOT a blanket disable. A viewer has to be able to navigate:
+   switch weekday and zone, open sub-tabs, expand panels, choose a backtest
+   run, scroll. Config edits are draft-only until Save, so moving a field
+   changes nothing on the server — the persist actions are what is blocked,
+   client-side in api/viewerMode.ts and again by the server's 403. */
+.viewer-readonly [data-viewer-block] {
+  opacity: 0.5;
+  cursor: not-allowed !important;
+}

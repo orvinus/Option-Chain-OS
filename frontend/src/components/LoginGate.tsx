@@ -1,5 +1,6 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api } from "../api/rest";
+import { algoApi } from "../api/algoRest";
 
 /**
  * Fixed-credential login gate for the MAIN dashboard (served at "/"): the
@@ -17,6 +18,30 @@ export function LoginGate({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // /seceretdashboard mints a read-only VIEWER session and redirects
+  // here. Ask the SERVER who we are rather than trusting a URL flag — a query
+  // string would let anyone skip this gate by typing it. The httpOnly cookie
+  // cannot be forged from script, so only a session the backend actually
+  // issued unlocks the dashboard, and only ever in read-only mode.
+  useEffect(() => {
+    // Only the /seceretdashboard entry point skips this gate. Visiting
+    // "/" directly always prompts, even in a browser that still holds a viewer
+    // cookie — the plain dashboard must behave exactly as it always has.
+    if (!new URLSearchParams(window.location.search).has("mirror")) return;
+    let alive = true;
+    algoApi
+      .me()
+      .then((id) => {
+        if (alive && id?.role === "viewer") setUnlocked(true);
+      })
+      .catch(() => {
+        /* no session (the normal case) — show the sign-in form */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   if (unlocked) return <>{children}</>;
 

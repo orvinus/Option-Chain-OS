@@ -316,3 +316,25 @@ async def require_admin_role(request: Request) -> AdminIdentity:
             403, "Only the admin may do this (kill-switch authority, §11.2)."
         )
     return ident
+
+
+async def deny_viewer(request: Request) -> None:
+    """Reject a read-only viewer session, ignore everyone else.
+
+    For routes OUTSIDE /api/algo that change live behaviour. Those routes have
+    no session of their own — the main dashboard's gate lives in the browser —
+    so this cannot demand authentication without breaking normal operators.
+    What it can do is make sure the one session the platform hands out freely
+    (the /seceretdashboard viewer) stays read-only everywhere, not just
+    under /api/algo.
+    """
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if not token:
+        return
+    try:
+        user_id = verify_token(token)
+        ident = await _identity_from_user_id(user_id) if user_id is not None else None
+    except Exception:
+        return
+    if ident is not None and role_rank(ident.role) < 1:
+        raise HTTPException(403, "Viewer role is read-only — ask the admin.")

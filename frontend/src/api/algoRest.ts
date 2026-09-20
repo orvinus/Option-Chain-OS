@@ -21,6 +21,7 @@ import type {
 } from "../types/algo";
 
 import { trackRequest } from "./inflight";
+import { assertWritable } from "./viewerMode";
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 
@@ -70,6 +71,10 @@ async function requestInner<T>(
   path: string,
   opts?: { body?: unknown; params?: Record<string, string | undefined> }
 ): Promise<T> {
+  // Read-only mirror: refuse writes in the browser, before the request is
+  // built. The server would 403 anyway; failing here keeps the message honest
+  // ("read-only") instead of surfacing a permissions error the viewer cannot act on.
+  assertWritable(method);
   const url = new URL(API_BASE ? `${API_BASE}${path}` : path, window.location.origin);
   if (opts?.params) {
     for (const [k, v] of Object.entries(opts.params)) {

@@ -23,6 +23,7 @@ from ..algo.auth import (
     change_credentials,
     issue_token,
     require_admin,
+    require_editor,
 )
 from ..core.config import settings
 
@@ -122,7 +123,12 @@ def _throttle_check(user_id: int) -> None:
 async def algo_change_credentials(
     body: ChangeCredentialsRequest,
     response: Response,
-    ident: AdminIdentity = Depends(require_admin),
+    # require_editor, NOT require_admin: the latter only proves *a* session
+    # exists, so a read-only viewer reached this route and the current-password
+    # check then answered 400-vs-200 — a credential-guessing oracle for anyone
+    # holding a viewer session. Role is now checked before any password is
+    # compared. Admins and editors are unaffected (rank 2 and 1 both pass).
+    ident: AdminIdentity = Depends(require_editor),
 ) -> AlgoIdentityResponse:
     """Change the Algo Config / Backtesting sign-in ID and password.
 
