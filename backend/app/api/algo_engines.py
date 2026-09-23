@@ -153,6 +153,42 @@ def _count_at_or_before(timestamps: list[str], cut: time) -> int:
     return n
 
 
+async def mtf_pair_at(
+    sym: str,
+    exp: _date,
+    atm_window: int,
+    date_s: Optional[str],
+    cut: Optional[time],
+):
+    """THE Multi-TF data path — Algo Config's panel AND the main Multi-TF
+    page (2026-09-23). The OI series the engine trades on: closed minutes
+    only, the archive filling any minute the live feed missed, the strike
+    basket resolved as of the cut. The main page used to read the live table
+    alone, so a live-feed gap (15 Sep 13:58–14:23) read as zero change there
+    while Algo Config showed the real move. Returns None with fewer than two
+    closed minutes."""
+    from_ts, to_ts = _window_for_date(date_s)
+    to_ts = _clamp_to_cut(to_ts, date_s, cut)
+    pair = await build_oi_change_pair(sym, exp, atm_window, from_ts=from_ts, to_ts=to_ts)
+    if pair is None or len(pair.call_change_cr) < 2:
+        return None
+    if cut is not None:
+        # TIME-REPLAY: point-in-time snapshot as of ``cut`` — the window is
+        # already clamped above; this trims any residue.
+        n = _count_at_or_before(pair.timestamps, cut)
+        if n < 2:
+            return None
+        pair = _dc_replace(
+            pair,
+            timestamps=pair.timestamps[:n],
+            call_change_cr=pair.call_change_cr[:n],
+            put_change_cr=pair.put_change_cr[:n],
+            call_change_full_cr=pair.call_change_full_cr[:n],
+            put_change_full_cr=pair.put_change_full_cr[:n],
+        )
+    return pair
+
+
 def replay_ump(
     minutes: list[PremiumMinute],
     params: Any,
@@ -203,6 +239,29 @@ def default_cut_for(session_date: _date) -> time:
 
     cm = session_close_min(session_date)
     return time(cm // 60, cm % 60)
+
+
+def _open_position_strike(sym: str, exp: _date, option_type: str) -> Optional[int]:
+    """Strike of the orchestrator's open position when it is on this exact
+    chain side (symbol, expiry, CE/PE); None otherwise or with no live engine
+    in this process (replay box, Backtesting)."""
+    try:
+        from ..algo.orchestrator import get_orchestrator
+
+        orch = get_orchestrator()
+        pos = orch.position if orch is not None else None
+        if pos is None:
+            return None
+        c = pos.contract
+        if (
+            str(c.symbol).upper() == sym
+            and c.expiry == exp
+            and str(c.option_type).upper() == option_type.upper()
+        ):
+            return int(c.strike)
+    except Exception:  # noqa: BLE001 — a display nicety must never 500 the chart
+        log.warning("algo.engines.position_pin_failed", exc_info=True)
+    return None
 
 
 def choose_display_candles(
@@ -402,11 +461,26 @@ async def ump_eval(
         ref_utc = cursor_utc or datetime.now(timezone.utc)
         from ..algo.series import freshest_row_ts, strike_ladder_at
 
-        cands = await band_candidates_at(
-            sym, exp, option_type,
-            zone_cfg.premium_min, zone_cfg.premium_max,
-            zone_cfg.strike_scan_count, ref_utc,
-        )
+        cands = []
+        if cursor_utc is None:
+            # LIVE: rank with the orchestrator's OWN picker (live table, same
+            # moment) so the chart shows the strike the engine actually hunts.
+            # band_candidates_at reads the unified view and could name a
+            # different strike, and the live candle is drawn only when the
+            # chart and the stream agree (2026-09-23 5-6-minute freeze).
+            from ..algo.series import select_strikes_in_band
+
+            cands = await select_strikes_in_band(
+                sym, exp, option_type,
+                zone_cfg.premium_min, zone_cfg.premium_max,
+                zone_cfg.strike_scan_count,
+            )
+        if not cands:
+            cands = await band_candidates_at(
+                sym, exp, option_type,
+                zone_cfg.premium_min, zone_cfg.premium_max,
+                zone_cfg.strike_scan_count, ref_utc,
+            )
         ladder = await strike_ladder_at(sym, exp, option_type, ref_utc)
         if not ladder:
             # Off-hours (or a not-yet-traded chain): the 15-minute window at
@@ -428,9 +502,21 @@ async def ump_eval(
         log.warning("algo.engines.band_candidates_failed", error=str(e))
         all_strikes = []
         candidates_as_of = None
+    position_strike = (
+        _open_position_strike(sym, exp, option_type)
+        if strike is None and cursor_utc is None and config_run is None and not config_sandbox
+        else None
+    )
     if strike is not None:
         strike_val: Optional[int] = strike
         strike_source = "manual"
+    elif position_strike is not None:
+        # The engine holds a trade on this chain side: show THAT contract. The
+        # band pick moves with the premium exactly while a trade runs, and the
+        # chart used to hop to another strike (and lose its live candle) the
+        # moment an entry came in (reported 2026-09-23).
+        strike_val = position_strike
+        strike_source = "position"
     elif band_candidates:
         strike_val = int(band_candidates[0]["strike"])
         strike_source = "band"
@@ -527,7 +613,15 @@ async def ump_eval(
         zone_view = {"base": z.b, "zone_top": z.zt, "upper_median": z.um,
                      "lower_median": z.lm, "zone_bottom": z.zb}
 
-    nb = engine.nearest_above(engine.base_level) if engine.base_level is not None else None
+    # Q1/Q2/Q3 + NB target are in-trade guide lines, exactly like the zone
+    # band above. ``_exit`` keeps ``base_level`` (Pine keeps it too), so gating
+    # on it alone drew the Q-lines on an IDLE engine for the rest of the
+    # contract's life after its first trade (reported 2026-09-23).
+    nb = (
+        engine.nearest_above(engine.base_level)
+        if engine.in_trade and engine.base_level is not None
+        else None
+    )
     q_levels = None
     if nb is not None and engine.base_level is not None:
         b = engine.base_level
@@ -817,37 +911,22 @@ async def mtf_ratio_eval(
 
     sym = (symbol or day_cfg.index_symbol).upper()
     exp = await resolve_expiry(expiry, sym)
-    from_ts, to_ts = _window_for_date(date)
-
     cut = _parse_at(at)
-    to_ts = _clamp_to_cut(to_ts, date, cut)
 
     params = zone_cfg.mtf_ratio
-    pair = await build_oi_change_pair(
-        sym, exp, params.strikes_atm_window, from_ts=from_ts, to_ts=to_ts
-    )
-    if pair is None or len(pair.call_change_cr) < 2:
+    pair = await mtf_pair_at(sym, exp, params.strikes_atm_window, date, cut)
+    if pair is None:
         raise HTTPException(
             404,
             f"no stored 1-minute data for {sym} {exp.isoformat()}"
-            + (f" on {date}" if date else ""),
+            + (f" on {date}" if date else "")
+            + (f" at or before {at} IST" if at else ""),
         )
 
-    # TIME-REPLAY: point-in-time snapshot as of ``at`` — window already
-    # clamped above; this trims any residue.
-    if cut is not None:
-        n = _count_at_or_before(pair.timestamps, cut)
-        if n < 2:
-            raise HTTPException(404, f"no data at or before {at} IST")
-        pair = _dc_replace(
-            pair,
-            timestamps=pair.timestamps[:n],
-            call_change_cr=pair.call_change_cr[:n],
-            put_change_cr=pair.put_change_cr[:n],
-        )
+    from ..algo.series import mtf_input
 
     rows = mtf_ratio.rows_from_cumulative_series(
-        pair.call_change_cr, pair.put_change_cr, params.timeframes
+        *mtf_input(pair), params.timeframes
     )
     result = mtf_ratio.evaluate(rows, params)
 

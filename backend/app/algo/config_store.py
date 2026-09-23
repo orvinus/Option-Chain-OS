@@ -75,6 +75,7 @@ _SELECT_HISTORY_SQL = text(
     """
     SELECT version, saved_by, saved_at, note
     FROM algo_config_versions
+    WHERE (CAST(:before AS INTEGER) IS NULL OR version < CAST(:before AS INTEGER))
     ORDER BY version DESC
     LIMIT :limit
     """
@@ -135,11 +136,16 @@ class AlgoConfigStore:
             ).mappings().first()
         return self._row_to_version(dict(row)) if row else None
 
-    async def history(self, limit: int = 25) -> list[dict[str, Any]]:
+    async def history(
+        self, limit: int = 25, before: Optional[int] = None
+    ) -> list[dict[str, Any]]:
+        """Newest-first page of version metadata. ``before`` pages backwards
+        (versions strictly older than it), so the UI can walk to v1."""
         async with AsyncSessionLocal() as session:
             rows = (
                 await session.execute(
-                    _SELECT_HISTORY_SQL, {"limit": max(1, min(limit, 200))}
+                    _SELECT_HISTORY_SQL,
+                    {"limit": max(1, min(limit, 500)), "before": before},
                 )
             ).mappings().all()
         return [

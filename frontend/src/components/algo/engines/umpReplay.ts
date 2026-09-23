@@ -259,6 +259,30 @@ export function deriveReplayView(
   };
 }
 
+/**
+ * Playhead position that shows the data up to and INCLUDING the minute `iso`
+ * — no later. The display candle containing `iso` is revealed only through
+ * that minute (index = the candle before it, sub = minutes revealed), so a
+ * replay started at 09:20 on 5-minute candles shows 09:20, not the whole
+ * 09:20–09:24 candle. Falls back to sitting on a closed candle when there are
+ * no sub-candles (1-minute charts) or the minute completes its candle.
+ */
+export function seekPosition(data: UmpEvalResponse, iso: string): { index: number; sub: number } {
+  const cs = data.candles ?? [];
+  if (cs.length === 0) return { index: 0, sub: 0 };
+  const t = istToChartTime(iso) as number;
+  const i = snapToCandle(
+    cs.map((c) => istToChartTime(c.ts) as number),
+    t,
+  );
+  if (i < 0) return { index: 0, sub: 0 };
+  const subs = subsFor(data, i);
+  if (subs.length === 0) return { index: i, sub: 0 };
+  const k = subs.filter((s) => (istToChartTime(s.ts) as number) <= t).length;
+  if (k >= subs.length || i === 0) return { index: i, sub: 0 };
+  return { index: i - 1, sub: k };
+}
+
 /** Next/previous weekday not in `holidays` (YYYY-MM-DD), clamped to [min,max]. */
 export function stepTradingDay(
   date: string,

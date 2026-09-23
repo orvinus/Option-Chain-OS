@@ -39,7 +39,9 @@ _SELECT_SQL = text(
     WHERE (:username = '' OR username = :username)
       AND (CAST(:since AS TIMESTAMPTZ) IS NULL OR ts >= CAST(:since AS TIMESTAMPTZ))
       AND (CAST(:until AS TIMESTAMPTZ) IS NULL OR ts <= CAST(:until AS TIMESTAMPTZ))
-    ORDER BY ts DESC
+      AND (CAST(:before_id AS BIGINT) IS NULL
+           OR (ts, id) < (CAST(:before_ts AS TIMESTAMPTZ), CAST(:before_id AS BIGINT)))
+    ORDER BY ts DESC, id DESC
     LIMIT :limit
     """
 )
@@ -119,7 +121,7 @@ async def last_event_date(event_type: str):
 
 async def fetch_audit(
     *, username: str = "", since: Optional[str] = None, until: Optional[str] = None,
-    limit: int = 200,
+    limit: int = 200, before_ts: Optional[str] = None, before_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Filtered read for the dashboard's audit view (§11.3: filter by user and
     date range at minimum)."""
@@ -132,6 +134,10 @@ async def fetch_audit(
                     "since": since,
                     "until": until,
                     "limit": max(1, min(limit, 1000)),
+                    # Keyset paging (older than the last row the UI holds):
+                    # both halves or neither.
+                    "before_ts": before_ts if before_id is not None else None,
+                    "before_id": before_id if before_ts is not None else None,
                 },
             )
         ).mappings().all()

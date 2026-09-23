@@ -200,6 +200,10 @@ export const EXIT_REASON_LABEL: Record<string, string> = {
   ZONE_END_EXIT: "Zone End-Exit",
   EOD_FORCE_CLOSE: "EOD Force Close",
   EXPIRY_FORCE_CLOSE: "Expiry Force Close",
+  MASTER_KILL: "Master Kill",
+  DAY_KILL: "Day Kill",
+  ZONE_KILL: "Zone Kill",
+  MANUAL_SQUARE_OFF: "Manual Square-off",
 };
 
 export function exitReasonLabel(code: string | null | undefined): string {
@@ -322,6 +326,24 @@ export interface ConfigEnvelope {
 export interface SaveResponse {
   version: number;
   warnings: string[];
+  /** Set when the save switched a kill ON over a running trade and that trade
+   *  was squared off immediately. */
+  kill_exit?: {
+    trade_id: number;
+    ledger: string;
+    closed: boolean;
+    exit_reason: string;
+  } | null;
+}
+
+/** One line describing an immediate kill-switch exit, or "" when none. */
+export function killExitNote(r: Pick<SaveResponse, "kill_exit">): string {
+  const k = r.kill_exit;
+  if (!k) return "";
+  const what = `${exitReasonLabel(k.exit_reason)}: trade #${k.trade_id} (${k.ledger})`;
+  return k.closed
+    ? ` — ${what} exited`
+    : ` — ${what} exit order FAILED; the engine retries every minute`;
 }
 
 /** One evaluated minute of the orchestrator (algo_decisions / algo_backtest_decisions). */
@@ -627,7 +649,7 @@ export interface UmpEvalResponse {
   strike: number;
   /** How the strike was chosen: the zone's premium-band pick (what the
    *  orchestrator hunts), an explicit manual override, or ATM fallback. */
-  strike_source: "band" | "manual" | "atm_fallback";
+  strike_source: "band" | "manual" | "atm_fallback" | "position";
   /** The top-N band candidates the orchestrator would hunt (nearest
    *  band-mid first). */
   band_candidates: { strike: number; premium: number }[];

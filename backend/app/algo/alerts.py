@@ -25,6 +25,10 @@ EXIT_REASON_LABEL: dict[str, str] = {
     "TARGET": "Target hit",
     "END_EXIT": "End-of-day exit",
     "EXPIRY_FORCE_CLOSE": "Expiry force-close",
+    "MASTER_KILL": "Master kill switch",
+    "DAY_KILL": "Day kill switch",
+    "ZONE_KILL": "Zone kill switch",
+    "MANUAL_SQUARE_OFF": "Manual square-off",
 }
 
 

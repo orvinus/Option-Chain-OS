@@ -43,6 +43,7 @@ from ..series import (
     RatioPair,
     oi_change_pair_from_points,
     ratio_pair_from_points,
+    whole_units_cr,
 )
 
 SESSION_OPEN = time(9, 15)
@@ -568,6 +569,12 @@ def _pairs_at(
                     strike_min=smin,
                     strike_max=smax,
                     spot=spot,
+                    call_change_full_cr=[
+                        whole_units_cr((ce[i] - base_ce) / _CRORE) for i in range(n)
+                    ],
+                    put_change_full_cr=[
+                        whole_units_cr((pe[i] - base_pe) / _CRORE) for i in range(n)
+                    ],
                 )
                 green_raw = [pe[i] / ce[i] if ce[i] else None for i in range(n)]
                 yellow_raw = [ce[i] / pe[i] if pe[i] else None for i in range(n)]

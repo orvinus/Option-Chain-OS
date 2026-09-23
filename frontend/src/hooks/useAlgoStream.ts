@@ -19,6 +19,9 @@ export interface UseAlgoStreamResult {
   live: boolean;
   /** Seconds since the frame was produced — drives the staleness readout. */
   ageS: number;
+  /** Point the stream at one exact contract (the UMP chart's), or back to the
+   *  zone's band pick with null. Provided by AlgoConfigPage only. */
+  pinContract?: (c: { strike: number; optionType: "CE" | "PE" } | null) => void;
 }
 
 export function useAlgoStream(

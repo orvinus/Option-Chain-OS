@@ -387,3 +387,31 @@ def _run_all() -> None:
 
 if __name__ == "__main__":
     _run_all()
+
+
+def test_strike_scan_count_is_no_longer_capped_at_10():
+    """2026-09-23: the zone "Strikes" box stopped at 10. The ceiling is now
+    one chain side at the widest data window (±60 → 121)."""
+    import pytest
+    from pydantic import ValidationError
+
+    from app.algo.config_models import ZoneConfig
+
+    base = _fresh().days["wednesday"].zones["Z1"].model_dump()
+    assert ZoneConfig.model_validate({**base, "strike_scan_count": 23}).strike_scan_count == 23
+    assert ZoneConfig.model_validate({**base, "strike_scan_count": 121}).strike_scan_count == 121
+    with pytest.raises(ValidationError):
+        ZoneConfig.model_validate({**base, "strike_scan_count": 122})
+
+
+def test_strike_scan_count_above_the_collected_strikes_warns():
+    cfg = _fresh()
+    day = cfg.days["wednesday"]
+    day.data_strike_window = 11                     # 23 strikes collected per side
+    day.zones["Z1"].strike_scan_count = 23
+    _, warnings = validate_document(cfg)
+    assert not any("exceeds the" in w for w in warnings), "23 of 23 is fine"
+    day.zones["Z1"].strike_scan_count = 30
+    _, warnings = validate_document(cfg)
+    assert any("wednesday Z1: strike scan count 30 exceeds the 23 strikes collected" in w
+               for w in warnings), warnings

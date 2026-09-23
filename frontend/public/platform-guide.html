@@ -118,7 +118,7 @@
 <ul>
 <li><b>Live Decision Snapshot</b> (top) — what the orchestrator is doing RIGHT NOW: state (idle/hunting/in-trade/gated/killed), active zone, per-indicator readings, the unanimous direction, position details, gate blocks, today's realized P&amp;L, and the <span class="btn">Resume</span> button after a consecutive-loss auto-pause. Polls every 5&nbsp;s.</li>
 <li><b>Expiries strip</b> — all known expiries with weekdays; the traded (current weekly) one highlighted.</li>
-<li><b>Kill grid</b> — master kill, 5 day kills, 15 zone kills. A kill blocks evaluation/entries; an OPEN trade keeps being managed.</li>
+<li><b>Kill grid</b> — master kill, 5 day kills, 15 zone kills. One rule for all of them: switched ON while a trade runs, that trade is exited at market the moment you save; while ON no new trade is taken; switched OFF, trading resumes. A zone kill covers the trade that zone opened; a day kill covers today's trade, including one carried overnight.</li>
 <li><b>Day tabs → zone rows</b> — per weekday: index symbol, allocation % (or ALL-IN), risk caps (max daily loss %, profit lock %, consecutive-loss pauses), End-Exit toggle, alerts; per zone: start/end times (never overlapping, inside 09:15–15:30), premium band ₹min–₹max, max trades, re-evaluation cadence (zone start vs every candle), strategy active, and the three indicator enable switches with live readings.</li>
 <li><b>Indicator names are links</b> (↗) — they open that engine's dashboard bound to the same day/zone.</li>
 <li><b>Copy / Reset toolbelt</b> — copy a whole day's settings to other days, copy one zone (including all four engines' parameters) to any day/zone (start/end times are preserved on the target so zones never overlap), reset day/zone/engine to the Appendix-A defaults.</li>

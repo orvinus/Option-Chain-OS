@@ -16,6 +16,7 @@ import { useMemo, useState } from "react";
 import { algoApi } from "../api/algoRest";
 import type { MarketContextValue } from "../hooks/useMarketContext";
 import type { AlgoConfigDoc, Weekday } from "../types/algo";
+import { killExitNote } from "../types/algo";
 import { AlgoAdminGate } from "../components/algo/AlgoAdminGate";
 import { ConfirmSaveModal } from "../components/algo/ConfirmSaveModal";
 import { DailyConfigPanel } from "../components/algo/DailyConfigPanel";
@@ -77,7 +78,8 @@ async function saveLiveConfig(
   const res = await algoApi.saveConfig(config, note, meta?.version ?? null);
   return (
     `✔ Saved as v${res.version}` +
-    (res.warnings.length > 0 ? ` with ${res.warnings.length} warning(s)` : "")
+    (res.warnings.length > 0 ? ` with ${res.warnings.length} warning(s)` : "") +
+    killExitNote(res)
   );
 }
 
@@ -129,6 +131,12 @@ function AlgoConfigInner({
   // One socket for the whole page, held above the tab switch so a sub-tab
   // change never re-handshakes. Frozen while the user has pinned a historical
   // date or an `At` minute — a pinned cursor must stay pinned.
+  // The Ultra Master Pro chart pins the stream to the contract it is showing,
+  // so the live forming candle is always for THAT contract. The stream used to
+  // be fixed to CE + its own band pick: a PE chart never got a live candle at
+  // all, and a CE chart lost it whenever the two strike picks disagreed — the
+  // chart then sat still until the next 5-minute candle (reported 2026-09-23).
+  const [chartPin, setChartPin] = useState<{ strike: number; optionType: "CE" | "PE" } | null>(null);
   const streamScope = useMemo(
     () =>
       draft
@@ -137,12 +145,14 @@ function AlgoConfigInner({
             zone: engZone,
             symbol: draft.days[engDay]?.index_symbol ?? null,
             expiry: engExpiry || null,
-            optionType: "CE",
+            strike: chartPin?.strike ?? null,
+            optionType: chartPin?.optionType ?? "CE",
           }
         : null,
-    [draft, engDay, engZone, engExpiry],
+    [draft, engDay, engZone, engExpiry, chartPin],
   );
-  const stream = useAlgoStream(streamScope, !engHistDate && !engAt);
+  const streamRaw = useAlgoStream(streamScope, !engHistDate && !engAt);
+  const stream = useMemo(() => ({ ...streamRaw, pinContract: setChartPin }), [streamRaw]);
 
   const liveVersion = meta?.version;
   const paperOn = draft?.global.paper.paper_mode ?? false;

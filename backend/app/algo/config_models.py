@@ -355,7 +355,12 @@ class ZoneConfig(BaseModel):
     # silently change what it did. The Appendix-A seed ships 3 (the intended
     # multi-strike default) and the live config gets 3 via a normal AUDITED
     # save, so the change is versioned, visible and reversible.
-    strike_scan_count: int = Field(default=1, ge=1, le=10)
+    # Upper bound = the most strikes one side of a chain can ever be COLLECTED
+    # with (data_strike_window ±60 → 121). It was a hard 10 (raised
+    # 2026-09-23 at the user's request); any value above what the day
+    # actually collects simply means "hunt every in-band strike", and
+    # validate_document warns about it.
+    strike_scan_count: int = Field(default=1, ge=1, le=121)
     max_trades: int = 2
     zone_kill: bool = False       # True = manually disabled for the day (§2.1)
     strategy_active: bool = True  # UMP permitted to execute here (§2.1)
@@ -844,6 +849,14 @@ def validate_document(
                     f"{day} {zid}: strike scan count {z.strike_scan_count} means "
                     f"{z.strike_scan_count} parallel engine warmups every time a "
                     "hunt starts — expect slower minute passes"
+                )
+            collected = 2 * d.data_strike_window + 1
+            if z.strike_scan_count > collected:
+                warnings.append(
+                    f"{day} {zid}: strike scan count {z.strike_scan_count} exceeds "
+                    f"the {collected} strikes collected per side (Data strikes "
+                    f"ATM ±{d.data_strike_window}) — at most {collected} can hunt; "
+                    "raise the data window to widen it"
                 )
             if not re.fullmatch(r"#[0-9a-fA-F]{6}", z.ump.visual.median_color):
                 # Rendering-only field, so a malformed value must not block the

@@ -975,26 +975,36 @@ class TrueDataFeedClient:
                 log.warning("td_feed.pinned_watch_error", error=str(e)[:160])
 
     def _slots_for(self, tokens: list) -> list[Slot]:
-        """Budget slots: the active chain (REFERENCE/ACTIVE), then every pinned
-        chain at ELASTIC — pinned chains only ever take what is left over, so a
-        small plan keeps the viewed chain exactly as it was."""
-        slots = self._chain_slots(self._active_symbol, tokens, pinned=False)
+        """Budget slots. The TRADING chains (TRUEDATA_PINNED_SYMBOLS — the
+        indices the algo trades) outrank a chain that is merely VIEWED on the
+        dashboard. On the 100-symbol plan NIFTY + SENSEX at ±11 strikes take 94
+        of the 98 usable slots; a viewed third index (e.g. BANKNIFTY) used to
+        outrank them and squeeze SENSEX out of its own trading day — the
+        2026-09-17 stale-data failure (fixed 2026-09-23). A viewed non-trading
+        chain keeps its index (one slot, its ATM depends on it) and takes the
+        strikes that are left. With no trading list configured the viewed
+        chain IS the trading chain, exactly as before."""
+        trading = settings.truedata_pinned_symbol_list
+        viewed_is_trading = not trading or self._active_symbol in trading
+        slots = self._chain_slots(
+            self._active_symbol, tokens, options_elastic=not viewed_is_trading
+        )
         for sym, toks in self._pinned_tokens.items():
             if sym != self._active_symbol:
-                slots.extend(self._chain_slots(sym, toks, pinned=True))
+                slots.extend(self._chain_slots(sym, toks, options_elastic=False))
         return slots
 
-    def _chain_slots(self, symbol: str, tokens: list, *, pinned: bool) -> list[Slot]:
+    def _chain_slots(
+        self, symbol: str, tokens: list, *, options_elastic: bool
+    ) -> list[Slot]:
         """InstrumentToken list -> budget slots, plus the reference instrument."""
         from ..market.symbols import get_registry
 
         entry = get_registry().get(symbol)
         slots: list[Slot] = []
 
-        # Reference price first. For the active chain it is priority 0 and
-        # never evicted, because without spot there is no ATM and the whole
-        # chain is unanchored; for a pinned chain it is the first elastic slot
-        # (rank -1 sorts ahead of every strike).
+        # Reference price first, priority 0 and never evicted for every chain:
+        # without spot there is no ATM and the whole chain is unanchored.
         if entry is not None and entry.kind == "commodity":
             ref_name = ident.continuous_future_name(symbol)
         else:
@@ -1002,7 +1012,7 @@ class TrueDataFeedClient:
         slots.append(Slot(
             vendor_symbol=ref_name,
             token=ident.index_token(symbol),
-            priority=Priority.ELASTIC if pinned else Priority.REFERENCE,
+            priority=Priority.REFERENCE,
             symbol=symbol,
             moneyness_rank=-1,
         ))
@@ -1012,7 +1022,7 @@ class TrueDataFeedClient:
         spot = self._spot_by_symbol.get(symbol) or 0.0
         step = (entry.strike_step if entry else None) or settings.strike_step or 50
         atm = round(spot / step) * step if spot else 0
-        option_priority = Priority.ELASTIC if pinned else Priority.ACTIVE
+        option_priority = Priority.ELASTIC if options_elastic else Priority.ACTIVE
 
         for t in tokens:
             vendor_symbol = getattr(t, "vendor_symbol", None)

@@ -24,7 +24,9 @@ import type {
 } from "../../../types/algo";
 import { UMP_DISPLAY_INTERVALS, UMP_SCENARIOS, exitReasonLabel } from "../../../types/algo";
 import { ReplayController } from "../../ReplayController";
-import { deriveReplayView, formingBar, subCount, indexAtOrAfter, stepTradingDay } from "./umpReplay";
+import {
+  deriveReplayView, formingBar, subCount, subsFor, indexAtOrAfter, seekPosition, stepTradingDay,
+} from "./umpReplay";
 
 const INTERVAL_KEY = "ump.displayInterval";
 
@@ -83,12 +85,30 @@ interface Props {
   onCopyTo?: () => void;          // §9 copy-settings dialog (EnginesPanel owns it)
 }
 
+/** Mon–Fri 09:15–15:30 IST by the browser clock (holidays aside) — only
+ *  decides whether the live-candle status line is worth showing. */
+function nseSessionNowIst(): boolean {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((x) => x.type === t)?.value ?? "";
+  if (get("weekday") === "Sat" || get("weekday") === "Sun") return false;
+  const hm = Number(get("hour")) * 60 + Number(get("minute"));
+  return hm >= 9 * 60 + 15 && hm <= 15 * 60 + 30;
+}
+
 export function UmpPanel({
   draft, mutate, day, zone, dirty, histDate, expiry, at, configVersion,
   configRun, configSandbox, livePoll = true, defaults, onRequestSave,
   initialStrike, initialOptionType, onCopyTo,
 }: Props) {
   const [fetched, setFetched] = useState<UmpEvalResponse | null>(null);
+  // Which request produced `fetched` ("live" or "replay:<date>:<interval>").
+  // Replay must never run on a payload fetched for something else: starting a
+  // replay kept the OLD live payload on screen for the ~2 s the history load
+  // takes, and the transport stepped through it in whole 5-minute jumps
+  // (09:20 → 09:25 → 09:30) and spent the seek target on it (2026-09-23).
+  const [fetchedFor, setFetchedFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The /ump call replays the contract's ENTIRE stored life minute by minute
   // and takes seconds. Without this flag the panel filled the wait with
@@ -138,20 +158,55 @@ export function UmpPanel({
   // The forming bar only makes sense when the display candles share the
   // stream's bucket: the entry-TF bar (b5, bucketed on tf_min) or the 1m bar.
   const streamTf = (f?.candle?.tf_min ?? 5) * 60;
+  const sameContract =
+    !!f && !!fetched &&
+    f.scope.symbol === fetched.symbol &&
+    f.strike === fetched.strike &&
+    f.scope.option_type === fetched.option_type;
   const liveBar = (() => {
-    if (frozen || !f?.candle || !fetched) return null;
-    if (f.scope.symbol !== fetched.symbol || f.strike !== fetched.strike || f.scope.option_type !== fetched.option_type) return null;
+    if (frozen || !f?.candle || !fetched || !sameContract) return null;
     const bucket = fetched.candles_interval || fetched.entry_timeframe_min * 60;
     if (bucket === streamTf && f.candle.b5) return { ts: f.candle.b5_start, ...f.candle.b5 };
     if (bucket === 60 && f.candle.m1) return { ts: f.candle.m1_start, ...f.candle.m1 };
     return null;
   })();
 
+  // Keep the page's stream on the contract this chart shows (see
+  // AlgoConfigPage). Released when the chart is frozen or unmounts.
+  const pinContract = stream?.pinContract;
+  const pinStrike = !frozen && fetched ? fetched.strike : null;
+  const pinOt = !frozen && fetched ? (fetched.option_type as "CE" | "PE") : null;
+  useEffect(() => {
+    if (!pinContract) return;
+    pinContract(pinStrike != null && pinOt ? { strike: pinStrike, optionType: pinOt } : null);
+  }, [pinContract, pinStrike, pinOt]);
+  useEffect(() => () => pinContract?.(null), [pinContract]);
+
+  /** Why the live forming candle is or is not moving — never a silent freeze. */
+  const liveCandle = (() => {
+    // Only while NSE is actually trading — off-hours there is no live candle
+    // to have, and saying "OFF" then would be noise.
+    if (frozen || !fetched || !stream || !nseSessionNowIst()) return null;
+    if (liveBar && stream.ageS <= 15) return { on: true, text: "Live candle ON" };
+    const bucket = fetched.candles_interval || fetched.entry_timeframe_min * 60;
+    let why: string;
+    if (!f || stream.status !== "open") why = "the live stream is not connected";
+    else if (stream.ageS > 15) why = `no live update for ${stream.ageS} s`;
+    else if (!sameContract) why = "the live stream is switching to this contract";
+    else if (!f.candle) why = "no live price for this contract yet";
+    else if (bucket !== streamTf && bucket !== 60)
+      why = `a ${Math.round(bucket / 60)}-minute chart cannot use the ${Math.round(streamTf / 60)}-minute live candle — pick ${Math.round(streamTf / 60)}m or 1m`;
+    else why = "no live candle for this interval";
+    return { on: false, text: `Live candle OFF — ${why}. The chart still updates every 30 s.` };
+  })();
+
   // What the panel RENDERS: the fetched evaluation, or the replay view at
   // the playhead (candles truncated, levels/state/events reconstructed).
+  const replayKey = replay ? `replay:${replay.date}:${interval}` : null;
+  const replayReady = !!replay && !!fetched && fetchedFor === replayKey;
   const data = useMemo(
-    () => (fetched && replay ? deriveReplayView(fetched, index, sub) : fetched),
-    [fetched, replay, index, sub],
+    () => (replay ? (fetched && replayReady ? deriveReplayView(fetched, index, sub) : null) : fetched),
+    [fetched, replay, replayReady, index, sub],
   );
 
   /** A load is running and there is nothing trustworthy to show yet. */
@@ -187,21 +242,27 @@ export function UmpPanel({
    *  bar is forming, else the closed candle's. */
   const replayCursorTs = useMemo(() => {
     const cs = fetched?.candles ?? [];
-    if (cs.length === 0) return null;
-    if (fetched && sub > 0) {
+    if (!fetched || cs.length === 0) return null;
+    if (sub > 0) {
       const f = formingBar(fetched, index + 1, sub);
       if (f) return f.lastSubTs;
     }
-    return cs[Math.min(index, cs.length - 1)]?.ts ?? null;
+    // A CLOSED candle is known through its LAST minute — show that, not the
+    // candle's start. Showing the start made the 5th minute of every 5-minute
+    // candle vanish and the clock step backwards: 09:43 → 09:40 → 09:45
+    // (reported 2026-09-23). Now: 09:40 41 42 43 44 45.
+    const i = Math.min(index, cs.length - 1);
+    const subs = subsFor(fetched, i);
+    return subs.length ? subs[subs.length - 1].ts : cs[i]?.ts ?? null;
   }, [fetched, index, sub]);
 
   // The forming bar during replay, applied incrementally by the chart exactly
   // as the live one is. Null when sitting on a closed candle.
   const replayBar = useMemo(() => {
-    if (!fetched || !replay || sub <= 0) return null;
+    if (!fetched || !replayReady || sub <= 0) return null;
     const f = formingBar(fetched, index + 1, sub);
     return f ? { ts: f.ts, o: f.o, h: f.h, l: f.l, c: f.c } : null;
-  }, [fetched, replay, index, sub]);
+  }, [fetched, replayReady, index, sub]);
 
   // Request-sequence guard: a context change fires two overlapping fetches
   // (the reset effect + the load effect); without this the STALE response
@@ -212,6 +273,7 @@ export function UmpPanel({
   // the panel blinks every 30 seconds over data that is already correct.
   const load = useCallback(async (opts?: { background?: boolean }) => {
     const seq = ++loadSeq.current;
+    const forKey = replay ? `replay:${replay.date}:${interval}` : "live";
     if (!opts?.background) setLoading(true);
     try {
       const res = await algoApi.umpEval({
@@ -230,6 +292,7 @@ export function UmpPanel({
       });
       if (seq !== loadSeq.current) return;
       setFetched(res);
+      setFetchedFor(forKey);
       setError(null);
     } catch (e) {
       if (seq !== loadSeq.current) return;
@@ -279,17 +342,19 @@ export function UmpPanel({
   // Seed the playhead once the replay fetch lands (start / day step /
   // interval switch each leave the wanted instant in seekToRef).
   useEffect(() => {
-    if (!fetched || !replay) return;
+    if (!fetched || !replayReady) return;
     const total = fetched.candles?.length ?? 0;
     totalRef.current = total;
     const want = seekToRef.current;
     if (want) {
       seekToRef.current = null;
-      setIndex(indexAtOrAfter(fetched.candles ?? [], want));
+      const pos = seekPosition(fetched, want);
+      setIndex(pos.index);
+      setSub(pos.sub);
     } else {
       setIndex((i) => Math.min(i, Math.max(0, total - 1)));
     }
-  }, [fetched, replay]);
+  }, [fetched, replayReady]);
 
   // rAF playback loop — speed = display bars per second.
   const playRef = useRef({ playing, speed });
@@ -374,7 +439,7 @@ export function UmpPanel({
     if (replay && fetched?.candles?.length) {
       // Re-map the playhead by timestamp after the refetch.
       const cur = fetched.candles[Math.min(index, fetched.candles.length - 1)];
-      seekToRef.current = cur.ts;
+      seekToRef.current = replayCursorTs ?? cur.ts;
       setPlaying(false);
     }
     setInterval_(v);
@@ -484,21 +549,27 @@ export function UmpPanel({
                     ? "bg-pe/15 text-pe"
                     : data.strike_source === "manual"
                       ? "bg-accent/15 text-accent"
-                      : "bg-amber-500/15 text-amber-300"
+                      : data.strike_source === "position"
+                        ? "bg-sky-500/15 text-sky-300"
+                        : "bg-amber-500/15 text-amber-300"
                 }`}
                 title={
                   data.strike_source === "band"
                     ? "Strike = the zone's premium-band pick (what the orchestrator trades)"
                     : data.strike_source === "manual"
                       ? "Strike chosen manually"
-                      : "No strike currently sits inside this zone's premium band — showing the ATM contract as a fallback"
+                      : data.strike_source === "position"
+                        ? "Strike = the contract the engine is trading right now — the chart stays on it until the trade closes"
+                        : "No strike currently sits inside this zone's premium band — showing the ATM contract as a fallback"
                 }
               >
                 {data.strike_source === "band"
                   ? "BAND"
                   : data.strike_source === "manual"
                     ? "MANUAL"
-                    : "ATM fallback"}
+                    : data.strike_source === "position"
+                      ? "IN TRADE"
+                      : "ATM fallback"}
               </span>
               {data.candidates_as_of && (
                 <span
@@ -587,7 +658,12 @@ export function UmpPanel({
             )}
           </>
         )}
-        {replay && fetched && (
+        {replay && !replayReady && (
+          <div className="w-full text-[11px] text-muted">
+            Loading the replay… the controls appear once the data for {replay.date} has arrived.
+          </div>
+        )}
+        {replay && fetched && replayReady && (
           <div className="w-full">
             <ReplayController
               playing={playing}
@@ -617,6 +693,15 @@ export function UmpPanel({
         )}
       </div>
 
+      {liveCandle && (
+        <div
+          className={`text-[10.5px] px-1 ${liveCandle.on ? "text-pe" : "text-amber-300"}`}
+          title="The moving (forming) candle comes from the live stream; closed candles come from the 30-second refresh."
+        >
+          {liveCandle.on ? "● " : "▲ "}
+          {liveCandle.text}
+        </div>
+      )}
       {/* Chart with levels + events */}
       {data && (
         <UmpTvChart

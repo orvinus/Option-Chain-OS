@@ -240,6 +240,27 @@ class OIChangePair:
     strike_min: int
     strike_max: int
     spot: Optional[float]
+    # The SAME series in whole OI units (7 decimals of a crore), for the
+    # Multi-TF engine only. ``*_change_cr`` above is rounded to 0.01 Cr
+    # (100,000 OI) — right for the OI Structure engine and its reference, but
+    # it zeroed every 1m/3m Multi-TF change under 50,000 and forced those
+    # timeframes Neutral in real decisions (reported 2026-09-23). Empty on
+    # pairs built elsewhere; ``mtf_input`` falls back to the rounded series.
+    call_change_full_cr: list[float] = field(default_factory=list)
+    put_change_full_cr: list[float] = field(default_factory=list)
+
+
+def whole_units_cr(v: float) -> float:
+    """OI Δ in crores, rounded to whole OI units (1 unit = 1e-7 Cr) — full
+    precision without float residue, so a real zero stays exactly zero."""
+    return round(v * 1e7) / 1e7
+
+
+def mtf_input(pair: "OIChangePair") -> tuple[list[float], list[float]]:
+    """The series the Multi-TF engine evaluates: whole units when present."""
+    if pair.call_change_full_cr and pair.put_change_full_cr:
+        return pair.call_change_full_cr, pair.put_change_full_cr
+    return pair.call_change_cr, pair.put_change_cr
 
 
 async def _resolve_strike_basket(
@@ -304,6 +325,8 @@ def oi_change_pair_from_points(
     timestamps: list[str] = []
     call_vals: list[float] = []
     put_vals: list[float] = []
+    call_full: list[float] = []
+    put_full: list[float] = []
     base_call: Optional[int] = None
     base_put: Optional[int] = None
     for pt in points:
@@ -318,6 +341,8 @@ def oi_change_pair_from_points(
         timestamps.append(pt.ts)
         call_vals.append(round((pt.total_call_oi - base_call) / _CRORE * 100) / 100)
         put_vals.append(round((pt.total_put_oi - (base_put or 0)) / _CRORE * 100) / 100)
+        call_full.append(whole_units_cr((pt.total_call_oi - base_call) / _CRORE))
+        put_full.append(whole_units_cr((pt.total_put_oi - (base_put or 0)) / _CRORE))
 
     if not timestamps:
         return None
@@ -328,6 +353,8 @@ def oi_change_pair_from_points(
         strike_min=strike_min,
         strike_max=strike_max,
         spot=spot,
+        call_change_full_cr=call_full,
+        put_change_full_cr=put_full,
     )
 
 

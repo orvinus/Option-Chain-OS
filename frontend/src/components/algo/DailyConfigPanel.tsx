@@ -81,6 +81,11 @@ interface Props {
 
 const WD_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/** Zone "Strikes" ceiling = one chain side at the widest data window (±60).
+ *  Mirrors ZoneConfig.strike_scan_count's le=121 (was a hard 10 until
+ *  2026-09-23). */
+const STRIKE_SCAN_MAX = 121;
+
 function expiryWithDay(iso: string): string {
   const dt = new Date(`${iso}T00:00:00`);
   return Number.isNaN(dt.getTime()) ? iso : `${iso} · ${WD_SHORT[dt.getDay()]}`;
@@ -144,10 +149,12 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
             MASTER KILL SWITCH — engine-wide {g.master_kill ? "· KILLED" : "· trading permitted"}
           </div>
           <div className="text-[11px] text-muted">
-            Overrides every day/zone switch below. When killed, no trade is evaluated or
-            executed regardless of any other setting, <b>and an open position is squared
-            off at market on the next evaluated minute</b>. Day and zone kills only stop
-            new entries — they never close an open trade.
+            Overrides every day/zone switch below. <b>ON: a running trade is exited at
+            market the moment you save</b>, and no new trade is taken for as long as it
+            stays ON. <b>OFF: trading resumes</b> from the next minute. Day and zone kills
+            below work the same way in their own scope — a day kill exits today&apos;s
+            running trade (including one carried overnight), a zone kill exits the trade
+            that zone opened.
           </div>
         </div>
       </div>
@@ -201,7 +208,7 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                         <td key={z} className="text-center">
                           <button
                             type="button"
-                            title={`${WEEKDAY_LABEL[w]} ${z}: ${killed ? "killed" : "live"}`}
+                            title={`${WEEKDAY_LABEL[w]} ${z}: ${killed ? "killed" : "live"} — ON exits the trade this zone opened and blocks new ones; OFF resumes`}
                             onClick={() =>
                               mutate((doc) => {
                                 const zc = doc.days[w].zones[z];
@@ -218,7 +225,7 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                     <td className="text-center">
                       <button
                         type="button"
-                        title={`${WEEKDAY_LABEL[w]}: ${dc.day_kill ? "day killed" : "live"}`}
+                        title={`${WEEKDAY_LABEL[w]}: ${dc.day_kill ? "day killed" : "live"} — ON exits the running trade and blocks new ones; OFF resumes`}
                         onClick={() => mutate((doc) => void (doc.days[w].day_kill = !doc.days[w].day_kill))}
                         className={`inline-block w-3 h-3 rounded-full ${
                           dc.day_kill ? "bg-ce" : "bg-pe"
@@ -401,6 +408,7 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                 on={d.day_kill}
                 danger
                 onChange={(v) => mutate((doc) => void (doc.days[day].day_kill = v))}
+                title="Day kill — ON exits the running trade (including one carried overnight) and blocks new entries all day; OFF lets it trade again"
               />
             </div>
             {ZONE_IDS.map((zid) => {
@@ -435,16 +443,26 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                     value={z.premium_max}
                     onChange={(v) => mutateZone(mutate, day, zid, (zc) => void (zc.premium_max = v))}
                   />
-                  <div title="Multi-strike hunting: the N in-band strikes nearest the band midpoint each hunt in parallel — the first valid entry wins. 1 = single-strike (original behaviour).">
+                  <div
+                    title={
+                      "Multi-strike hunting: the N in-band strikes nearest the band midpoint each hunt in parallel — the first valid entry wins. 1 = single-strike (original behaviour). " +
+                      `Up to ${STRIKE_SCAN_MAX}; this day collects ${2 * (d.data_strike_window ?? 11) + 1} strikes per side (Data strikes ATM ±${d.data_strike_window ?? 11}), so that is the most that can actually hunt.`
+                    }
+                  >
                     <NumField
                       label="Strikes"
                       value={z.strike_scan_count ?? 1}
                       onChange={(v) =>
                         mutateZone(mutate, day, zid, (zc) =>
-                          void (zc.strike_scan_count = Math.max(1, Math.min(10, Math.round(v))))
+                          void (zc.strike_scan_count = Math.max(1, Math.min(STRIKE_SCAN_MAX, Math.round(v))))
                         )
                       }
                     />
+                    {(z.strike_scan_count ?? 1) > 2 * (d.data_strike_window ?? 11) + 1 && (
+                      <div className="text-[9.5px] text-amber-300 leading-tight mt-0.5">
+                        only {2 * (d.data_strike_window ?? 11) + 1} collected
+                      </div>
+                    )}
                   </div>
                   <NumField
                     label="Max Trades"
@@ -490,7 +508,7 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                       onChange={(v) =>
                         mutateZone(mutate, day, zid, (zc) => void (zc.zone_kill = !v))
                       }
-                      title="Zone kill switch — disables this zone entirely for the day"
+                      title="Zone kill — ON exits the running trade this zone opened and blocks new entries in it; OFF lets it trade again"
                     />
                   </div>
                 </div>

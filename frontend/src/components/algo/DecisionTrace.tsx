@@ -13,6 +13,7 @@ import { algoApi } from "../../api/algoRest";
 import type { DecisionIndexRow, DecisionRow } from "../../types/algo";
 import { INDICATOR_LABEL } from "../../types/algo";
 import { Card } from "./controls";
+import { signedCompact } from "../../utils/num";
 
 const DECISION_CLS: Record<string, string> = {
   accept: "text-pe",
@@ -23,6 +24,11 @@ const DECISION_CLS: Record<string, string> = {
 
 function hhmm(ts: string): string {
   return ts.slice(11, 16);
+}
+
+/** Multi-TF crores shown as OI, like the Multi-TF page (2026-09-23). */
+function oiUnits(v: unknown): string {
+  return typeof v === "number" && Number.isFinite(v) ? signedCompact(Math.round(v * 1e7)) : "—";
 }
 
 function num(v: unknown, d = 2): string {
@@ -79,7 +85,7 @@ function ReadingDetail({ name, detail }: { name: string; detail: Record<string, 
           <table className="text-[10px] min-w-[420px]">
             <thead>
               <tr className="text-muted text-left">
-                {["TF", "ΔCE Cr", "ΔPE Cr", "Ratio", "Ratio Side", "Lowest-OI Side (filter)", "signs"].map((h) => (
+                {["TF", "ΔCE OI", "ΔPE OI", "Ratio", "Ratio Side", "Lowest-OI Side (filter)", "signs"].map((h) => (
                   <th key={h} className="pr-2 font-medium">{h}</th>
                 ))}
               </tr>
@@ -88,8 +94,8 @@ function ReadingDetail({ name, detail }: { name: string; detail: Record<string, 
               {rows.map((r, i) => (
                 <tr key={i}>
                   <td className="pr-2 font-mono">{String(r.timeframe)}</td>
-                  <td className="pr-2 font-mono">{num(r.call_delta_cr)}</td>
-                  <td className="pr-2 font-mono">{num(r.put_delta_cr)}</td>
+                  <td className="pr-2 font-mono">{oiUnits(r.call_delta_cr)}</td>
+                  <td className="pr-2 font-mono">{oiUnits(r.put_delta_cr)}</td>
                   <td className="pr-2 font-mono">{String(r.text)}</td>
                   <td className={`pr-2 font-bold ${r.side === "Call" ? "text-pe" : r.side === "Put" ? "text-ce" : "text-muted"}`}>{String(r.side)}</td>
                   <td className={`pr-2 ${r.lowest_side === "Call" ? "text-pe" : r.lowest_side === "Put" ? "text-ce" : "text-muted"}`}>{String(r.lowest_side)}</td>
