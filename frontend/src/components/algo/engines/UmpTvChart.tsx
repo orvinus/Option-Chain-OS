@@ -165,6 +165,8 @@ export function UmpTvChart({
   const lastBucketRef = useRef<number>(0);
   const prevLenRef = useRef<number>(0);
   const liveBarRef = useRef<UTCTimestamp | null>(null);
+  const liveBarAtRef = useRef<number>(0);
+  const lastBarSigRef = useRef<string>("");
   const [toolbarSlot, setToolbarSlot] = useState<HTMLElement | null>(null);
   const drawAnchor = useMemo(
     () => lwcAnchor(() => chartRef.current, () => candlesRef.current, { timeOfDay: false }),
@@ -339,6 +341,31 @@ export function UmpTvChart({
       series.setData(candles);
       prevLenRef.current = candles.length;
       if (wasFollowing) chart.timeScale().scrollToPosition(6, false);
+      const lb = candles[candles.length - 1];
+      lastBarSigRef.current = lb ? `${lb.time}|${lb.open}|${lb.high}|${lb.low}|${lb.close}` : "";
+    } else if (candles.length > 0) {
+      // Same candles, but the LAST one moved: the 30-second refresh carries
+      // the still-forming bucket. The key above ignores prices, so this update
+      // used to be dropped — and whenever the stream's live candle was
+      // unavailable the chart sat still for a whole 5-minute candle
+      // (reported 2026-09-23). Applied in place; skipped only while a FRESH
+      // stream bar already covers this candle (it is newer than the refresh).
+      const lb = candles[candles.length - 1];
+      const sig = `${lb.time}|${lb.open}|${lb.high}|${lb.low}|${lb.close}`;
+      if (sig !== lastBarSigRef.current) {
+        lastBarSigRef.current = sig;
+        const streamCovers =
+          liveBarRef.current != null &&
+          (liveBarRef.current as number) >= (lb.time as number) &&
+          performance.now() - liveBarAtRef.current < 15_000;
+        if (!streamCovers) {
+          try {
+            series.update(lb);
+          } catch {
+            /* a newer bar is already on the series — the next setData corrects */
+          }
+        }
+      }
     }
     if (bucketSec !== lastBucketRef.current) {
       // Interval switch: seconds on the axis for sub-minute candles, and a
@@ -501,6 +528,7 @@ export function UmpTvChart({
     try {
       series.update({ time: t, open: liveBar.o, high: liveBar.h, low: liveBar.l, close: liveBar.c });
       liveBarRef.current = t;
+      liveBarAtRef.current = performance.now();
     } catch {
       /* a stale bar during a contract switch — the next setData corrects it */
     }

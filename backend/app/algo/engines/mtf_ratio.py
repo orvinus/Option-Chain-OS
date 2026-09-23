@@ -253,9 +253,12 @@ def rows_from_cumulative_series(
     trailing Δ over m minutes = series[-1] − series[-1−m]; clamped to
     since-open when fewer than m closed minutes exist. full_day = series[-1].
 
-    Every row is rounded to 2dp IDENTICALLY (fixed 2026-08-18: full_day and
+    Every row is rounded IDENTICALLY (fixed 2026-08-18: full_day and
     history-clamped rows used to pass through unrounded, so a rule comparing
-    e.g. 1m against full_day saw two different precisions).
+    e.g. 1m against full_day saw two different precisions) — to whole OI
+    units since 2026-09-23. It used to be 0.01 Cr (100,000 OI), which zeroed
+    every 1m/3m change under 50,000 and forced those timeframes Neutral, so
+    Algo Config disagreed with the Multi-TF page on the same data.
     """
     minutes_of = {
         "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15,
@@ -263,7 +266,8 @@ def rows_from_cumulative_series(
     }
 
     def _r2(v: float) -> float:
-        return round(v * 100) / 100
+        # Whole OI units (1e-7 Cr): exact, and a true zero stays zero.
+        return round(v * 1e7) / 1e7
 
     out: dict[str, tuple[float, float]] = {}
     if not call_series or not put_series:

@@ -50,6 +50,9 @@ class SaveRequest(BaseModel):
 class SaveResponse(BaseModel):
     version: int
     warnings: list[str]
+    # Set when this save switched a kill ON over an open trade and the trade
+    # was squared off immediately (trade_id, ledger, closed, exit_reason).
+    kill_exit: Optional[dict[str, Any]] = None
 
 
 class RestoreRequest(BaseModel):
@@ -142,6 +145,29 @@ async def _live_version_now() -> Optional[int]:
     return int(v) if v is not None else None
 
 
+async def _kill_exit_now() -> Optional[dict[str, Any]]:
+    """Kill-switch rule (user, 2026-09-23): a kill switched ON while a trade
+    runs exits that trade NOW -- not at the orchestrator's next minute. Runs
+    after Save AND Restore (restoring a version with a kill ON is switching it
+    on). Session hours only; outside them the next session's first pass exits
+    it. Never fails the save: the orchestrator's per-minute kill check is the
+    backstop, and it also retries a live sell the broker rejected."""
+    from ..algo.orchestrator import get_orchestrator
+    from ..core.time_utils import is_nse_regular_session_open, now_ist
+
+    orch = get_orchestrator()
+    if orch is None or orch.position is None or not is_nse_regular_session_open():
+        return None
+    try:
+        result = await orch.kill_square_off(now_ist().replace(tzinfo=None))
+    except Exception as e:  # noqa: BLE001 -- the save already succeeded
+        log.warning("algo.config.kill_exit_failed", error=str(e))
+        return None
+    if result is None:
+        return None
+    return {k: result.get(k) for k in ("trade_id", "ledger", "closed", "exit_reason")}
+
+
 @router.post("/config", response_model=SaveResponse)
 async def save_config(
     body: SaveRequest, ident: AdminIdentity = Depends(require_editor)
@@ -167,15 +193,18 @@ async def save_config(
         )
     except ConfigSaveError as e:
         raise HTTPException(422, {"errors": e.errors}) from e
-    return SaveResponse(version=cv.version, warnings=warnings)
+    return SaveResponse(
+        version=cv.version, warnings=warnings, kill_exit=await _kill_exit_now()
+    )
 
 
 @router.get("/config/versions")
 async def config_versions(
-    limit: int = Query(default=25, ge=1, le=200),
+    limit: int = Query(default=25, ge=1, le=500),
+    before: Optional[int] = Query(default=None, description="page: versions older than this"),
     _: AdminIdentity = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    return await get_config_store().history(limit)
+    return await get_config_store().history(limit, before)
 
 
 @router.get("/config/versions/{version}", response_model=ConfigEnvelope)
@@ -208,7 +237,9 @@ async def restore_config(
         )
     except ConfigSaveError as e:
         raise HTTPException(422, {"errors": e.errors}) from e
-    return SaveResponse(version=cv.version, warnings=warnings)
+    return SaveResponse(
+        version=cv.version, warnings=warnings, kill_exit=await _kill_exit_now()
+    )
 
 
 @router.get("/config/defaults")
@@ -278,6 +309,11 @@ async def audit_log(
     since: Optional[str] = Query(default=None),
     until: Optional[str] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
+    before_ts: Optional[str] = Query(default=None, description="page: older than this row's ts"),
+    before_id: Optional[int] = Query(default=None, description="page: older than this row's id"),
     _: AdminIdentity = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    return await fetch_audit(username=username, since=since, until=until, limit=limit)
+    return await fetch_audit(
+        username=username, since=since, until=until, limit=limit,
+        before_ts=before_ts, before_id=before_id,
+    )

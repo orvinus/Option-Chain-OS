@@ -268,9 +268,10 @@ export const algoApi = {
       // the live version moved on since this draft was loaded.
       body: { config, note, base_version: baseVersion ?? undefined },
     }),
-  versions: (limit = 25) =>
+  /** Newest-first; ``before`` pages backwards (versions older than it). */
+  versions: (limit = 25, before?: number) =>
     request<ConfigVersionMeta[]>("GET", "/api/algo/config/versions", {
-      params: { limit: String(limit) },
+      params: { limit: String(limit), before: before != null ? String(before) : undefined },
     }),
   version: (v: number) => request<ConfigEnvelope>("GET", `/api/algo/config/versions/${v}`),
   restore: (v: number) =>
@@ -553,13 +554,19 @@ export const algoApi = {
   fetchExportRows,
 
   // ── audit ──
-  audit: (opts?: { username?: string; since?: string; until?: string; limit?: number }) =>
+  /** Newest-first; ``before`` (the oldest row already shown) pages backwards. */
+  audit: (opts?: {
+    username?: string; since?: string; until?: string; limit?: number;
+    before?: { ts: string; id: number };
+  }) =>
     request<AuditRow[]>("GET", "/api/algo/audit", {
       params: {
         username: opts?.username,
         since: opts?.since,
         until: opts?.until,
         limit: opts?.limit != null ? String(opts.limit) : undefined,
+        before_ts: opts?.before?.ts,
+        before_id: opts?.before != null ? String(opts.before.id) : undefined,
       },
     }),
 };

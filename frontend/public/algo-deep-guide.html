@@ -193,11 +193,18 @@ the latest config is reloaded so you can re-apply your edits on top. Nothing is 
 <h3>6.1 Master Kill Switch</h3>
 <p>A red-bordered panel at the very top.</p>
 <div class="card danger">
-<b>What it really does</b> (verbatim from the screen): <i>"Overrides every day/zone switch below. When killed,
-no trade is evaluated or executed regardless of any other setting, <b>and an open position is squared off at
-market on the next evaluated minute</b>. Day and zone kills only stop new entries — they never close an open trade."</i>
-<p style="margin:8px 0 0">In plain terms: <b>Master Kill is the only switch that closes a trade you already have.</b>
-Day kills and zone kills just stop new ones starting.</p>
+<b>The rule for every kill switch</b> — Master, Day and Zone all work the same way:
+<ol style="margin:6px 0 0 18px;padding:0">
+<li><b>Switch ON while a trade is running → that trade is exited at market the moment you save.</b>
+If the broker rejects the sell, the engine keeps retrying every minute and sends a critical alert.</li>
+<li><b>For as long as it stays ON → no new trade is taken.</b></li>
+<li><b>Switch OFF → trading resumes</b> from the next minute. No restart needed.</li>
+</ol>
+<p style="margin:8px 0 0">What each one covers: <b>Master Kill</b> — everything. <b>Day kill</b> — today's
+running trade (including one carried in from yesterday) and every zone today. <b>Zone kill</b> — the trade that
+zone opened, and new entries in that zone.</p>
+<p style="margin:8px 0 0">The trade's exit reason shows as <b>Master Kill</b>, <b>Day Kill</b> or <b>Zone Kill</b>
+in the trade list and the Telegram alert, and the save message tells you which trade was exited.</p>
 </div>
 
 <h3>6.2 Overnight Carry</h3>
@@ -239,7 +246,7 @@ out the lots from the live price. And you can only ever hold <b>one position at 
 <table>
 <tr><td class="lbl">Index for {Day}</td><td>NIFTY · SENSEX · BANKNIFTY · FINNIFTY · MIDCPNIFTY. Each weekday can trade a different index.</td></tr>
 <tr><td class="lbl">Data strikes ATM ±</td><td>Default <b>11</b>, allowed 1–60. How many strikes each side of the money the feed <i>collects</i>. Takes effect about a minute after saving. <b>Careful:</b> the data plan caps at roughly 50 instruments, so beyond ±12 the outer strikes are silently trimmed (you get a warning on save).</td></tr>
-<tr><td class="lbl">Day kill</td><td>Red switch. Stops this weekday trading entirely.</td></tr>
+<tr><td class="lbl">Day kill</td><td>Red switch. ON exits the running trade (including one carried overnight) and stops this weekday trading entirely. OFF lets it trade again.</td></tr>
 </table>
 
 <p>Then one row per zone:</p>
@@ -250,7 +257,7 @@ out the lots from the live price. And you can only ever hold <b>one position at 
 <tr><td class="lbl">Strikes</td><td>How many in-band strikes to hunt <b>in parallel</b>, nearest the band middle first. First valid entry wins. <b>1</b> = original single-strike behaviour. Allowed 1–10.</td><td>3</td></tr>
 <tr><td class="lbl">Max Trades</td><td>How many trades this zone may take today.</td><td>2 / 2 / 1</td></tr>
 <tr><td class="lbl">End-Exit</td><td>Only on the last zone. Force-closes an open trade when that zone's End candle closes. Shows "<b>End-Exit ignored</b>" in amber and is disabled while Overnight Carry is on. Other zones show a grey dash.</td><td>on</td></tr>
-<tr><td class="lbl">Killed / Live</td><td><b>Inverted switch</b> — green means <i>live</i>. Turning it off kills the zone.</td><td>live</td></tr>
+<tr><td class="lbl">Killed / Live</td><td><b>Inverted switch</b> — green means <i>live</i>. Turning it off kills the zone: the trade this zone opened is exited, and no new entry is taken in it until you turn it back on.</td><td>live</td></tr>
 </table>
 
 <h3>6.7 Risk &amp; Alerts</h3>
@@ -555,7 +562,7 @@ End-Exit) closes it."</i></div>
 <tr><td class="lbl">P3</td><td>Target Hit</td><td>The profit objective.</td></tr>
 <tr><td class="lbl">P4</td><td>Base SL</td><td>The original stop. Automatically disabled once a trail sits above it.</td></tr>
 </table>
-<p class="muted">When a trade is live you also see the System A quarter rungs (Q1/Q2/Q3) with the current trail highlighted in amber.</p>
+<p class="muted">Only while a trade is open you also see the System A quarter rungs (Q1/Q2/Q3) and the NB target, with the current trail highlighted in amber. With no trade open they are not drawn.</p>
 
 <h3>11.5 Zone Settings — the 26 Pine inputs</h3>
 <p class="muted">Hint on screen: <i>"all 26 Pine inputs + entry timeframe &amp; per-kind switches,
@@ -621,6 +628,7 @@ broker. Same engines, same rules, same fees — only the execution is pretend. I
 
 <h3>12.2 Simulated Order Execution</h3>
 <table>
+<tr><td class="lbl">Entry price</td><td>The <b>close of the minute that triggered the entry</b>, plus slippage. The engine's signal fires when a candle <i>touches</i> a level (say ₹195), but the system only knows about that candle once it closes — and the close (say ₹198) is the earliest price a real order can get. The chart marker still shows the ₹195 signal; the trade list shows the real ₹198 entry. Paper, backtest and live all use this rule.</td></tr>
 <tr><td class="lbl">Slippage (%)</td><td>Default 0.5. Always applied <b>against</b> you, as in real life.</td></tr>
 <tr><td class="lbl">Simulated latency (ms)</td><td>Default 250, capped at 2000. In live paper trading the simulator <b>really waits</b> this long before committing the fill.</td></tr>
 <tr><td class="lbl">Fill source</td><td>Read-only: "Live LTP (OI Algo feed)". <i>The feed stores last-traded-price only, so bid/ask mid cannot be simulated.</i></td></tr>
@@ -706,7 +714,9 @@ you press the button — nobody can read it back out of the system, ever.</div>
 </table>
 
 <h3>15.3 Version History &amp; Backups</h3>
-<p>The last 25 versions with timestamp, who saved, and their note. <b>Restore</b> asks
+<p>Every version back to <b>v1</b>, newest first, with timestamp, who saved, and their note. The newest 100
+load first; <b>Load older versions</b> fetches the next 100 until the footer reads "back to v1". The Full Audit Log
+below works the same way (200 at a time) back to its first entry. <b>Restore</b> asks
 "<i>Restore configuration v41? It is re-saved as a new version.</i>"</p>
 <div class="card ok">Restoring never rewinds history — the old version is re-saved as a <i>new</i> one. You can
 always go forward again. This is your undo button for any change, however old.</div>

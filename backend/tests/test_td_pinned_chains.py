@@ -1,9 +1,11 @@
 """Pinned chains: NIFTY and SENSEX streamed on one TrueData socket.
 
-The dashboard's chain keeps REFERENCE/ACTIVE priority; every pinned chain is
-ELASTIC, so a small plan (the 50-symbol trial) keeps the viewed chain exactly as
-before and a larger plan streams every pinned chain in full. Each chain's rows
-carry ITS OWN index as the underlying.
+Every chain's index is REFERENCE (never evicted). The TRADING chains
+(TRUEDATA_PINNED_SYMBOLS) put their strikes at ACTIVE; a chain that is only
+VIEWED on the dashboard, and is not a trading symbol, puts its strikes at
+ELASTIC — so it can never squeeze a trading chain (2026-09-23; it used to be
+the other way round). A plan large enough (100+) streams every trading chain
+in full. Each chain's rows carry ITS OWN index as the underlying.
 
 Runnable without pytest:  PYTHONPATH=. python tests/test_td_pinned_chains.py
 """
@@ -91,6 +93,33 @@ def test_trial_plan_keeps_the_viewed_chain_whole() -> None:
     assert sensex[0].vendor_symbol == ident.index_ws_name("SENSEX")
     nifty_prios = {s.priority for s in f._budget.desired() if s.symbol == "NIFTY"}
     assert nifty_prios == {Priority.REFERENCE, Priority.ACTIVE}
+
+
+def test_100_symbol_plan_streams_both_trading_chains_in_full() -> None:
+    """The plan bought 2026-09-23: 98 usable slots hold NIFTY + SENSEX at
+    ±11 strikes (47 + 47) with 4 to spare."""
+    f, _ = _feed(capacity=100)
+    _plan(f, NIFTY_CHAIN, {"SENSEX": SENSEX_CHAIN})
+    assert _symbols(f) == {"NIFTY": 47, "SENSEX": 47}
+
+
+BANK_CHAIN = _chain("BANKNIFTY", EXP_N, 52000, 100, 11, "NSE")   # 46 contracts
+
+
+def test_viewed_non_trading_chain_never_squeezes_a_trading_chain() -> None:
+    """2026-09-23: viewing BANKNIFTY on the dashboard used to outrank the
+    trading chains and push SENSEX out on its own trading day. Now the
+    trading chains stay whole and the viewed chain takes what is left — its
+    index always, so its ATM still resolves."""
+    f, _ = _feed(active="BANKNIFTY", capacity=100)
+    f._spot_by_symbol.update({"NIFTY": 23300.0, "SENSEX": 74500.0, "BANKNIFTY": 52000.0})
+    _plan(f, BANK_CHAIN, {"NIFTY": NIFTY_CHAIN, "SENSEX": SENSEX_CHAIN})
+    got = _symbols(f)
+    assert got["NIFTY"] == 47 and got["SENSEX"] == 47, got
+    assert got["BANKNIFTY"] == 98 - 94, got
+    kept = [s for s in f._budget.desired() if s.symbol == "BANKNIFTY"]
+    assert any(s.moneyness_rank == -1 for s in kept), "the viewed chain keeps its index"
+    assert {s.priority for s in kept if s.moneyness_rank >= 0} == {Priority.ELASTIC}
 
 
 def test_paid_plan_streams_both_chains_in_full() -> None:

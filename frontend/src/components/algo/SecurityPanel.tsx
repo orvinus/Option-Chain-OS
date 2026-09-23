@@ -15,7 +15,42 @@ import type {
   AuditRow,
   ConfigVersionMeta,
 } from "../../types/algo";
+import { killExitNote } from "../../types/algo";
 import { CalcNote, Card, ToggleLine } from "./controls";
+
+const VERSION_PAGE = 100;
+const AUDIT_PAGE = 200;
+
+/** "Showing N · Load older" until the first row of the history is on screen. */
+function HistoryFooter(p: {
+  shown: number;
+  noun: string;
+  done: boolean;
+  busy: boolean;
+  startLabel: string;
+  onMore: () => void;
+}) {
+  if (p.shown === 0) return null;
+  const plural = p.noun === "entry" ? "entries" : `${p.noun}s`;
+  return (
+    <div className="flex items-center gap-2 pt-2 text-[11px] text-muted">
+      <span>
+        Showing {p.shown} {p.shown === 1 ? p.noun : plural}
+        {p.done && p.startLabel ? ` · ${p.startLabel}` : ""}
+      </span>
+      {!p.done && (
+        <button
+          type="button"
+          className="pill text-[11px] ml-auto"
+          disabled={p.busy}
+          onClick={p.onMore}
+        >
+          {p.busy ? "Loading…" : `Load older ${plural}`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function SecurityPanel(props: {
   identity: AlgoIdentity;
@@ -26,6 +61,12 @@ export function SecurityPanel(props: {
 }) {
   const [versions, setVersions] = useState<ConfigVersionMeta[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
+  // Every version and every audit row back to the very first one is reachable
+  // (2026-09-23: the page used to stop at the newest 25 / 200). A short page
+  // means the start of the history was reached.
+  const [versionsDone, setVersionsDone] = useState(false);
+  const [auditDone, setAuditDone] = useState(false);
+  const [paging, setPaging] = useState<"versions" | "audit" | null>(null);
   const [userFilter, setUserFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyRestore, setBusyRestore] = useState<number | null>(null);
@@ -33,16 +74,52 @@ export function SecurityPanel(props: {
   const load = useCallback(async () => {
     try {
       const [v, a] = await Promise.all([
-        algoApi.versions(25),
-        algoApi.audit({ username: userFilter || undefined, limit: 200 }),
+        algoApi.versions(VERSION_PAGE),
+        algoApi.audit({ username: userFilter || undefined, limit: AUDIT_PAGE }),
       ]);
       setVersions(v);
       setAudit(a);
+      setVersionsDone(v.length < VERSION_PAGE);
+      setAuditDone(a.length < AUDIT_PAGE);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [userFilter]);
+
+  const loadOlderVersions = useCallback(async () => {
+    const oldest = versions[versions.length - 1];
+    if (!oldest) return;
+    setPaging("versions");
+    try {
+      const more = await algoApi.versions(VERSION_PAGE, oldest.version);
+      setVersions((cur) => [...cur, ...more]);
+      setVersionsDone(more.length < VERSION_PAGE);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPaging(null);
+    }
+  }, [versions]);
+
+  const loadOlderAudit = useCallback(async () => {
+    const oldest = audit[audit.length - 1];
+    if (!oldest) return;
+    setPaging("audit");
+    try {
+      const more = await algoApi.audit({
+        username: userFilter || undefined,
+        limit: AUDIT_PAGE,
+        before: { ts: oldest.ts, id: oldest.id },
+      });
+      setAudit((cur) => [...cur, ...more]);
+      setAuditDone(more.length < AUDIT_PAGE);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPaging(null);
+    }
+  }, [audit, userFilter]);
 
   useEffect(() => {
     void load();
@@ -55,7 +132,9 @@ export function SecurityPanel(props: {
       }
       setBusyRestore(version);
       try {
-        await algoApi.restore(version);
+        const res = await algoApi.restore(version);
+        const note = killExitNote(res);
+        if (note) window.alert(`Restored v${version}${note}`);
         props.onRestored();
         await load();
       } catch (e) {
@@ -108,6 +187,7 @@ export function SecurityPanel(props: {
           </div>
         </Card>
         <Card title="Version History & Backups" hint="restore any point — never rewinds the log">
+          <div className="max-h-[26rem] overflow-y-auto flex flex-col">
           {versions.map((v) => (
             <div
               key={v.version}
@@ -130,6 +210,19 @@ export function SecurityPanel(props: {
               </button>
             </div>
           ))}
+          </div>
+          <HistoryFooter
+            shown={versions.length}
+            noun="version"
+            done={versionsDone}
+            busy={paging === "versions"}
+            startLabel={
+              versions.length
+                ? `back to v${versions[versions.length - 1].version}, the first saved version`
+                : ""
+            }
+            onMore={() => void loadOlderVersions()}
+          />
         </Card>
       </div>
 
@@ -176,6 +269,18 @@ export function SecurityPanel(props: {
           ))}
           {audit.length === 0 && <div className="text-xs text-muted">No audit rows yet.</div>}
         </div>
+        <HistoryFooter
+          shown={audit.length}
+          noun="entry"
+          done={auditDone}
+          busy={paging === "audit"}
+          startLabel={
+            audit.length
+              ? `back to the first recorded entry (${new Date(audit[audit.length - 1].ts).toLocaleString()})`
+              : ""
+          }
+          onMore={() => void loadOlderAudit()}
+        />
       </Card>
     </div>
   );

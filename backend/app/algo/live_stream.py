@@ -288,8 +288,10 @@ async def _refresh_oi_readings(scope: AlgoScope, cache: _ScopeCache, zone_cfg) -
         pair = (built.get(zone_cfg.mtf_ratio.strikes_atm_window) or {}).get(name, (None, None))[0]
         try:
             if pair is not None and len(pair.call_change_cr) >= 2:
+                from .series import mtf_input
+
                 rows = mtf_ratio.rows_from_cumulative_series(
-                    pair.call_change_cr, pair.put_change_cr, zone_cfg.mtf_ratio.timeframes
+                    *mtf_input(pair), zone_cfg.mtf_ratio.timeframes
                 )
                 sink["multi_tf"] = {
                     "reading": mtf_ratio.evaluate(rows, zone_cfg.mtf_ratio).reading

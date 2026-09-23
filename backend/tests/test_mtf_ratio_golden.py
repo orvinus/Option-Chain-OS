@@ -166,20 +166,45 @@ def test_rows_from_cumulative_series():
     call = [0.0, 1.0, 1.5, 2.0, 2.2]   # 5 closed minutes
     put = [0.0, -0.5, -0.4, -1.0, -1.4]
     rows = eng.rows_from_cumulative_series(call, put, ["1m", "3m", "1h", "full_day"])
-    assert rows["1m"] == (round((2.2 - 2.0) * 100) / 100, round((-1.4 - -1.0) * 100) / 100)
-    assert rows["3m"] == (round((2.2 - 1.0) * 100) / 100, round((-1.4 - -0.5) * 100) / 100)
+
+    def units(v: float) -> float:          # whole OI units, 1e-7 Cr
+        return round(v * 1e7) / 1e7
+
+    assert rows["1m"] == (units(2.2 - 2.0), units(-1.4 - -1.0))
+    assert rows["3m"] == (units(2.2 - 1.0), units(-1.4 - -0.5))
     assert rows["1h"] == (2.2, -1.4), "window beyond history clamps to since-open"
     assert rows["full_day"] == (2.2, -1.4)
-    # Rounding is UNIFORM (2dp) across trailing, clamped and full_day rows —
+    # Rounding is UNIFORM across trailing, clamped and full_day rows —
     # previously full_day/clamped rows passed through unrounded, so a rule
     # comparing 1m against full_day saw two precisions (fixed 2026-08-18).
-    call2 = [0.123456, 0.987654]
-    put2 = [-0.111111, -0.555555]
+    # Since 2026-09-23 the unit is one whole OI unit, not 0.01 Cr.
+    call2 = [0.12345678, 0.98765432]
+    put2 = [-0.11111111, -0.55555555]
     rows2 = eng.rows_from_cumulative_series(call2, put2, ["1m", "1h", "full_day"])
-    assert rows2["full_day"] == (0.99, -0.56)
-    assert rows2["1h"] == (0.99, -0.56), "clamped row rounds identically"
-    assert rows2["1m"] == (round((0.987654 - 0.123456) * 100) / 100,
-                           round((-0.555555 - -0.111111) * 100) / 100)
+    assert rows2["full_day"] == (0.9876543, -0.5555556)
+    assert rows2["1h"] == (0.9876543, -0.5555556), "clamped row rounds identically"
+    assert rows2["1m"] == (units(0.98765432 - 0.12345678), units(-0.55555555 - -0.11111111))
+
+
+def test_small_one_minute_changes_are_not_zeroed():
+    """2026-09-23 report: at 18 Sep 11:00 the Multi-TF page showed 1m
+    ΔCE −5,980 / ΔPE +7,930 while Algo Config showed 0 / 0 → Neutral,
+    because every row was rounded to 0.01 Cr (100,000 OI)."""
+    call = [0.5507925, 0.5501945]          # Cr; −5,980 OI in the last minute
+    put = [0.4963000, 0.4970930]           # Cr; +7,930 OI in the last minute
+    rows = eng.rows_from_cumulative_series(call, put, ["1m"])
+    c, p = rows["1m"]
+    assert round(c * 1e7) == -5980 and round(p * 1e7) == 7930
+    r = eng.ratio_reading("1m", c, p)
+    assert r.side != "Neutral" and r.call_sign == "Negative" and r.put_sign == "Positive"
+
+
+def test_a_true_zero_stays_zero():
+    """Whole-unit rounding must not leave float residue that reads as a sign."""
+    call = [0.1, 0.2, 0.3]
+    rows = eng.rows_from_cumulative_series(call, [0.3, 0.3, 0.3], ["1m"])
+    assert rows["1m"][1] == 0.0
+    assert eng.ratio_reading("1m", *rows["1m"]).put_sign == "Zero"
 
 
 def test_trace_explains_failures():

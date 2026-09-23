@@ -23,6 +23,7 @@ import type {
   ZoneId,
 } from "../../../types/algo";
 import { CalcNote, Card, NumField, SelectField, Switch } from "../controls";
+import { signedCompact } from "../../../utils/num";
 import { EngineActions } from "./EngineActions";
 import { LoadingBlock } from "../../Loading";
 
@@ -37,9 +38,10 @@ function sideCls(side: string): string {
   return side === "Call" ? "text-pe" : side === "Put" ? "text-ce" : "text-gray-300";
 }
 
+/** Crores → the Multi-TF page's own format (signedCompact of raw OI), so the
+ *  two pages show identical figures for identical data (2026-09-23). */
 function fmtCr(v: number): string {
-  const sign = v > 0 ? "+" : "";
-  return `${sign}${v.toFixed(2)} Cr`;
+  return signedCompact(Math.round(v * 1e7));
 }
 
 interface Props {

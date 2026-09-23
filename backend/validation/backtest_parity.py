@@ -118,6 +118,13 @@ async def parity_for_day(day: date) -> None:
                       f"{tag} timestamps len {len(mine.timestamps)} vs {len(live.timestamps)}")
                 check(mine.call_change_cr == live.call_change_cr, f"{tag} call series")
                 check(mine.put_change_cr == live.put_change_cr, f"{tag} put series")
+                # Multi-TF's whole-unit copy (2026-09-23) must match exactly too.
+                check(mine.call_change_full_cr == live.call_change_full_cr,
+                      f"{tag} call series (whole units)")
+                check(mine.put_change_full_cr == live.put_change_full_cr,
+                      f"{tag} put series (whole units)")
+                check(bool(mine.call_change_full_cr),
+                      f"{tag} whole-unit series missing from the backtest day-frame")
 
             mine_r = ratio_pair_at(frame, w, cursor_ist)
             live_r = await ser.build_ratio_pair(

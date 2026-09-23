@@ -573,6 +573,23 @@ class ZoneOrchestrator:
         MANUAL_SQUARE_OFF exit, then run management immediately. A failed live
         sell keeps the latch, so the per-minute loop retries it every minute
         with a CRITICAL page — the same guarantee as an engine exit."""
+        result = await self._square_off_now(now, "MANUAL_SQUARE_OFF")
+        assert result is not None
+        return result
+
+    async def kill_square_off(self, now: datetime) -> Optional[dict[str, Any]]:
+        """A kill switch was just switched ON: if it covers the open position,
+        square it off RIGHT NOW (user rule 2026-09-23 — "kill ON while a trade
+        runs = the trade exits"), instead of waiting up to a minute for the
+        next pass. Returns None when there is no position or no switch covers
+        it. The per-minute check in ``_manage_position`` stays the backstop."""
+        return await self._square_off_now(now, None)
+
+    async def _square_off_now(
+        self, now: datetime, reason: Optional[str]
+    ) -> Optional[dict[str, Any]]:
+        """Shared immediate exit. ``reason=None`` = decide from the kill
+        switches, and do nothing if none covers the position."""
         t0 = _perf_time.perf_counter()
         timings: dict[str, float] = {}
 
@@ -583,9 +600,17 @@ class ZoneOrchestrator:
             mark("lock_acquired")
             pos = self.position
             if pos is None:
+                if reason is None:
+                    return None
                 raise ManualOrderError("no open position to square off")
             cfg = await self.deps.get_config()
             day_cfg = cfg.days.get(pos.day)
+            if reason is None:
+                kill = self._kill_covering(cfg, pos, now)
+                if kill is None:
+                    return None
+                reason = kill[0]
+                self._audit_kill_close(pos, kill)
             # Reference = the contract's NEWEST tick. The last closed minute's
             # close was up to ~60 s old and read like a quote (2026-09-15:
             # shown ₹1.15 while the market and the fill were ₹0.95).
@@ -611,7 +636,7 @@ class ZoneOrchestrator:
                 ref = pos.entry_fill
             mark("price_ref")
             if pos.pending_exit is None:
-                pos.pending_exit = (ref, "MANUAL_SQUARE_OFF")
+                pos.pending_exit = (ref, reason)
             trade_id, ledger = pos.trade_id, pos.ledger
             await self._manage_position(now, cfg, day_cfg)
             mark("exit_done")
@@ -630,7 +655,7 @@ class ZoneOrchestrator:
                 "trade_id": trade_id,
                 "ledger": ledger,
                 "closed": closed,
-                "exit_reason": pos.pending_exit[1] if pos.pending_exit else "MANUAL_SQUARE_OFF",
+                "exit_reason": pos.pending_exit[1] if pos.pending_exit else reason,
                 "reference_price": ref,
                 "reference_source": ref_source,
                 "reference_ts": ref_ts.astimezone(_IST_TZ).isoformat() if ref_ts else None,
@@ -1078,11 +1103,13 @@ class ZoneOrchestrator:
         # minute. A missing bar skips that hunt only (other contracts may
         # have printed).
         bars_present: dict[int, bool] = {}
+        bars_seen: dict[int, Any] = {}
         for h_i in self.hunts:
             bar = await self.deps.latest_minute(h_i.contract, now)
             bars_present[id(h_i)] = bar is not None
             if bar is None:
                 continue
+            bars_seen[id(h_i)] = bar
             seen = getattr(h_i.engine, "last_minute_ts", None)
             if seen is not None and bar.ts <= seen:
                 # The warm-up already processed this minute with entries
@@ -1110,7 +1137,18 @@ class ZoneOrchestrator:
         # ── the winning engine entered — size and route ──
         entry_event = h.engine.trades[-1]
         lot = self.deps.lot_size(h.contract.symbol)
-        raw_entry = entry_event.entry_price
+        # ENTRY PRICE = the entry minute's CLOSE (user decision 2026-09-23,
+        # option A). The engine fires when a minute TOUCHES its level and
+        # records the level — Pine parity, and its own stops stay anchored
+        # there. But that minute is only known once it closes, and its close is
+        # the earliest price any real order can get: across 341 backtest trades
+        # the close sat +2.3 % (R1) / +3.9 % (R2) above the level, so paper and
+        # backtest booked fills live trading never could ("signal 195, filled
+        # 198"). Sizing, the fill and every report now use the close; the level
+        # stays the SIGNAL. Falls back to the level only without a bar.
+        signal_price = entry_event.entry_price
+        entry_bar = bars_seen.get(id(h))
+        raw_entry = float(entry_bar.c) if entry_bar is not None else signal_price
         if lot < 1:
             # Registry could not resolve a lot size — refuse loudly rather
             # than trade wrong contract math (old code silently assumed 75).
@@ -1126,6 +1164,7 @@ class ZoneOrchestrator:
         lots = int(allocated // (raw_entry * lot)) if raw_entry > 0 else 0
         self._decision["sizing"] = {
             "allocated": round(allocated, 2), "lot_size": lot, "raw_entry": raw_entry,
+            "signal_price": signal_price,
             "lots": lots, "sub_scenario": entry_event.sub_scenario,
         }
         if lots < 1:
@@ -1293,6 +1332,39 @@ class ZoneOrchestrator:
                 ),
             )
 
+    @staticmethod
+    def _kill_covering(
+        cfg: AlgoConfig, pos: _Position, now: datetime
+    ) -> Optional[tuple[str, str]]:
+        """The kill switch, if any, that covers the open position, as
+        (exit_reason, label). Master kill covers everything. The day kill is
+        TODAY's weekday, so it also exits a position carried in overnight. A
+        zone kill covers the trade opened in that zone."""
+        if cfg.global_.master_kill:
+            return "MASTER_KILL", "master kill"
+        wd = now.date().weekday()
+        today_cfg = cfg.days.get(_WEEKDAYS[wd]) if wd <= 4 else None
+        if today_cfg is not None and today_cfg.day_kill:
+            return "DAY_KILL", "day kill"
+        own_day = cfg.days.get(pos.day)
+        own_zone = own_day.zones.get(pos.zone_id) if own_day is not None else None
+        if own_zone is not None and own_zone.zone_kill:
+            return "ZONE_KILL", f"zone kill {pos.zone_id}"
+        return None
+
+    def _audit_kill_close(self, pos: _Position, kill: tuple[str, str]) -> None:
+        reason, label = kill
+        # The master-kill event name predates the other switches; kept so
+        # existing audit readers keep matching.
+        event = "runtime_master_kill_close" if reason == "MASTER_KILL" else "runtime_kill_close"
+        self._audit_once(
+            f"{reason.lower()}-close-{pos.trade_id}",
+            event,
+            f"{label} — squaring off trade #{pos.trade_id} "
+            f"{pos.contract.strike}{pos.contract.option_type}",
+            {"trade_id": pos.trade_id, "reason": reason},
+        )
+
     async def _manage_position(
         self, now: datetime, cfg: AlgoConfig, day_cfg: Optional[DayConfig]
     ) -> None:
@@ -1389,24 +1461,21 @@ class ZoneOrchestrator:
                     {"trade_id": pos.trade_id, "expiry": pos.contract.expiry.isoformat()},
                 )
 
-        # MASTER KILL FORCE-CLOSE (user decision 2026-09-17): the engine-wide
-        # kill means "stop trading", so an open position is squared off at the
-        # next managed minute as well as every new entry being blocked. Day and
-        # zone kills deliberately do NOT do this — they only stop new entries
-        # in their own scope. Ranks below the expiry close (that one is
+        # KILL-SWITCH FORCE-CLOSE. One rule for every switch (user rule
+        # 2026-09-23, extending the 2026-09-17 Master Kill decision): a kill
+        # that is ON while a trade runs exits the trade; while it stays ON no
+        # new entry is taken; switching it OFF lets trading resume. Saving the
+        # config also exits immediately (``kill_square_off``) — this per-minute
+        # check is the backstop that also covers a failed live sell and a kill
+        # already ON at the open. Ranks below the expiry close (that one is
         # unconditional) and above End-Exit.
-        if exit_price is None and cfg.global_.master_kill:
+        kill = self._kill_covering(cfg, pos, now) if exit_price is None else None
+        if kill is not None:
             ref = bar.c if bar is not None else pos.engine.last_close
             if ref is not None:
                 exit_price = ref
-                exit_reason = "MASTER_KILL"
-                self._audit_once(
-                    f"master-kill-close-{pos.trade_id}",
-                    "runtime_master_kill_close",
-                    f"master kill — squaring off trade #{pos.trade_id} "
-                    f"{pos.contract.strike}{pos.contract.option_type}",
-                    {"trade_id": pos.trade_id},
-                )
+                exit_reason = kill[0]
+                self._audit_kill_close(pos, kill)
 
         # §2.3 End-Exit — day-level, LAST zone only, on its End time.
         # INERT while overnight carry is ON (locked user decision 2026-08-19:
@@ -1927,8 +1996,10 @@ async def evaluate_indicator_from_pairs(
         pair = await oi_change_pair(zone_cfg.mtf_ratio.strikes_atm_window)
         if pair is None or len(pair.call_change_cr) < 2:
             return IndicatorEval("NO_TRADE", {"why": "insufficient series"})
+        from .series import mtf_input
+
         rows = mtf_ratio.rows_from_cumulative_series(
-            pair.call_change_cr, pair.put_change_cr, zone_cfg.mtf_ratio.timeframes
+            *mtf_input(pair), zone_cfg.mtf_ratio.timeframes
         )
         res = mtf_ratio.evaluate(rows, zone_cfg.mtf_ratio)
         return IndicatorEval(res.reading, {"basket": _basket(pair), **mtf_ratio.result_to_dict(res)})

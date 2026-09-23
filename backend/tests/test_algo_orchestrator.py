@@ -311,15 +311,33 @@ def test_entry_sizing_fill_and_ledger_row():
     orch = ZoneOrchestrator(fake.deps())
     enter_position(fake, orch)
     row = fake.inserted[-1]
-    # Monday Z1's UMP tier has zone width 2% → R1 enters at UM = 101.0.
-    # Allocation 50% of 30000 = 15000 → floor(15000 / (101 × 75)) = 1 lot;
-    # the buy fill carries +0.5% slippage.
-    expected_fill = buy_fill(fake.config.global_.paper, 101.0).price
+    # Monday Z1's UMP tier has zone width 2% → R1 SIGNALS at UM = 101.0, but
+    # the fill is the entry minute's CLOSE (option A, 2026-09-23): R1_BAR
+    # closes at 100.6. Allocation 50% of 30000 = 15000 → 1 lot; the buy fill
+    # carries +0.5% slippage.
+    expected_fill = buy_fill(fake.config.global_.paper, R1_BAR.c).price
     assert row["lots"] == 1
     assert abs(row["entry_price"] - expected_fill) < 0.02
     assert row["ledger"] == "paper" and row["side"] == "CALL"
     assert row["sub_scenario"] == "R1" and row["zone_id"] == "Z1"
     assert any("ENTRY CALL" in n for n in fake.notifications)
+
+
+def test_entry_fills_at_the_minute_close_not_the_signal_level():
+    """Option A (2026-09-23): the engine's signal price stays the LEVEL it
+    touched; the fill is the close of the minute that fired, whichever side
+    of the level it sits — the earliest price a real order can get."""
+    for close in (100.6, 103.5):        # below and above the 101.0 UM level
+        fake = Fake()
+        orch = ZoneOrchestrator(fake.deps())
+        fake.bars = [MinuteBar(ts=MONDAY, o=101.2, h=103.6, l=99.8, c=close)]
+        run(orch, MONDAY)
+        assert orch.position is not None, f"R1 must fire (close {close})"
+        sizing = orch._decision["sizing"]
+        assert sizing["signal_price"] == 101.0
+        assert sizing["raw_entry"] == close
+        expected = buy_fill(fake.config.global_.paper, close).price
+        assert abs(fake.inserted[-1]["entry_price"] - expected) < 0.02
 
 
 def test_lots_zero_skips_entry_and_alerts():
@@ -538,7 +556,7 @@ def test_shadow_mode_mirrors_live_trade_into_paper_ledger():
     live_row, shadow_row = fake.inserted
     assert shadow_row["strike"] == live_row["strike"]
     assert shadow_row["lots"] == live_row["lots"]
-    expected_fill = buy_fill(fake.config.global_.paper, 101.0).price
+    expected_fill = buy_fill(fake.config.global_.paper, R1_BAR.c).price   # close, option A
     assert abs(shadow_row["entry_price"] - expected_fill) < 0.02
 
     # The exit closes BOTH rows with the same reason.
