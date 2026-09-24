@@ -148,6 +148,10 @@ export interface UmpEntryModel {
   enable_retest: boolean;
   show_sl_lines: boolean;
   show_trail_labels: boolean;
+  /** Trail ladder inside the entry candle (2026-09-25): OFF = Pine (close
+   *  only), ON = highs of minutes after the entry minute count too.
+   *  Optional on configs saved before (= OFF). */
+  trail_counts_entry_candle_high?: boolean;
   max_sl_pct: number;
   trigger_timeout_bars: number;
   /** Trade-entry candle timeframe (§1 2026-09-09). Levels are unaffected. */
@@ -206,6 +210,37 @@ export const EXIT_REASON_LABEL: Record<string, string> = {
   MANUAL_SQUARE_OFF: "Manual Square-off",
 };
 
+/** One trade of the OI-integrated day simulation (/ump/oi-cycle). */
+export interface UmpOiCycleTrade {
+  id: number;
+  zone_id: string;
+  side: string;
+  strike: number;
+  option_type: "CE" | "PE";
+  expiry: string;
+  entry_ts: string;
+  fill: number;
+  signal_price: number | null;
+  sub_scenario: string;
+  exit_ts: string | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+  pnl_rupees: number | null;
+  events: { ts: string; kind: string; price: number; text: string }[];
+}
+
+/** The chart's OI-integrated layer (2026-09-25). */
+export interface UmpOiCycleResponse {
+  enabled: boolean;
+  reason?: string;
+  date?: string;
+  symbol?: string;
+  expiry?: string;
+  up_to?: string;
+  signals?: { direction: "CALL" | "PUT"; zone: string; start: string; end: string }[];
+  trades?: UmpOiCycleTrade[];
+}
+
 export function exitReasonLabel(code: string | null | undefined): string {
   if (!code) return "—";
   return EXIT_REASON_LABEL[code] ?? code;
@@ -229,6 +264,10 @@ export interface ZoneConfig {
   /** EXPERIMENTAL: keep a hunt alive N minutes through NO_TRADE
    *  flickers (opposite side still discards). 0 = spec behavior. */
   direction_hold_min: number;
+  /** Fresh OI-integrated entry calculation (2026-09-25). ON: each OI signal /
+   *  direction change starts a fresh UMP entry calculation; OFF: the zone
+   *  calculates no automated entries. Optional on older saved configs (= ON). */
+  oi_fresh_entries?: boolean;
   enabled_indicators: IndicatorKey[];
   /** How the enabled indicators' readings become one decision. A DISABLED
    *  indicator is simply absent from enabled_indicators and never votes.

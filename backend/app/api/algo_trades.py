@@ -763,6 +763,10 @@ async def resume_engine(ident: AdminIdentity = Depends(require_admin_role)) -> d
     orch = get_orchestrator()
     if orch is None:
         raise HTTPException(409, "The orchestrator is not running in this process.")
-    orch.resume()
-    await audit("engine_resume", user_id=ident.user_id, username=ident.username, scope="global")
-    return {"status": "ok"}
+    ckpt = await orch.resume(now_ist().replace(tzinfo=None))
+    # The detail IS the checkpoint the orchestrator reloads after a restart.
+    await audit(
+        "engine_resume", user_id=ident.user_id, username=ident.username,
+        scope="global", detail=ckpt,
+    )
+    return {"status": "ok", **ckpt}

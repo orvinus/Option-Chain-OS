@@ -131,6 +131,16 @@ interface OhlcRow {
   close: number;
 }
 
+/** The OI-integrated layer (2026-09-25): the signal windows and the entries
+ *  / trail / exits the OI-integrated platform took on THIS contract. Drawn in
+ *  addition to the chart's own independent engine markers. */
+export interface UmpOiLayer {
+  bands: { from: string; to: string; direction: "CALL" | "PUT" }[];
+  events: { ts: string; kind: string; price: number; text: string }[];
+}
+
+const OI_COLOR = "#a855f7";
+
 export function UmpTvChart({
   data,
   params,
@@ -138,9 +148,12 @@ export function UmpTvChart({
   interval = "entry",
   onIntervalChange,
   replaying = false,
+  oiLayer = null,
 }: {
   data: UmpEvalResponse;
   params: UmpParams;
+  /** OI signal windows + OI-integrated markers; null = layer off. */
+  oiLayer?: UmpOiLayer | null;
   /** Display interval selector (§3); the engine's evaluation never changes. */
   interval?: UmpDisplayInterval;
   onIntervalChange?: (v: UmpDisplayInterval) => void;
@@ -175,6 +188,9 @@ export function UmpTvChart({
   // Zone boxes drawn each frame from the latest data+params (refs so the
   // rAF painter never captures stale props).
   const zonesRef = useRef<{ price: number; type: number }[]>([]);
+  // OI signal windows as chart-time [from, to] (to = the window's last minute
+  // END), painted under the level boxes by the same per-frame painter.
+  const bandsRef = useRef<{ from: number; to: number; dir: "CALL" | "PUT" }[]>([]);
   const paramsRef = useRef(params);
   paramsRef.current = params;
 
@@ -193,6 +209,9 @@ export function UmpTvChart({
     [data.candles, data.entry_candles],
   );
   const candleTimes = useMemo(() => candles.map((c) => c.time as number), [candles]);
+  // The per-frame painter is created once; it reads candle times from here.
+  const candleTimesRef = useRef<number[]>([]);
+  candleTimesRef.current = candleTimes;
 
   /**
    * Bucket starts a marker may attach to: every CLOSED candle plus, during
@@ -287,6 +306,26 @@ export function UmpTvChart({
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.clearRect(0, 0, w, hpx);
+      // OI signal windows: translucent green (CALL) / red (PUT) columns.
+      const chart = chartRef.current;
+      if (chart && bandsRef.current.length) {
+        const tsc = chart.timeScale();
+        const half = (tsc.options().barSpacing ?? 6) / 2;
+        for (const b of bandsRef.current) {
+          const snapT = (t: number) => {
+            const i = snapToCandle(candleTimesRef.current, t);
+            return i < 0 ? null : candleTimesRef.current[i];
+          };
+          const a = snapT(b.from);
+          const z = snapT(b.to - 1);
+          if (a == null || z == null) continue;
+          const x1 = tsc.timeToCoordinate(a as UTCTimestamp);
+          const x2 = tsc.timeToCoordinate(z as UTCTimestamp);
+          if (x1 == null || x2 == null) continue;
+          ctx.fillStyle = b.dir === "CALL" ? "rgba(34,197,94,0.10)" : "rgba(239,68,68,0.10)";
+          ctx.fillRect(x1 - half, 0, Math.max(2, x2 - x1 + 2 * half), hpx);
+        }
+      }
       const p = paramsRef.current;
       const zp = p.visual.zone_width_pct / 100;
       for (const z of zonesRef.current) {
@@ -486,6 +525,30 @@ export function UmpTvChart({
         }
       }
     }
+    // OI-integrated layer: what the platform actually does once the OI
+    // signal starts a fresh calculation — violet, prefixed "OI", on top of
+    // the independent engine's own markers (which stay visible).
+    if (oiLayer) {
+      for (const ev of oiLayer.events) {
+        const t = snap(ev.ts);
+        if (t == null) continue;
+        const isEntry = !!ENTRY_STYLE[ev.kind];
+        const isExit = !!EXIT_STYLE[ev.kind];
+        if (!isEntry && !isExit && !TRAIL_KINDS[ev.kind]) continue;
+        markers.push({
+          time: t,
+          position: isEntry ? "belowBar" : "aboveBar",
+          color: OI_COLOR,
+          shape: isEntry ? "arrowUp" : isExit ? "arrowDown" : "circle",
+          text: isEntry ? `OI ▲ ${ev.kind} ₹${ev.price.toFixed(2)}` : `OI ${ev.text}`,
+        });
+      }
+    }
+    bandsRef.current = (oiLayer?.bands ?? []).map((b) => ({
+      from: istToChartTime(b.from) as number,
+      to: (istToChartTime(b.to) as number) + 60,
+      dir: b.direction,
+    }));
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
 
@@ -512,7 +575,7 @@ export function UmpTvChart({
         chart.timeScale().fitContent();
       }
     }
-  }, [candles, candleTimes, snapTimes, data, params, bucketSec, replaying]);
+  }, [candles, candleTimes, snapTimes, data, params, bucketSec, replaying, oiLayer]);
 
   // ── the forming bar, applied incrementally ────────────────────────────
   // lightweight-charts replaces the last bar when `time` matches and appends

@@ -221,6 +221,11 @@ in the trade list and the Telegram alert, and the save message tells you which t
 <b>Trades Today</b>, <b>Day P&amp;L</b>, <b>Position</b>. Below them, one badge per engine showing its current
 vote. An amber line "<b>⚠ …</b>" lists anything currently blocking trading. If the engine has paused itself you
 get a red "<b>⏸ reason</b>" and a <span class="btn">Resume engine</span> button.</p>
+<div class="card note"><b>What Resume does.</b> It lifts <i>both</i> the consecutive-loss pause <i>and</i> the day's
+max-loss auto-kill. From that moment both limits count again from zero: another run of losing trades pauses the
+engine again, and another full max-loss kills the day again. The line under the button confirms it, e.g.
+"<i>Resumed at 11:58 — trading restarts from the next minute; loss limits now count from here</i>". If the
+request fails, the reason is shown in red instead of nothing happening.</div>
 <p class="muted">If the card is missing entirely, the engine loop is not running in this backend (replay mode, or not started).</p>
 
 <h3>6.4 Master Kill Grid</h3>
@@ -281,6 +286,11 @@ Watch it change as you type — it is the quickest way to sanity-check a percent
 <table>
 <tr><td class="lbl">Reeval</td><td><b>Every candle</b> (re-decide each minute) or <b>Once at start</b> (decide at the zone open and stick with it).</td></tr>
 <tr><td class="lbl">Hold</td><td>Experimental. Keeps a hunt alive this many minutes through brief "no direction" flickers. An <i>opposite</i> signal still cancels immediately. 0 = strict. Allowed 0–375.</td></tr>
+<tr><td class="lbl">Fresh OI</td><td><b>ON (default):</b> every OI signal, and every change of direction (CALL → PUT → CALL…), starts a completely
+<b>fresh</b> Ultra Master Pro entry calculation from that minute. The levels keep running, but nothing that happened before
+the signal — not even the earlier minutes of the candle in progress — can shape the entry. Entry = OI signal + fresh UMP
+confirmation, in the chart, replay, backtest, paper and live alike. <b>OFF:</b> this zone calculates no automated entries
+(an open trade is still managed to its exit); the chart still shows the independent UMP entries.</td></tr>
 <tr><td class="lbl">Each engine row</td><td>A switch (vote / don't vote), a <b>strikes</b> dropdown (ATM ±5 / ±10 / ±15 / ±20 / All strikes) controlling how much of the chain that engine sums, a <b>↗</b> link to its dashboard, and a <b>⧉</b> button to copy its parameters elsewhere.</td></tr>
 </table>
 
@@ -563,6 +573,16 @@ End-Exit) closes it."</i></div>
 <tr><td class="lbl">P4</td><td>Base SL</td><td>The original stop. Automatically disabled once a trail sits above it.</td></tr>
 </table>
 <p class="muted">Only while a trade is open you also see the System A quarter rungs (Q1/Q2/Q3) and the NB target, with the current trail highlighted in amber. With no trade open they are not drawn.</p>
+<div class="card note"><b>Two kinds of entries on this chart.</b> The normal markers come from the Ultra Master Pro engine
+running on its own over the contract's whole life — it does not wait for any OI signal, so it can show entries the
+platform would never take. The <b style="color:#a855f7">violet "OI" markers</b> are the platform's real entries: the same
+code as live and backtest, starting a fresh calculation at each OI signal. Green/red shaded columns mark the CALL/PUT
+signal windows. The <b>OI-integrated entries</b> card under the chart lists that day's trades (signal price, fill, exit,
+P&amp;L) with a <span class="btn">show</span> button to open each contract. In replay, both layers stop at the playhead.</div>
+<div class="card note"><b>Trail counts wick after entry (entry candle).</b> OFF = TradingView: inside the candle in which the
+trade entered, only the candle's close moves the trail, so a wick to Q3 after the entry leaves the trail at Q1. ON = the high
+of every minute <i>after</i> the entry minute counts too, so that wick moves the trail to Q2. The entry minute's own high
+never counts. With ON our trail can differ from the TradingView chart.</div>
 
 <h3>11.5 Zone Settings — the 26 Pine inputs</h3>
 <p class="muted">Hint on screen: <i>"all 26 Pine inputs + entry timeframe &amp; per-kind switches,

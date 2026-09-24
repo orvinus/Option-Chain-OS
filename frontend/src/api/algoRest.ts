@@ -300,9 +300,24 @@ export const algoApi = {
         },
       }
     ),
+  /** One-day OI-integrated simulation for the UMP chart layer. */
+  umpOiCycle: (opts: {
+    day: string; zone: string; date?: string;
+    configVersion?: number; configRun?: number; configSandbox?: boolean;
+  }) =>
+    request<import("../types/algo").UmpOiCycleResponse>("GET", "/api/algo/engines/ump/oi-cycle", {
+      params: {
+        day: opts.day, zone: opts.zone, date: opts.date,
+        config_version: opts.configVersion != null ? String(opts.configVersion) : undefined,
+        config_run: opts.configRun != null ? String(opts.configRun) : undefined,
+        config_sandbox: opts.configSandbox ? "true" : undefined,
+      },
+    }),
   mtfRatioEval: (opts: {
     day: string; zone: string; date?: string; symbol?: string; expiry?: string;
     at?: string; configVersion?: number; configRun?: number; configSandbox?: boolean;
+    /** Display override: the strike window shown in the panel's box. */
+    atmWindow?: number;
   }) =>
     request<import("../types/algo").MtfRatioEvalResponse>(
       "GET",
@@ -315,6 +330,7 @@ export const algoApi = {
             opts.configVersion != null ? String(opts.configVersion) : undefined,
           config_run: opts.configRun != null ? String(opts.configRun) : undefined,
           config_sandbox: opts.configSandbox ? "true" : undefined,
+          atm_window: opts.atmWindow != null ? String(opts.atmWindow) : undefined,
         },
       }
     ),
@@ -527,7 +543,12 @@ export const algoApi = {
     request<import("../types/algo").DecisionRow>(
       "GET", `/api/algo/backtest/runs/${id}/decisions/at`, { params: { day, ts } }
     ),
-  resumeEngine: () => request<{ status: string }>("POST", "/api/algo/resume", { body: {} }),
+  /** Lifts the loss-streak pause AND today's max-loss kill; both limits then
+   *  count from this checkpoint (2026-09-25). */
+  resumeEngine: () =>
+    request<{ status: string; at: string; closed_count: number; realized: number; ledger: string }>(
+      "POST", "/api/algo/resume", { body: {} },
+    ),
 
   // ── live signal transitions (algo_signals read) ──
   signals: (opts?: { date?: string; zone?: string; indicator?: string; limit?: number }) =>

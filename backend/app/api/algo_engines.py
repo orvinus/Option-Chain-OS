@@ -729,6 +729,61 @@ async def ump_eval(
     }
 
 
+# One-day OI-integrated simulations are pure functions of (config, day, last
+# closed minute) — cache them so chart polling and replay re-opens are free.
+_OI_CYCLE_CACHE: "dict[tuple, dict[str, Any]]" = {}
+
+
+@router.get("/ump/oi-cycle")
+async def ump_oi_cycle(
+    day: str = Query(...),
+    zone: str = Query(...),
+    date: Optional[str] = Query(default=None),
+    config_version: Optional[int] = Query(default=None),
+    config_run: Optional[int] = Query(default=None),
+    config_sandbox: bool = Query(default=False),
+    _: AdminIdentity = Depends(require_admin),
+) -> dict[str, Any]:
+    """The OI-integrated entry layer for the Ultra Master Pro chart
+    (2026-09-25): the same orchestrator live and the backtest run, simulated
+    over one day — OI signal windows plus the trades the platform takes, each
+    with its engine events. The chart's own ``/ump`` replay is independent of
+    OI and stays as it is. Today is simulated only up to the last CLOSED
+    minute. A zone with the Fresh-OI switch OFF is not calculated."""
+    import hashlib
+    from datetime import date as _d
+
+    from ..algo.backtest.oi_cycle import simulate_day
+    from ..core.time_utils import now_ist
+
+    day_key = _parse_day(day)
+    zone_key = _parse_zone(zone)
+    cv = await _config_for(config_version, config_run, config_sandbox)
+    zone_cfg = cv.config.zone(day_key, zone_key)
+    if zone_cfg is None:
+        raise HTTPException(404, f"no configuration for {day_key} {zone_key}")
+    if not zone_cfg.oi_fresh_entries:
+        return {"enabled": False, "reason": "Fresh OI-integrated entry calculation is OFF for this zone"}
+    today = now_ist().date()
+    try:
+        d = _d.fromisoformat(date) if date else today
+    except ValueError as e:
+        raise HTTPException(400, f"invalid date {date!r}") from e
+    up_to = now_ist().replace(tzinfo=None) if d == today else None
+    doc_hash = hashlib.sha1(cv.config.model_dump_json(by_alias=True).encode()).hexdigest()[:16]
+    key = (d.isoformat(), doc_hash, up_to.strftime("%H:%M") if up_to else "close")
+    hit = _OI_CYCLE_CACHE.get(key)
+    if hit is None:
+        res = await simulate_day(cv.config, d, up_to=up_to)
+        if res is None:
+            raise HTTPException(404, f"no stored data to simulate {d.isoformat()}")
+        hit = {"enabled": True, **res}
+        if len(_OI_CYCLE_CACHE) > 64:
+            _OI_CYCLE_CACHE.clear()
+        _OI_CYCLE_CACHE[key] = hit
+    return hit
+
+
 @router.get("/mqae")
 async def mqae_eval(
     day: str = Query(...),
@@ -898,6 +953,11 @@ async def mtf_ratio_eval(
     config_version: Optional[int] = Query(default=None),
     config_run: Optional[int] = Query(default=None),
     config_sandbox: bool = Query(default=False),
+    # DISPLAY override (2026-09-25): the panel passes the strike window its
+    # box shows, so an unsaved edit can never leave the table computed for a
+    # different window than the one on screen. Trading always uses the saved
+    # config; this never reaches the orchestrator.
+    atm_window: Optional[int] = Query(default=None, ge=-1, le=60),
     _: AdminIdentity = Depends(require_admin),
 ) -> dict[str, Any]:
     day_key = _parse_day(day)
@@ -914,7 +974,8 @@ async def mtf_ratio_eval(
     cut = _parse_at(at)
 
     params = zone_cfg.mtf_ratio
-    pair = await mtf_pair_at(sym, exp, params.strikes_atm_window, date, cut)
+    window = atm_window if atm_window is not None else params.strikes_atm_window
+    pair = await mtf_pair_at(sym, exp, window, date, cut)
     if pair is None:
         raise HTTPException(
             404,

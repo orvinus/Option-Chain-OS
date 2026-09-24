@@ -801,3 +801,42 @@ def _run_all() -> None:
 
 if __name__ == "__main__":
     _run_all()
+
+
+# ── trail inside the entry candle (user rule 2026-09-25) ────────────────────
+# Base 100, NB 130 → Q1 107.5, Q2 115, Q3 122.5. The 09:20 candle enters S1A
+# at the Base; a LATER minute of the same candle wicks above Q3 and closes
+# between Q2 and Q3 (the SENSEX 73800 CE case from 24 Sep, in round numbers).
+
+def test_entry_candle_wick_after_entry_moves_trail_to_q2_only_when_switched_on():
+    for flag, want in ((False, 107.5), (True, 115.0)):
+        eng = mk([(100.0, 1), (130.0, 1)], trail_counts_entry_candle_high=flag)
+        feed(eng, sc1_trigger())
+        feed(eng, [(5, 103.0, 103.5, 99.5, 101.0)])          # S1A at the Base
+        assert eng.in_trade and eng.trades[-1].sub_scenario == "S1A"
+        feed(eng, [(6, 101.0, 124.0, 117.0, 118.0)])         # later minute: wick > Q3
+        assert approx(eng.trail_sl, want), (flag, eng.trail_sl)
+
+
+def test_the_entry_minutes_own_high_never_counts():
+    """Part of the entry minute's range may precede the entry touch — even
+    with the switch ON its high must not advance the ladder."""
+    eng = mk([(100.0, 1), (130.0, 1)], trail_counts_entry_candle_high=True)
+    feed(eng, sc1_trigger())
+    feed(eng, [(5, 103.0, 125.0, 99.5, 101.0)])              # entry minute spikes to 125
+    assert eng.in_trade and eng.trail_sl is None
+
+
+def test_after_the_entry_candle_the_ladder_is_unchanged_by_the_switch():
+    """From the next candle on, running highs already count — both settings
+    agree, so the switch only changes the entry candle."""
+    out = []
+    for flag in (False, True):
+        eng = mk([(100.0, 1), (130.0, 1)], trail_counts_entry_candle_high=flag)
+        feed(eng, sc1_trigger())
+        feed(eng, [(5, 103.0, 103.5, 99.5, 101.0)])
+        feed(eng, [(6, 101.0, 102.0, 100.5, 101.5), (7, 101.5, 102.0, 101.0, 101.8),
+                   (8, 101.8, 102.0, 101.2, 101.6), (9, 101.6, 101.9, 101.3, 101.7)])
+        feed(eng, [(10, 101.7, 124.0, 101.5, 118.0)])        # next candle wicks > Q3
+        out.append(eng.trail_sl)
+    assert approx(out[0], 115.0) and approx(out[1], 115.0), out

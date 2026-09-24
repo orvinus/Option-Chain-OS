@@ -18,6 +18,7 @@ import type {
   AlgoConfigDoc,
   UmpDisplayInterval,
   UmpEvalResponse,
+  UmpOiCycleResponse,
   UmpParams,
   Weekday,
   ZoneId,
@@ -27,6 +28,7 @@ import { ReplayController } from "../../ReplayController";
 import {
   deriveReplayView, formingBar, subCount, subsFor, indexAtOrAfter, seekPosition, stepTradingDay,
 } from "./umpReplay";
+import type { UmpOiLayer } from "./UmpTvChart";
 
 const INTERVAL_KEY = "ump.displayInterval";
 
@@ -263,6 +265,78 @@ export function UmpPanel({
     const f = formingBar(fetched, index + 1, sub);
     return f ? { ts: f.ts, o: f.o, h: f.h, l: f.l, c: f.c } : null;
   }, [fetched, replayReady, index, sub]);
+
+  // ── OI-integrated layer (2026-09-25) ──
+  // What the platform does on this day once each OI signal starts a FRESH
+  // entry calculation — the same orchestrator live and the backtest run.
+  // The chart's own markers above stay the independent engine.
+  const zoneOiOn = draft.days[day]?.zones[zone]?.oi_fresh_entries ?? true;
+  const oiDate = replay ? replay.date : (histDate || fetched?.session_date || undefined);
+  const [oi, setOi] = useState<UmpOiCycleResponse | null>(null);
+  const [oiLoading, setOiLoading] = useState(false);
+  const [oiError, setOiError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!oiDate) return undefined;
+    let cancelled = false;
+    const run = async () => {
+      setOiLoading(true);
+      try {
+        const res = await algoApi.umpOiCycle({
+          day, zone, date: oiDate,
+          configVersion: configVersion ?? undefined,
+          configRun: configRun ?? undefined,
+          configSandbox: configSandbox || undefined,
+        });
+        if (!cancelled) { setOi(res); setOiError(null); }
+      } catch (e) {
+        if (!cancelled) { setOi(null); setOiError(e instanceof Error ? e.message : String(e)); }
+      } finally {
+        if (!cancelled) setOiLoading(false);
+      }
+    };
+    void run();
+    // Today's live chart: re-simulate once a minute (closed minutes only).
+    const live = !histDate && !replay && livePoll;
+    const t = live ? window.setInterval(() => void run(), 60_000) : undefined;
+    return () => {
+      cancelled = true;
+      if (t) window.clearInterval(t);
+    };
+  }, [day, zone, oiDate, configVersion, configRun, configSandbox, histDate, replay, livePoll, zoneOiOn]);
+
+  /** The playhead instant in replay (last revealed minute), else null. */
+  const oiCursor = replay && data ? data.as_of : null;
+  const oiTrades = useMemo(() => {
+    const all = oi?.enabled ? oi.trades ?? [] : [];
+    if (!oiCursor) return all;
+    // Replay: nothing the platform had not done by the playhead.
+    return all
+      .filter((t) => t.entry_ts.slice(0, 16) <= oiCursor.slice(0, 16))
+      .map((t) =>
+        t.exit_ts && t.exit_ts.slice(0, 16) > oiCursor.slice(0, 16)
+          ? { ...t, exit_ts: null, exit_price: null, exit_reason: null, pnl_rupees: null }
+          : t,
+      );
+  }, [oi, oiCursor]);
+  const oiLayer: UmpOiLayer | null = useMemo(() => {
+    if (!oi?.enabled || !data || !oi.date) return null;
+    const cut = oiCursor ? oiCursor.slice(0, 16) : null;
+    const mine = (oi.trades ?? []).filter(
+      (t) => t.strike === data.strike && t.option_type === data.option_type && t.expiry === data.expiry,
+    );
+    const events = mine
+      .flatMap((t) => t.events)
+      .filter((e) => !cut || e.ts.slice(0, 16) <= cut);
+    const bands = (oi.signals ?? [])
+      .map((s) => ({
+        from: `${oi.date}T${s.start}:00`,
+        to: `${oi.date}T${s.end}:00`,
+        direction: s.direction,
+      }))
+      .filter((b) => !cut || b.from.slice(0, 16) <= cut)
+      .map((b) => (cut && b.to.slice(0, 16) > cut ? { ...b, to: `${cut}:00` } : b));
+    return { bands, events };
+  }, [oi, data, oiCursor]);
 
   // Request-sequence guard: a context change fires two overlapping fetches
   // (the reset effect + the load effect); without this the STALE response
@@ -713,8 +787,90 @@ export function UmpPanel({
           interval={interval}
           onIntervalChange={onIntervalChange}
           replaying={!!replay}
+          oiLayer={oiLayer}
         />
       )}
+      <div className="panel px-3 py-2">
+        <div className="flex items-center gap-2 flex-wrap text-[11px]">
+          <b className="text-gray-100">OI-integrated entries</b>
+          <span className="text-muted">
+            {oiDate ?? ""} · fresh UMP calculation from each OI signal (the platform's real entries)
+          </span>
+          <span className="ml-auto flex items-center gap-2 text-muted">
+            <span style={{ color: "#a855f7" }}>▲ OI markers</span>
+            <span className="text-pe">▮ CALL signal</span>
+            <span className="text-ce">▮ PUT signal</span>
+            <span>· other markers = independent engine</span>
+          </span>
+        </div>
+        {!zoneOiOn || (oi && !oi.enabled) ? (
+          <div className="text-[11px] text-amber-300 mt-1">
+            Fresh OI calculation is OFF for {day} {zone} — no OI-integrated entries are
+            calculated; the chart shows the independent engine's entries only.
+          </div>
+        ) : oiError ? (
+          <div className="text-[11px] text-ce mt-1">OI layer unavailable: {oiError}</div>
+        ) : !oi ? (
+          <div className="text-[11px] text-muted mt-1">
+            {oiLoading || !oiDate ? "Simulating the day's OI signals…" : "No OI data for this day."}
+          </div>
+        ) : (
+          <div className="mt-1 overflow-x-auto">
+            <div className="text-[10.5px] text-muted mb-1">
+              {(oi?.signals ?? []).length} OI signal window(s) · {oiTrades.length} entr
+              {oiTrades.length === 1 ? "y" : "ies"}
+              {oi?.up_to ? ` · up to ${oiCursor ? oiCursor.slice(11, 16) : oi.up_to}` : ""}
+            </div>
+            {oiTrades.length > 0 && (
+              <table className="text-[11px] min-w-[640px]">
+                <thead>
+                  <tr className="text-muted text-left">
+                    {["Entry", "Zone", "Contract", "Kind", "Signal", "Fill", "Exit", "Reason", "P&L", ""].map((h) => (
+                      <th key={h} className="pr-3 font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {oiTrades.map((t) => {
+                    const shown = data && t.strike === data.strike && t.option_type === data.option_type;
+                    return (
+                      <tr key={t.id} className={shown ? "text-gray-100" : "text-muted"}>
+                        <td className="pr-3 font-mono">{t.entry_ts.slice(11, 16)}</td>
+                        <td className="pr-3">{t.zone_id}</td>
+                        <td className="pr-3 font-mono">{t.strike} {t.option_type}</td>
+                        <td className="pr-3">{t.sub_scenario}</td>
+                        <td className="pr-3 font-mono">{t.signal_price != null ? t.signal_price.toFixed(2) : "—"}</td>
+                        <td className="pr-3 font-mono">{t.fill.toFixed(2)}</td>
+                        <td className="pr-3 font-mono">{t.exit_ts ? `${t.exit_ts.slice(11, 16)} @ ${t.exit_price?.toFixed(2)}` : "open"}</td>
+                        <td className="pr-3">{t.exit_reason ? exitReasonLabel(t.exit_reason) : "—"}</td>
+                        <td className={`pr-3 font-mono ${(t.pnl_rupees ?? 0) >= 0 ? "text-pe" : "text-ce"}`}>
+                          {t.pnl_rupees != null ? `₹${t.pnl_rupees.toFixed(0)}` : "—"}
+                        </td>
+                        <td>
+                          {!shown && (
+                            <button
+                              type="button"
+                              className="pill text-[10px]"
+                              title="Show this contract on the chart"
+                              onClick={() => {
+                                setOptionType(t.option_type);
+                                pinnedInit.current = { strike: t.strike, ot: t.option_type };
+                                setStrikeOverride(t.strike);
+                              }}
+                            >
+                              show
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
 
       {(() => {
         // ── Pine dashboard + key-levels panels, honouring Show toggles and
@@ -1090,6 +1246,18 @@ export function UmpPanel({
                 />
               </div>
             ))}
+            <div className="flex items-center justify-between mt-1.5 text-xs">
+              <span
+                className="text-muted"
+                title="OFF (TradingView/Pine): inside the entry candle only its CLOSE moves the trail, so a wick to Q3 after the entry leaves the trail on Q1. ON: the high of every minute AFTER the entry minute counts too, so that wick moves the trail to Q2. The entry minute's own high never counts. Our trail then differs from the TradingView chart."
+              >
+                Trail counts wick after entry (entry candle)
+              </span>
+              <Switch
+                on={params.entry.trail_counts_entry_candle_high ?? false}
+                onChange={(v) => set((p) => void (p.entry.trail_counts_entry_candle_high = v))}
+              />
+            </div>
             {/* Per-entry-kind switches (§2) under the two master switches. */}
             {(
               [

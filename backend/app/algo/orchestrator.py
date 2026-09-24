@@ -163,6 +163,10 @@ class OrchestratorDeps:
     #   contract's newest tick. Manual square-off reference only; None in
     #   backtests/tests (falls back to the last closed minute).
     latest_quote: Optional[Callable[[Contract], Awaitable[Optional[tuple[float, datetime]]]]] = None
+    #   load_resume_checkpoint(date) → the detail of TODAY's latest manual
+    #   Resume ({ledger, closed_count, realized}) so a restart keeps it. None
+    #   in backtests/tests (there is no manual Resume there).
+    load_resume_checkpoint: Optional[Callable[[date], Awaitable[Optional[dict]]]] = None
 
 
 class ManualOrderError(Exception):
@@ -267,6 +271,7 @@ def _zone_snapshot(z: ZoneConfig) -> dict[str, Any]:
         "strike_scan_count": z.strike_scan_count,
         "max_trades": z.max_trades,
         "strategy_active": z.strategy_active,
+        "oi_fresh_entries": z.oi_fresh_entries,
         "atm_windows": {
             "oi_change": z.oi_structure.strikes_atm_window,
             "multi_tf": z.mtf_ratio.strikes_atm_window,
@@ -339,6 +344,12 @@ class ZoneOrchestrator:
         # square-off, so a manual order can never interleave with an engine
         # entry or exit for the same position in the same instant.
         self._pass_lock = asyncio.Lock()
+        # Manual Resume checkpoint (2026-09-25): {date, ledger, closed_count,
+        # realized}. The loss streak and the daily max-loss are measured from
+        # it, so a Resume is not undone by the next minute's recount.
+        self._resume_ckpt: Optional[dict] = None
+        self._resume_loaded_for: Optional[date] = None
+        self._ledger_now: Optional[str] = None
 
     @property
     def hunt(self) -> Optional[_Hunt]:
@@ -740,6 +751,7 @@ class ZoneOrchestrator:
 
         ledger = "paper" if cfg.global_.paper.paper_mode else "live"
         self._decision["ledger"] = ledger
+        self._ledger_now = ledger
         # ── risk counters (recomputed from the ledger — restart-safe) ──
         # GUARDED: a DB hiccup here must never abort the pass — the open
         # position's management below is the one thing that may never be
@@ -752,6 +764,15 @@ class ZoneOrchestrator:
         realized = 0.0
         allocated = 0.0
         counters_ok = True
+        if self._resume_loaded_for != today:
+            self._resume_loaded_for = today
+            if (
+                self._resume_ckpt is None or self._resume_ckpt.get("date") != today.isoformat()
+            ) and self.deps.load_resume_checkpoint is not None:
+                try:
+                    self._resume_ckpt = await self.deps.load_resume_checkpoint(today)
+                except Exception as e:  # noqa: BLE001 — never block a pass on this
+                    log.warning("algo.orch.resume_ckpt_load_failed", error=str(e))
         try:
             closed = await self.deps.today_closed(today, ledger)
             if self.deps.today_entries is not None:
@@ -922,6 +943,13 @@ class ZoneOrchestrator:
             self.status.state = "strategy_inactive"
             self.status.gate_blocks.append("strategy inactive (zone switch)")
             return
+        if not zone_cfg.oi_fresh_entries:
+            self._discard_hunts()
+            self.status.state = "gated"
+            self.status.gate_blocks.append(
+                "fresh OI-integrated entry calculation OFF (zone switch)"
+            )
+            return
 
         # ── §5.3 direction lifecycle ──
         if direction is None:
@@ -987,6 +1015,11 @@ class ZoneOrchestrator:
                 lock = self._exit_lock
                 if lock is not None and lock[0] == contract.token and hasattr(engine, "lock_candle"):
                     engine.lock_candle(lock[1])
+                # Fresh OI-integrated entry cycle from THIS signal (2026-09-25):
+                # nothing from before it — not even the pre-signal minutes of
+                # the candle in progress — can shape this cycle's entry.
+                if hasattr(engine, "start_entry_cycle"):
+                    engine.start_entry_cycle()
                 self.hunts.append(_Hunt(
                     contract=contract, zone_id=zone_id, side=direction,
                     engine=engine, started=now,
@@ -1641,9 +1674,25 @@ class ZoneOrchestrator:
         if day_cfg is None:
             return risk_blocks
         now = now or self._eval_now
+        # After a manual Resume both the loss streak and the daily max-loss
+        # restart from the checkpoint: a Resume is no longer undone by the
+        # next minute's recount, and a FURTHER full max-loss after resuming
+        # still kills the day (2026-09-25). Profit lock keeps the whole day.
+        ck = self._resume_ckpt
+        if (
+            ck is not None
+            and ck.get("date") == today.isoformat()
+            and (self._ledger_now is None or ck.get("ledger") == self._ledger_now)
+        ):
+            n = max(0, min(int(ck.get("closed_count", 0)), len(closed)))
+            closed_for_limits = closed[n:]
+            loss_basis = realized - float(ck.get("realized", 0.0))
+        else:
+            closed_for_limits = closed
+            loss_basis = realized
         if allocated > 0:
             loss_limit = allocated * day_cfg.max_loss_pct / 100
-            if realized <= -loss_limit:
+            if loss_basis <= -loss_limit:
                 risk_blocks.append("max daily loss breached — day auto-killed")
                 self._alert_once(
                     f"risk-daykill-{today}",
@@ -1674,7 +1723,7 @@ class ZoneOrchestrator:
                 )
         streak = 0
         streak_loss = 0.0
-        for _, pnl in reversed(closed):
+        for _, pnl in reversed(closed_for_limits):
             if pnl <= 0:
                 streak += 1
                 streak_loss += -pnl
@@ -1811,9 +1860,39 @@ class ZoneOrchestrator:
             trade_id=row.id, ledger=row.ledger, engine_rebuilt=rebuilt,
         )
 
-    def resume(self) -> None:
-        """Manual resume after a consecutive-loss auto-pause (§7.2)."""
-        self.paused_reason = ""
+    async def resume(self, now: Optional[datetime] = None) -> dict[str, Any]:
+        """Manual Resume (§7.2, user rule 2026-09-25): lifts the consecutive-
+        loss pause AND the day's max-loss auto-kill. Both limits then count
+        from this moment — the old code only cleared ``paused_reason`` and the
+        next minute's ledger recount re-paused at once, so the button looked
+        dead. Returns the checkpoint (also written to the audit row by the
+        API, which is how a restart keeps it)."""
+        from ..core.time_utils import now_ist
+
+        now = now or now_ist().replace(tzinfo=None)
+        today = now.date()
+        async with self._pass_lock:
+            cfg = await self.deps.get_config()
+            paper = cfg.global_.paper.paper_mode
+            ledger = "paper" if paper else "live"
+            closed = await self.deps.today_closed(today, ledger)
+            self._resume_ckpt = {
+                "date": today.isoformat(),
+                "ledger": ledger,
+                "closed_count": len(closed),
+                "realized": round(sum(p for _, p in closed), 2),
+                "at": now.strftime("%H:%M"),
+            }
+            self._resume_loaded_for = today
+            self.paused_reason = ""
+            self.status.paused_reason = ""
+            # The snapshot only rebuilds at the next pass — drop the two
+            # banners Resume just lifted so the screen agrees immediately.
+            self.status.gate_blocks = [
+                b for b in self.status.gate_blocks
+                if "max daily loss" not in b and not b.startswith("paused")
+            ]
+            return dict(self._resume_ckpt)
 
     def _fill_position_status(self) -> None:
         if self.position is None:
@@ -2042,6 +2121,7 @@ def rearm_entries(params: Any, src: Any) -> None:
     params.entry.enable_retest = src.entry.enable_retest
     params.entry.scenarios = dict(src.entry.scenarios)
     params.entry.entry_timeframe_min = src.entry.entry_timeframe_min
+    params.entry.trail_counts_entry_candle_high = src.entry.trail_counts_entry_candle_high
 
 
 def warmup_ump_engine(
@@ -2305,7 +2385,20 @@ def _runtime_deps() -> OrchestratorDeps:
         record_decision=record_decision_live,
         config_version=lambda: _live_version[0],
         latest_quote=latest_quote,
+        load_resume_checkpoint=_load_resume_checkpoint,
     )
+
+
+async def _load_resume_checkpoint(day: date) -> Optional[dict]:
+    """Today's latest manual Resume (written by POST /api/algo/resume)."""
+    from .audit import latest_event_detail
+    from ..core.time_utils import ist_naive_to_utc
+
+    since = ist_naive_to_utc(datetime.combine(day, time(0, 0))).isoformat()
+    d = await latest_event_detail("engine_resume", since)
+    if d and d.get("date") == day.isoformat() and "closed_count" in d:
+        return d
+    return None
 
 
 async def run_orchestrator_loop() -> None:
