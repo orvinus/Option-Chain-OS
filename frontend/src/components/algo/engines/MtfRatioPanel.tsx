@@ -70,6 +70,9 @@ export function MtfRatioPanel({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const params = draft.days[day]?.zones[zone]?.mtf_ratio;
+  // The table is computed for the window the box SHOWS — saved or not — so
+  // it can never quietly disagree with the Multi-TF page (24 Sep report).
+  const shownWindow = params?.strikes_atm_window;
 
   // `background: true` = the 30s poll. It must NOT raise the loading flag, or
   // the panel blinks every 30 seconds over data that is already correct.
@@ -80,6 +83,7 @@ export function MtfRatioPanel({
         day, zone, date: histDate || undefined, expiry: expiry || undefined,
         at: at || undefined, configVersion: configVersion ?? undefined,
         configRun: configRun ?? undefined, configSandbox: configSandbox || undefined,
+        atmWindow: shownWindow,
       });
       setData(res);
       setError(null);
@@ -89,7 +93,7 @@ export function MtfRatioPanel({
     } finally {
       setLoading(false);
     }
-  }, [day, zone, histDate, expiry, at, configVersion, configRun, configSandbox]);
+  }, [day, zone, histDate, expiry, at, configVersion, configRun, configSandbox, shownWindow]);
 
   useEffect(() => {
     void load();

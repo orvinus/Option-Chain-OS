@@ -576,6 +576,17 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
                         }
                       />
                     </div>
+                    <span
+                      className="text-[10px] text-muted"
+                      title="Fresh OI-integrated entry calculation. ON: every OI signal / direction change starts a FRESH Ultra Master Pro entry calculation from that minute (levels keep running; nothing before the signal can shape the entry) — chart, replay, backtest, paper and live alike. OFF: this zone calculates no automated entries (an open trade is still managed to its exit); independent UMP entries stay visible on the chart."
+                    >
+                      Fresh OI
+                    </span>
+                    <Switch
+                      on={z.oi_fresh_entries ?? true}
+                      onChange={(v) => mutateZone(mutate, day, zid, (zc) => void (zc.oi_fresh_entries = v))}
+                      title={`Fresh OI-integrated entry calculation — ${(z.oi_fresh_entries ?? true) ? "ON" : "OFF: no automated entries in this zone"}`}
+                    />
                   </div>
                   {(Object.keys(INDICATOR_LABEL) as (keyof typeof INDICATOR_LABEL)[]).map((ind) => {
                     const on = z.enabled_indicators.includes(ind);
@@ -818,6 +829,8 @@ export function DailyConfigPanel({ draft, mutate, todayWeekday, onOpenEngine, de
 
 function LiveDecisionSnapshot() {
   const [status, setStatus] = useState<OrchestratorStatus | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeMsg, setResumeMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -901,17 +914,40 @@ function LiveDecisionSnapshot() {
           ⚠ {status.gate_blocks!.join(" · ")}
         </div>
       )}
-      {status.paused_reason && (
-        <div className="mt-2 flex items-center gap-3">
-          <span className="text-[11px] font-bold text-ce">⏸ {status.paused_reason}</span>
+      {(status.paused_reason ||
+        (status.gate_blocks ?? []).some((b) => b.includes("max daily loss"))) && (
+        <div className="mt-2 flex items-center gap-3 flex-wrap">
+          {status.paused_reason && (
+            <span className="text-[11px] font-bold text-ce">⏸ {status.paused_reason}</span>
+          )}
           <button
             type="button"
             className="pill text-xs"
-            onClick={() => void algoApi.resumeEngine().then(load)}
+            disabled={resumeBusy}
+            title="Lifts the loss-streak pause AND today's max-loss kill. Both limits then count again from this moment."
+            onClick={async () => {
+              setResumeBusy(true);
+              setResumeMsg(null);
+              try {
+                const r = await algoApi.resumeEngine();
+                setResumeMsg({
+                  ok: true,
+                  text: `Resumed at ${r.at} — trading restarts from the next minute; loss limits now count from here (day P&L ₹${r.realized.toFixed(0)}).`,
+                });
+                await load();
+              } catch (e) {
+                setResumeMsg({ ok: false, text: `Resume failed: ${e instanceof Error ? e.message : String(e)}` });
+              } finally {
+                setResumeBusy(false);
+              }
+            }}
           >
-            Resume engine
+            {resumeBusy ? "Resuming…" : "Resume engine"}
           </button>
         </div>
+      )}
+      {resumeMsg && (
+        <div className={`mt-1 text-[11px] ${resumeMsg.ok ? "text-pe" : "text-ce"}`}>{resumeMsg.text}</div>
       )}
       <div className="mt-3">
         <LiveDecisionTrace zone={status.active_zone ?? ""} />

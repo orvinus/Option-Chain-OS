@@ -645,11 +645,48 @@ def test_consecutive_losses_pause_and_manual_resume():
     run(orch, MONDAY)
     assert orch.paused_reason and "consecutive losses" in orch.paused_reason
     assert any("auto-paused" in n for n in fake.notifications)
-    orch.resume()
+    ck = asyncio.run(orch.resume(datetime(2026, 8, 17, 9, 30, 30)))
     assert orch.paused_reason == ""
-    # Same ledger state still re-pauses (restart-safe recomputation).
+    assert ck["closed_count"] == 3 and ck["realized"] == -1500.0
+    # 2026-09-25: the SAME ledger no longer re-pauses — the old code recounted
+    # the streak from the whole day and undid the Resume within a minute.
     run(orch, datetime(2026, 8, 17, 9, 31))
-    assert orch.paused_reason != ""
+    assert orch.paused_reason == ""
+    # Three NEW losses after the Resume pause it again.
+    fake.closed += [("Z1", -100.0), ("Z1", -100.0), ("Z1", -100.0)]
+    run(orch, datetime(2026, 8, 17, 9, 32))
+    assert "3 consecutive losses" in orch.paused_reason
+
+
+def test_resume_lifts_the_daily_max_loss_kill_and_rearms_it():
+    fake = Fake()
+    fake.closed = [("Z1", -3200.0)]   # cap: 20% of 15000 = 3000 → day killed
+    orch = ZoneOrchestrator(fake.deps())
+    run(orch, MONDAY)
+    assert any("max daily loss" in b for b in orch.status.gate_blocks)
+    asyncio.run(orch.resume(datetime(2026, 8, 17, 9, 30, 30)))
+    assert not any("max daily loss" in b for b in orch.status.gate_blocks), "cleared at once"
+    run(orch, datetime(2026, 8, 17, 9, 31))
+    assert not any("max daily loss" in b for b in orch.status.gate_blocks), "stays lifted"
+    # A FURTHER full max-loss after resuming kills the day again.
+    fake.closed += [("Z1", -3100.0)]
+    run(orch, datetime(2026, 8, 17, 9, 32))
+    assert any("max daily loss" in b for b in orch.status.gate_blocks)
+
+
+def test_resume_checkpoint_survives_a_restart():
+    fake = Fake()
+    fake.closed = [("Z1", -500.0), ("Z1", -500.0), ("Z2", -500.0)]
+    saved = {"date": "2026-08-17", "ledger": "paper", "closed_count": 3, "realized": -1500.0}
+
+    async def load(day):
+        return saved if day.isoformat() == saved["date"] else None
+
+    deps = fake.deps()
+    deps.load_resume_checkpoint = load
+    fresh = ZoneOrchestrator(deps)            # a rebuilt orchestrator after restart
+    run(fresh, MONDAY)
+    assert fresh.paused_reason == "", "the persisted Resume still holds"
 
 
 # ── cadence ───────────────────────────────────────────────────────────────

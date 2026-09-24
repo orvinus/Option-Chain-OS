@@ -280,6 +280,13 @@ class UmpEntryModel(BaseModel):
     enable_retest: bool = True
     show_sl_lines: bool = True
     show_trail_labels: bool = True
+    # Trail ladder inside the ENTRY candle (user rule 2026-09-25). OFF = Pine /
+    # TradingView: during the entry candle only its CLOSE counts, so a wick to
+    # Q3 after the entry leaves the trail on Q1. ON = the highs of every minute
+    # AFTER the entry minute count too (the entry minute's own high still does
+    # not — part of it may precede the entry). Default OFF so saved configs and
+    # frozen backtests keep TradingView behaviour.
+    trail_counts_entry_candle_high: bool = False
     max_sl_pct: float = 10.0
     trigger_timeout_bars: int = 6
     # Trade-entry candle timeframe (2026-09-09). The key-level ladder
@@ -374,6 +381,13 @@ class ZoneConfig(BaseModel):
     # a hunt to survive several 5-minute candles; this knob makes that
     # dynamic testable without abandoning the unanimity rule for entries.
     direction_hold_min: int = Field(default=0, ge=0, le=375)
+    # Fresh OI-integrated entry calculation (user rule 2026-09-25). ON: every
+    # OI signal / direction change starts a fresh UMP entry calculation from
+    # that minute (levels keep running), in the chart, replay, backtest, paper
+    # and live alike. OFF: this zone calculates no automated entries (an open
+    # position is still managed to its exit); independent UMP entries stay
+    # visible on the chart. Default ON so existing configs keep trading.
+    oi_fresh_entries: bool = True
     enabled_indicators: list[IndicatorKey] = Field(
         default_factory=lambda: ["oi_change", "multi_tf", "ratio"]
     )

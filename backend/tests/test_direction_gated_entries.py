@@ -260,3 +260,68 @@ def _run_all() -> None:
 if __name__ == "__main__":
     _run_all()
     print("\nall direction-gated entry tests passed")
+
+
+# ── fresh OI-integrated entry cycle (2026-09-25) ───────────────────────────
+# The signal arrives MID-candle: the 09:30-09:34 candle already holds an R1
+# wick through the Base in its pre-signal minutes (09:30-09:31).
+MID = FLAT + [
+    bar("09:25", 102.0, 102.2, 101.8, 102.0),
+    bar("09:26", 102.0, 102.1, 101.6, 101.9),
+    bar("09:27", 101.9, 102.0, 101.4, 101.5),
+    bar("09:28", 101.5, 101.6, 101.2, 101.3),
+    bar("09:29", 101.3, 101.4, 101.1, 101.2),
+    bar("09:30", 101.0, 101.1, 100.9, 101.0),     # candle opens above Base (100)
+    bar("09:31", 101.0, 101.0, 99.8, 100.4),      # PRE-signal wick through the Base
+    bar("09:32", 100.6, 100.9, 100.5, 100.8),     # first armed minute: no wick
+    bar("09:33", 100.8, 100.9, 99.9, 100.5),      # NEW post-signal R1 wick
+    bar("09:34", 100.5, 100.7, 100.4, 100.6),
+]
+
+
+def test_pre_signal_minutes_of_the_straddling_candle_cannot_fire_an_entry() -> None:
+    world = TapeWorld(MID)
+    orch, entered = run_day(world, direction_from="09:32", until="09:34")
+    assert entered == {"#1": "09:34 R1"}, entered
+    assert orch.position.engine.trades[-1].entry_ts.startswith("2026-08-17T09:33"),         "only the post-signal wick (09:33) may trigger"
+
+
+def test_without_the_fresh_cycle_the_pre_signal_wick_would_have_fired() -> None:
+    """Proves the scenario exercises the leak: with the fresh view disabled the
+    SAME tape enters one minute earlier, on the pre-signal wick."""
+    world = TapeWorld(MID)
+    orig = UmpEngine.start_entry_cycle
+    UmpEngine.start_entry_cycle = lambda self: None
+    try:
+        _, entered = run_day(world, direction_from="09:32", until="09:34")
+    finally:
+        UmpEngine.start_entry_cycle = orig
+    assert entered == {"#1": "09:33 R1"}, entered
+
+
+def test_switch_off_calculates_no_entries_at_all() -> None:
+    world = TapeWorld(MID)
+    world.config.days["monday"].zones["Z1"].oi_fresh_entries = False
+    orch, entered = run_day(world, direction_from="09:32", until="09:34")
+    assert entered == {} and world.engines_built == 0
+    assert any("fresh OI-integrated entry calculation OFF" in b for b in orch.status.gate_blocks)
+
+
+def test_every_direction_change_starts_a_fresh_cycle() -> None:
+    world = TapeWorld(FLAT + [bar(f"09:{m:02d}", 105.0, 105.2, 104.8, 105.0) for m in range(25, 40)])
+    orch = ZoneOrchestrator(world.deps())
+    cycles = []
+    orig = UmpEngine.start_entry_cycle
+
+    def spy(self):
+        cycles.append(world.now.strftime("%H:%M"))
+        orig(self)
+
+    UmpEngine.start_entry_cycle = spy
+    try:
+        for hm, rd in (("09:30", "CALL"), ("09:31", "CALL"), ("09:32", "PUT"),
+                       ("09:33", "PUT"), ("09:34", "CALL")):
+            world.step(orch, hm, rd)
+    finally:
+        UmpEngine.start_entry_cycle = orig
+    assert cycles == ["09:30", "09:32", "09:34"], cycles    # CALL, PUT, CALL — each fresh

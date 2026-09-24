@@ -203,6 +203,16 @@ class UmpEngine:
         # ── 5m aggregation ──
         self._cur_start: Optional[datetime] = None
         self._cur: Optional[list[float]] = None      # [o, h, l, c] running
+        # Fresh OI-integrated entry cycle (2026-09-25): when a hunt is armed
+        # mid-candle, THAT candle is read only from the first armed minute on
+        # — its pre-signal minutes can never trigger, test or retest.
+        self._cycle_pending = False
+        self._fresh: Optional[list[float]] = None
+        self._fresh_candle: Optional[datetime] = None
+        # Entry-candle trail option: the minute the entry fired and the high of
+        # the minute being processed (process_minute stores it before _tick).
+        self._entry_minute: Optional[datetime] = None
+        self._minute_h: Optional[float] = None
         self._bar_index = -1                          # 5m candle index
         self._em5_time: Optional[datetime] = None     # forming candle START
         # Confirmed-close bookkeeping (Pine L131-134): the previous CONFIRMED
@@ -312,6 +322,26 @@ class UmpEngine:
             return
         self._exit_fired = True
         self._exit_time = candle_start
+
+    def start_entry_cycle(self) -> None:
+        """Start a FRESH entry calculation at the OI signal (user rule
+        2026-09-25): levels and higher-timeframe feeds keep running, but every
+        entry latch is cleared and the candle in progress is re-read from the
+        next minute onward, so nothing that happened before the signal can
+        influence this cycle's entry. Called by the orchestrator for every
+        hunt it builds — i.e. at each new OI signal / direction change."""
+        if self.in_trade:
+            return
+        self.trig = False
+        self._trig_scen = 0
+        self._trig_zone = None
+        self._trig_time = None
+        self._retest_fired = False
+        self._retest_lock_time = None
+        self.post_high = None
+        self._cycle_pending = True
+        self._fresh = None
+        self._fresh_candle = None
 
     def reset_direction_state(self) -> None:
         """§5.3: when the filter layer's direction flips while the engine is
@@ -605,8 +635,20 @@ class UmpEngine:
             self._cur[1] = max(self._cur[1], h)
             self._cur[2] = min(self._cur[2], l)
             self._cur[3] = c
+        # Fresh entry cycle: the first armed minute opens a post-signal view
+        # of the candle it falls in; later minutes of that SAME candle extend
+        # it. A new candle simply reads its own full OHLC again.
+        if self._cycle_pending:
+            self._cycle_pending = False
+            self._fresh_candle = window_start
+            self._fresh = [o, h, l, c]
+        elif self._fresh is not None and self._fresh_candle == window_start:
+            self._fresh[1] = max(self._fresh[1], h)
+            self._fresh[2] = min(self._fresh[2], l)
+            self._fresh[3] = c
         self._em5_time = self._cur_start
         self._last_min_ts = ts
+        self._minute_h = h
 
         if ts.minute % tf == tf - 1:
             # The window's final minute closes the candle on this very tick.
@@ -624,7 +666,15 @@ class UmpEngine:
 
     def _tick(self, ts: datetime, new5m: bool) -> None:
         assert self._cur is not None and self._em5_time is not None
-        live_o, live_h, live_l, live_c = self._cur
+        # Inside the candle that straddles the OI signal, every rule reads the
+        # post-signal part only (see start_entry_cycle). Its close is the same
+        # as the full candle's, so levels and confirmed-close logic agree.
+        view = (
+            self._fresh
+            if self._fresh is not None and self._fresh_candle == self._em5_time
+            else self._cur
+        )
+        live_o, live_h, live_l, live_c = view
         em5_time = self._em5_time
         ts_iso = ts.isoformat()
 
@@ -754,7 +804,20 @@ class UmpEngine:
         # close (rollback re-seeds it every tick); afterwards it ratchets on
         # running highs.
         if self._entry_candle == em5_time:
-            self.post_high = live_c
+            if (
+                self.p.entry.trail_counts_entry_candle_high
+                and self._entry_minute is not None
+                and self._last_min_ts is not None
+                and self._last_min_ts > self._entry_minute
+                and self._minute_h is not None
+            ):
+                # User rule (2026-09-25): a LATER minute of the entry candle
+                # counts its own high — the price really traded there after
+                # the entry. Running max from the entry minute's close.
+                base = self.post_high if self.post_high is not None else live_c
+                self.post_high = max(base, self._minute_h, live_c)
+            else:
+                self.post_high = live_c
         elif self.post_high is None:
             self.post_high = live_c
         else:
@@ -914,6 +977,7 @@ class UmpEngine:
         self.sub = sub
         self.post_high = None
         self._entry_candle = self._em5_time
+        self._entry_minute = self._last_min_ts
         self._trail_seed_candle = None
         self._sb_seed_candle = None
         if retest:

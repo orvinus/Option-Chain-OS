@@ -119,6 +119,34 @@ async def last_event_date(event_type: str):
     return ts.astimezone(IST).date() if ts is not None else None
 
 
+_LATEST_EVENT_SQL = text(
+    """
+    SELECT detail
+    FROM algo_audit_log
+    WHERE event_type = :event_type AND ts >= CAST(:since AS TIMESTAMPTZ)
+    ORDER BY ts DESC, id DESC
+    LIMIT 1
+    """
+)
+
+
+async def latest_event_detail(event_type: str, since: str) -> Optional[dict[str, Any]]:
+    """``detail`` of the newest ``event_type`` row at/after ``since`` (ISO),
+    or None. Used to restore the manual-Resume checkpoint after a restart."""
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(_LATEST_EVENT_SQL, {"event_type": event_type, "since": since})
+        ).first()
+    if row is None or row[0] is None:
+        return None
+    d = row[0]
+    if isinstance(d, str):
+        import json
+
+        d = json.loads(d)
+    return d if isinstance(d, dict) else None
+
+
 async def fetch_audit(
     *, username: str = "", since: Optional[str] = None, until: Optional[str] = None,
     limit: int = 200, before_ts: Optional[str] = None, before_id: Optional[int] = None,
